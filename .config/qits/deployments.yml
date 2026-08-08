@@ -1,16 +1,20 @@
 # How qits-platform-deployments deploys this repo. It reads this file from the git host at the built
 # sha, so the answer travels with the commit rather than living in the deployer's database.
 #
-# ENVIRONMENT-tiered, so the deploy branch is the tier convention `environment/<name>` — for the
-# prod tier, `environment/prod`. `main` stays the integration trunk and ships nothing.
+# PLATFORM service. There is one host port to bind, so there is one edge, and it fronts EVERY
+# environment's gateway — it belongs to no tier and cannot be one tier's copy.
 #
-# THE ONE THING TO CHECK BEFORE THIS RUNS BEYOND ONE TIER. This process reaches
-# `<env>-qits-gateway` for EVERY environment in `qits.edge.environments`, and an environment service
-# joins its own tier's networks. A single-environment platform is unaffected; the day a second
-# environment is added, either this becomes `deployment_target: platform` (which joins every
-# environment's per-application networks unconditionally) with an explicit `branch:`, or the edge
-# has to be joined to the other tiers by hand. Stated here rather than discovered as a 502.
-deployment_target: environment
+# THE TARGET IS WHAT MAKES THE ROUTING WORK, not just where the container lands. A platform service
+# joins every environment's per-application networks, so `<env>-qits-gateway` resolves for every
+# name in `qits.edge.environments` — which is the whole list this process forwards to. An
+# environment service joins only its own tier's networks, so the previous spec's edge reached the
+# gateways of one tier and would have answered 502 for the second one until someone joined the
+# container by hand. That caveat is settled here rather than restated: nothing is joined by hand.
+#
+# It still deploys from prod's branch. `deploy_branches` is what the release flow promotes onto, and
+# a platform build deploys once an environment listening to that branch exists.
+deployment_target: platform
+deploy_branches: environment/prod
 
 # The default would be /platform-edge/q/health/ready, derived from the name with the qits- prefix
 # dropped. The edge owns the root path space and has no segment, so that path would be proxied to an

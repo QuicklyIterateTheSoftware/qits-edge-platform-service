@@ -48,11 +48,16 @@
         </dependencies>
     </dependencyManagement>
 
-    <!-- FOUR EXTENSIONS, AND THAT IS THE POINT OF THIS SERVICE. Every dependency here is native
-         image size, build time and reflection surface, and this process is the one thing that has
-         to be up before anything on the platform is reachable. There is no REST layer, no
-         datasource, no ORM, no client and no telemetry exporter: the edge reads an environment
-         list from configuration and streams bytes. -->
+    <!-- FIVE EXTENSIONS, AND THE SHORTNESS OF THE LIST IS THE POINT OF THIS SERVICE. Every
+         dependency here is native image size, build time and reflection surface, and this process
+         is the one thing that has to be up before anything on the platform is reachable. There is
+         no REST layer, no datasource, no ORM and no client: the edge reads an environment list from
+         configuration and streams bytes.
+
+         The fifth is the telemetry exporter, and it is the one addition that earns its size. The
+         edge is the outermost hop, so it is the only place that sees a request the environment
+         gateway never received — a 502 against an unreachable gateway, a host name that fell to the
+         default. Without it the platform's first hop is the one hop with no trace. -->
     <dependencies>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -76,6 +81,13 @@
             <!-- /q/health/{live,ready}, answered by this process and never proxied. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-health</artifactId>
+        </dependency>
+        <dependency>
+            <!-- OTLP export to qits-observability. The extension is what instruments the process;
+                 the endpoint and protocol in application.properties are what make it arrive, since
+                 the defaults are gRPC to localhost:4317 and the receiver speaks HTTP/protobuf. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-opentelemetry</artifactId>
         </dependency>
 
         <dependency>

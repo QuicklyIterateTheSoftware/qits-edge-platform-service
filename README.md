@@ -100,6 +100,7 @@ a file.
 | `qits.edge.upstream-host-pattern` | `QITS_EDGE_UPSTREAM_HOST_PATTERN` | `{env}-qits-gateway` | `{env}` is the only placeholder |
 | `qits.edge.upstream-port` | `QITS_EDGE_UPSTREAM_PORT` | `8080` | The port every environment gateway listens on |
 | `qits.edge.upstream-hosts.<env>` | `QITS_EDGE_UPSTREAM_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
+| `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
 
 Two things fail **at startup** rather than per request, deliberately: an environment name that could
 not be a DNS label, and a default that is not in the list. Both would otherwise be a 502 or a
@@ -112,6 +113,18 @@ address is written, and a stale one sends a whole tier's traffic to the wrong pr
 that a `@ConfigMapping` map key cannot be **unset** by a later config source, only overridden, which
 is why none is shipped in `application.properties`.
 
+### Telemetry
+
+Traces, logs and metrics leave over OTLP `http/protobuf` to qits-observability, the same block every
+qits service carries. One key names the receiver — `qits.observability.url`, host and port with no
+path — and the ingest path is derived from it, because that path belongs to the receiver rather than
+to the deployment. `OtelLogConfigTest` pins the endpoint and the four log keys so a changed Quarkus
+default cannot switch log export off with a green build.
+
+The SDK is **disabled under `%dev` and `%test`**: a clone-alone `./mvnw verify` has no receiver to
+reach, and an exporter retrying against an unresolvable name turns the suite into a wall of export
+failures. Telemetry is real in a deployment.
+
 ### Deployment
 
 The deployer must publish the port — this is the one container on the host reached from outside
@@ -121,12 +134,12 @@ docker:
 -p 8080:8080
 ```
 
-`.config/qits/deployments.yml` makes this an **environment-tiered** service, so it deploys from
-`environment/<tier>`. One caveat is written down there and repeated here because it is the thing
-that will bite: the edge reaches `<env>-qits-gateway` for *every* environment in its list, while an
-environment service joins its own tier's networks. A single-environment platform is unaffected; a
-second environment needs either `deployment_target: platform` with an explicit `branch:`, or the
-edge joined to the other tiers by hand.
+`.config/qits/deployments.yml` makes this a **platform** service, deploying from `environment/prod`.
+One edge exists because there is one host port to bind, and it fronts every environment's gateway,
+so it belongs to no tier. The target is also what makes the routing work: a platform service joins
+every environment's per-application networks, so `<env>-qits-gateway` resolves for every name in
+`qits.edge.environments`. An environment service would reach only its own tier's gateway and answer
+502 for the rest.
 
 ## Building
 
