@@ -1,0 +1,24 @@
+# Build outputs
+target/
+target-ide/
+
+# IDE
+.vscode/
+.idea/
+.project
+.classpath
+.factorypath
+.settings/
+*.iml
+
+# OS
+.DS_Store
+
+# Home-relative caches a tool leaks into the repo root when run with the repo as its cwd
+.cache/
+.m2/
+.local/
+
+# Per-machine addresses (the dev-mode upstream). Never tracked: no repository states a
+# deployment's addresses.
+.env

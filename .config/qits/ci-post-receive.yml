@@ -1,0 +1,26 @@
+# The pipeline qits-ci runs on every push to a tracked branch of this repository.
+#
+# ONE STEP, and that is the whole shape. Unlike qits-gateway's, this pipeline has no client half:
+# this service serves no page, so there is nothing to install from the platform's npm registry and
+# nothing to prepare in the build context. The Dockerfile's builder stage does everything.
+#
+# Publish under the tag that is the whole contract with qits-platform-deployments —
+# <registry>/<repository>/<this repo's name>:<sha>. The step's own container only drives the docker
+# CLI; the build and the push happen in the host's daemon through the socket this step declares
+# (docker: true).
+#
+# `set -eu` is load-bearing rather than tidy: the daemon runs this with `bash -c` and no -e, so
+# without it a failed build is swallowed by the next command's exit code — the push fails,
+# `docker rmi || true` answers 0, and the run reports SUCCESS. The deployer is then told an image
+# exists that does not, which is the exact shape of the qits-workspaces IMAGE_MISSING incident. -u
+# makes an unset registry variable stop the step too.
+steps:
+  - image: qits/build-images/ci-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      set -eu
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-edge:$QITS_CI_SHA"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      docker rmi "$ref" || true

@@ -1,0 +1,24 @@
+# Build context trim for `docker build -f docker/Dockerfile .` (root context, whole tree).
+#
+# docker/Dockerfile deliberately does `COPY . .` rather than naming pom.xml and src/: a file list
+# has to be edited every time the repo gains top-level content the build needs, and forgetting is
+# silent. This file is what makes that affordable — it drops everything the build does not read, so
+# adding a top-level entry stays free and no stale output leaks in.
+.git
+.gitignore
+
+# Maven / Quarkus build output — regenerated inside the build stage, and a stale target/ here would
+# risk shadowing what the stage compiles.
+target
+target-ide
+
+# Local env / IDE cruft
+.env
+.idea
+.vscode
+.sdkmanrc
+
+# Docs and the docker/ dir itself: nothing in the build reads them, and keeping them out means
+# editing this Dockerfile or the README does not bust the `COPY . .` layer.
+*.md
+docker

@@ -1,0 +1,69 @@
+# The release pipeline: this repository reacts to its OWN release and pushes the image under the
+# released VERSION.
+#
+# THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT. `SCMRelease` says only
+# "source control has this version" — qits-workspaces publishes it the instant the release push is
+# accepted, and nothing in this file publishes it. So a repository listening for its own SCMRelease
+# is exactly the release pipeline the split-release design asks each repository to own: the SCM half
+# fires, this half builds the tagged commit and pushes it, and qits-ci turns the green run into one
+# `SoftwareRelease` per entry under `artifacts:` below. The event that could loop is
+# SoftwareRelease, and this file neither listens for it nor publishes it.
+#
+# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT. ci-post-receive.yml's
+# `:$QITS_CI_SHA` push is the whole contract with the deployer and is untouched; every deployment
+# still comes from a sha. What this adds is a name a human can say out loud, on the same content.
+#
+# `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything, so it
+# cannot see what the step below pushed; it announces `{repository, version, packageType,
+# packageName}` on the strength of these two lines. Keep them true.
+#
+# THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
+# registry is `qits-artifacts:8080` inside a step container and `localhost:8081` outside — and an OCI
+# reference cannot carry a path prefix. So the declaration carries `qits/<application>` and the
+# reader supplies its own host, exactly as the push below composes one from environment.
+#
+# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. Both pipelines publish the
+# same image content under two coordinates, so a fix to one build belongs in the other.
+#
+# THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease, and it lands first on purpose: the
+# bus is at-most-once with no catch-up and no replay, so a trigger file must be in place before the
+# event it selects exists. The other order loses a release and looks like a train that quietly did
+# not roll.
+event: SCMRelease
+when:
+  - repository: { exact: qits-platform-edge }
+artifacts:
+  - { type: docker, name: qits/qits-platform-edge }
+steps:
+    # node is here to read the event payload, which is JSON; the docker CLI to build and push.
+  - image: qits/build-images/node-docker-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # Without -e a failed docker build is swallowed and a green release run makes qits-ci announce
+      # an artifact that was never pushed. -u makes an unset registry variable stop the step.
+      set -eu
+
+      # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
+      # $QITS_EVENT_PAYLOAD; there is no per-field projection.
+      version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
+      # A version here is a calver or a semver, and nothing legitimate needs a character outside
+      # this set. Refused rather than quoted, because it reaches a shell and a docker reference.
+      case "$version" in
+        ''|*[!0-9A-Za-z._+-]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
+      esac
+      echo "releasing qits/qits-platform-edge:$version"
+
+      # THE TAG IS THE CHECKOUT TARGET, and it is the only reason this run needs one. An
+      # event-triggered run is cloned at the head of main, which is where the release commit is
+      # *now* — a later push moves that, and the tag does not, so a busy main cannot make this
+      # pipeline ship a different tree than the one that was released. The clone is shallow and
+      # carries no tags, hence the explicit refspec; the URL rather than `origin` because every
+      # address a step needs arrives as environment.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-edge:$version"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      docker rmi "$ref" || true
