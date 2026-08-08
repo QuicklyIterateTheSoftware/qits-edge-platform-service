@@ -18,9 +18,9 @@
 # packageName}` on the strength of these two lines. Keep them true.
 #
 # THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
-# registry is `qits-artifacts:8080` inside a step container and `localhost:8081` outside — and an OCI
-# reference cannot carry a path prefix. So the declaration carries `qits/<application>` and the
-# reader supplies its own host, exactly as the push below composes one from environment.
+# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` outside —
+# and an OCI reference cannot carry a path prefix. So the declaration carries `qits/<application>`
+# and the reader supplies its own host, exactly as the push below composes one from environment.
 #
 # THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. Both pipelines publish the
 # same image content under two coordinates, so a fix to one build belongs in the other.
