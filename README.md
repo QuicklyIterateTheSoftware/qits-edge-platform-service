@@ -60,7 +60,9 @@ the whole SSRF guard.
   rewriting. The environment gateway's routes are written against the paths clients type, and a
   prefix stripped here would break every one of them.
 - **No UI, no SPA, no landing page, no `/api`.** The only path this process answers is `/q`.
-- **No TLS.** A terminator in front of it is a deployment choice; see `X-Forwarded-Proto` below.
+- **No TLS of its own to configure.** The image carries a Let's Encrypt certificate *slot* and
+  nothing in it (see below). With no keystore from the deployment the edge speaks plain HTTP, and a
+  terminator in front of it stays a deployment choice; see `X-Forwarded-Proto` below.
 
 ## What it does do
 
@@ -125,6 +127,27 @@ The SDK is **disabled under `%dev` and `%test`**: a clone-alone `./mvnw verify` 
 reach, and an exporter retrying against an unresolvable name turns the suite into a wall of export
 failures. Telemetry is real in a deployment.
 
+### TLS: the Let's Encrypt certificate slot
+
+Four build-time keys, and **inert until a deployment supplies a keystore** — this repository supplies
+none, so nothing is requested and nothing renews. The edge is no ACME client:
+`quarkus.tls.lets-encrypt.enabled` adds an HTTP-01 challenge route,
+`/.well-known/acme-challenge/:token`, to the main listener and the challenge-management endpoints to
+the management interface. The host-side `quarkus tls lets-encrypt` CLI runs the protocol against
+them, writes the PEMs where the TLS registry reads them, and the registry hot-reloads.
+
+Two consequences are worth knowing before touching any of it:
+
+- **The challenge-management endpoint is unauthenticated**, which is the only reason the management
+  interface is on. On the main listener — the host's one published port — anyone on the internet
+  could complete their own ACME order for the platform's domain. Port 9000 is published to loopback,
+  or not at all.
+- **Enabling the management interface moves `/q/health` onto it by default**, and the bootstrap and
+  the deployer both poll `:8080/q/health/ready`. `quarkus.smallrye-health.management.enabled=false`
+  keeps health where they look. `LetsEncryptConfigTest` pins the four keys, proves the challenge
+  route beats the catch-all without reaching an upstream, and asserts health answers on the main port
+  and 404s on the management one.
+
 ### Deployment
 
 The deployer must publish the port — this is the one container on the host reached from outside
@@ -184,6 +207,9 @@ Two harness details worth knowing before they cost an afternoon:
   `argLine` in `pom.xml`.
 - `quarkus.http.test-port=0`. On the deployment host 8081 is the platform's own npm registry, so the
   Quarkus default fails with a bind error that reads like a flake.
+- The **management interface starts with the suite** now, on Quarkus' default management test port,
+  9001. It stays a fixed port because `@TestHTTPResource(management = true)` has to be able to name
+  it. A bind error there is a busy 9001, not a flake either.
 
 ## Relationship to qits-gateway
 
