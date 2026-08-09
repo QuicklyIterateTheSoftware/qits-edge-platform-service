@@ -1,5 +1,11 @@
-# How qits-platform-deployments deploys this repo. It reads this file from the git host at the built
-# sha, so the answer travels with the commit rather than living in the deployer's database.
+# How qits-platform-deployments deploys this repo. It reads this file from the git host at
+# the built sha, so the answer travels with the commit.
+#
+# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
+# decide whether this repository deploys — a library or an SPA carries none and its release is
+# the trunk push alone — and then promotes onto the branch it is configured with
+# (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
+# thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
 #
 # PLATFORM service. There is one host port to bind, so there is one edge, and it fronts EVERY
 # environment's gateway — it belongs to no tier and cannot be one tier's copy.
@@ -11,10 +17,10 @@
 # gateways of one tier and would have answered 502 for the second one until someone joined the
 # container by hand. That caveat is settled here rather than restated: nothing is joined by hand.
 #
-# It still deploys from prod's branch. `deploy_branches` is what the release flow promotes onto, and
-# a platform build deploys once an environment listening to that branch exists.
+# It deploys from the PLATFORM ENVIRONMENT's branch and no other tier's, which is a distinction
+# with teeth here: the edge fronts every tier, so a build on preprod's branch replacing the one
+# edge would put preprod's code in front of prod. `pd_environment.platform` is what prevents it.
 deployment_target: platform
-deploy_branches: environment/prod
 
 # The default would be /platform-edge/q/health/ready, derived from the name with the qits- prefix
 # dropped. The edge owns the root path space and has no segment, so that path would be proxied to an
