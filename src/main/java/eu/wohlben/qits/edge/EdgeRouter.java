@@ -74,23 +74,38 @@ public class EdgeRouter {
 
   private HttpClient client;
 
+  /**
+   * The proxy client's options, built here rather than inline so the values below can be asserted
+   * without booting the application — see {@code EdgeProxyClientOptionsTest}.
+   *
+   * <p>The two timeouts point in opposite directions on purpose, and both are load-bearing.
+   */
+  static HttpClientOptions proxyClientOptions(int connectTimeoutMs) {
+    return new HttpClientOptions()
+        .setKeepAlive(true)
+        // Vert.x pools per origin and defaults to FIVE connections behind an unbounded wait
+        // queue. Every request for an environment shares one origin here, so the default
+        // would make a single `docker push` — up to five concurrent layer uploads, each
+        // holding its connection for minutes — starve that whole environment with nothing
+        // logged to say why. The same number, for the same reason, as qits-gateway's.
+        .setMaxPoolSize(64)
+        // Stated rather than inherited. Zero, no client-side idle timeout, is already the
+        // default and has to stay: quarkus.http.idle-timeout keeps the inbound half of a
+        // long exchange alive, and a timeout here would sever exactly what that exists for
+        // — a terminal socket, an SSE channel, a slow layer push.
+        .setIdleTimeout(0)
+        // The OTHER timeout, and not a contradiction of the line above: this one bounds only the
+        // wait for a TCP connection, before there is an exchange to keep alive. Vert.x defaults to
+        // 60s, and under swarm a gateway's name resolves to a virtual IP that exists before any
+        // task is healthy — so a connection to a starting gateway is dropped rather than refused,
+        // and every request to that environment hung for a full minute before the 502. See
+        // EdgeConfig.connectTimeoutMs.
+        .setConnectTimeout(connectTimeoutMs);
+  }
+
   void init(@Observes Router router) {
     hostEnvironments = HostEnvironments.of(config.environments(), config.defaultEnvironment());
-    client =
-        vertx.createHttpClient(
-            new HttpClientOptions()
-                .setKeepAlive(true)
-                // Vert.x pools per origin and defaults to FIVE connections behind an unbounded wait
-                // queue. Every request for an environment shares one origin here, so the default
-                // would make a single `docker push` — up to five concurrent layer uploads, each
-                // holding its connection for minutes — starve that whole environment with nothing
-                // logged to say why. The same number, for the same reason, as qits-gateway's.
-                .setMaxPoolSize(64)
-                // Stated rather than inherited. Zero, no client-side idle timeout, is already the
-                // default and has to stay: quarkus.http.idle-timeout keeps the inbound half of a
-                // long exchange alive, and a timeout here would sever exactly what that exists for
-                // — a terminal socket, an SSE channel, a slow layer push.
-                .setIdleTimeout(0));
+    client = vertx.createHttpClient(proxyClientOptions(config.connectTimeoutMs()));
 
     for (String environment : hostEnvironments.environments()) {
       Upstream upstream = resolve(environment);
