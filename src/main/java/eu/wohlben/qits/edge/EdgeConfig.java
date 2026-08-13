@@ -64,6 +64,22 @@ public interface EdgeConfig {
   int upstreamPort();
 
   /**
+   * How long the proxy waits for a TCP connection to an environment gateway, in milliseconds.
+   *
+   * <p>Vert.x defaults to 60 000, which was harmless while a gateway name either resolved to a live
+   * container or refused the connection at once. Under swarm it is not: a service name resolves to
+   * a virtual IP that exists before any task is healthy, so a connection to a gateway that is still
+   * starting is not refused — it is dropped, and the request hangs for the whole timeout before the
+   * edge answers 502. Five seconds keeps the outermost hop's failure fast, which is what a browser
+   * (and whatever fronts this) can act on.
+   *
+   * <p>This is the CONNECT phase only. It has nothing to do with the idle timeout, which is 0 for
+   * terminal sockets, SSE channels and slow layer pushes — see {@code EdgeRouter}.
+   */
+  @WithDefault("5000")
+  int connectTimeoutMs();
+
+  /**
    * Per-environment upstream overrides, {@code qits.edge.upstream-hosts.<env> = host} or {@code
    * host:port} — the same {@code host[:port]} shape qits-gateway's {@code proxy-hosts} takes.
    *
