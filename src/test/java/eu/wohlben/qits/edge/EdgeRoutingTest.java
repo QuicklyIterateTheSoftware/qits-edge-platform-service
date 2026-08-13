@@ -10,12 +10,19 @@ import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.vertx.core.http.HttpMethod;
+import io.vertx.core.json.JsonObject;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.List;
 import java.util.Map;
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * The edge end to end, against two real stub gateways on ephemeral loopback ports.
+ * The edge end to end, against real stub upstreams on ephemeral loopback ports: two environment
+ * gateways, two environments' {@code registry} application, and a stand-in idp.
  *
  * <p><b>Why one class rather than four.</b> A WebSocket upgrade through {@code vertx-http-proxy}
  * only survives the FIRST Quarkus start in a JVM — after a restart it silently degrades to a plain
@@ -60,8 +67,24 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void anApplicationSubdomainReachesItsEnvironmentsGateway() {
-    assertEquals("dev", client().get("home.dev.example.com", "/anything").line("upstream"));
+  void anApplicationSubdomainReachesThatEnvironmentsApplication() {
+    // The WP1 decision in one line: the app label picks the upstream, the env label picks whose.
+    assertEquals(
+        "registry-dev", client().get("registry.dev.example.com", "/v2/", token()).line("upstream"));
+    assertEquals(
+        "registry-prod",
+        client().get("registry.prod.example.com", "/v2/", token()).line("upstream"));
+  }
+
+  @Test
+  void anUnconfiguredApplicationLabelIsRefusedRatherThanSentToTheGateway() {
+    // NOT a fall-through. The name was aimed at a service, and the gateway is the hop that does not
+    // authenticate these — a mistyped registry vhost reaching it would be an open door with a typo
+    // for a key.
+    EdgeClient.Answer answer = client().get("registy.dev.example.com", "/v2/");
+    assertEquals(404, answer.status());
+    assertTrue(answer.body().contains("registy"), answer.body());
+    assertNull(answer.line("upstream"), "it must not have reached any upstream");
   }
 
   @Test
@@ -130,9 +153,9 @@ class EdgeRoutingTest {
     // Load-bearing: every redirect, cookie domain and absolute URL the environment gateway builds
     // comes from this header. Rewriting it to the upstream's own name would break all three at once
     // and leave nothing in a log to say so.
-    String seen = client().get("home.dev.example.com", "/thing").upstreamHeader("Host");
+    String seen = client().get("dev.example.com", "/thing").upstreamHeader("Host");
     assertTrue(
-        seen != null && seen.startsWith("home.dev.example.com"),
+        seen != null && seen.startsWith("dev.example.com"),
         "the upstream must see the name the client asked for, but saw: " + seen);
   }
 
@@ -145,10 +168,10 @@ class EdgeRoutingTest {
 
   @Test
   void theEdgeDescribesTheOriginalClient() {
-    EdgeClient.Answer answer = client().get("home.dev.example.com", "/thing");
+    EdgeClient.Answer answer = client().get("dev.example.com", "/thing");
     assertEquals("127.0.0.1", answer.upstreamHeader("X-Forwarded-For"));
     assertEquals("http", answer.upstreamHeader("X-Forwarded-Proto"));
-    assertTrue(answer.upstreamHeader("X-Forwarded-Host").startsWith("home.dev.example.com"));
+    assertTrue(answer.upstreamHeader("X-Forwarded-Host").startsWith("dev.example.com"));
   }
 
   @Test
@@ -206,11 +229,10 @@ class EdgeRoutingTest {
   void aWebSocketUpgradeCarriesTheForwardedHeaders() {
     // The upgrade never reaches the interceptor chain — vertx-http-proxy short-circuits before
     // installing it — so this is a second code path with its own way of losing the headers.
-    String seen = client().handshake("home.dev.example.com", "/terminal", Map.of());
+    String seen = client().handshake("dev.example.com", "/terminal", Map.of());
     assertTrue(seen.lines().anyMatch("x-forwarded-for=127.0.0.1"::equals), seen);
     assertTrue(seen.lines().anyMatch("x-forwarded-proto=http"::equals), seen);
-    assertTrue(
-        seen.lines().anyMatch(l -> l.startsWith("x-forwarded-host=home.dev.example.com")), seen);
+    assertTrue(seen.lines().anyMatch(l -> l.startsWith("x-forwarded-host=dev.example.com")), seen);
   }
 
   @Test
@@ -260,5 +282,166 @@ class EdgeRoutingTest {
     // an unconfigured environment shows up as a 502 rather than as a page.
     assertNotNull(client().get("dev.example.com", "/").line("upstream"));
     assertNull(client().get("dev.example.com", "/").line("body-bytes-not-a-key"));
+  }
+
+  // --- idp auth, terminated here ---------------------------------------------------------------
+
+  @Test
+  void anApplicationVhostRefusesAnAnonymousCallerWithTheDockerChallenge() {
+    // The exact string docker parses to find its token endpoint. Getting it wrong fails the pull
+    // with no message anywhere, which is why it is asserted whole rather than by substring.
+    EdgeClient.Answer answer = client().get("registry.dev.example.com", "/v2/");
+    assertEquals(401, answer.status());
+    assertEquals(
+        "Bearer realm=\"http://registry.dev.example.com/token\",service=\"registry.dev.example.com\"",
+        answer.headers().get("www-authenticate"));
+    assertTrue(answer.body().contains("UNAUTHORIZED"), answer.body());
+    assertNull(answer.line("upstream"), "an anonymous request must not reach the application");
+  }
+
+  @Test
+  void anApplicationVhostRefusesATokenSignedBySomebodyElse() {
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                bearer(
+                    TestTokens.mint(
+                        TestTokens.IMPOSTOR,
+                        TestTokens.KID,
+                        "RS256",
+                        TestTokens.claims(
+                            issuer(),
+                            List.of(StubGateways.AUDIENCE),
+                            Instant.now().plusSeconds(300)))));
+    assertEquals(401, answer.status());
+    // `error` is what tells docker the credential it holds is dead, so it re-fetches rather than
+    // giving up. It is absent from the anonymous challenge above, on purpose.
+    assertTrue(
+        answer.headers().get("www-authenticate").contains("error=\"invalid_token\""),
+        answer.headers().get("www-authenticate"));
+    assertNull(answer.line("upstream"));
+  }
+
+  @Test
+  void anApplicationVhostRefusesAnExpiredTokenAndOneForAnotherAudience() {
+    assertEquals(
+        401,
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                bearer(
+                    TestTokens.mint(
+                        TestTokens.IDP,
+                        TestTokens.KID,
+                        "RS256",
+                        TestTokens.claims(
+                            issuer(),
+                            List.of(StubGateways.AUDIENCE),
+                            Instant.now().minusSeconds(3600)))))
+            .status());
+    assertEquals(
+        401,
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                bearer(
+                    TestTokens.mint(
+                        TestTokens.IDP,
+                        TestTokens.KID,
+                        "RS256",
+                        TestTokens.claims(
+                            issuer(), List.of("somebody-else"), Instant.now().plusSeconds(300)))))
+            .status());
+  }
+
+  @Test
+  void theEnvironmentVhostIsStillOpen() {
+    // The rollout switch: qits.edge.auth.enforce-on-environments is off, so the platform's whole
+    // existing traffic keeps authenticating one hop further in. Flipping it is a step of its own.
+    assertEquals("dev", client().get("dev.example.com", "/anything").line("upstream"));
+  }
+
+  // --- the docker token endpoint ----------------------------------------------------------------
+
+  @Test
+  void theTokenEndpointAsksForTheStoredLoginCredential() {
+    EdgeClient.Answer answer = client().get("registry.dev.example.com", "/token?service=x&scope=y");
+    assertEquals(401, answer.status());
+    assertTrue(
+        answer.headers().get("www-authenticate").startsWith("Basic realm="),
+        // Basic, not Bearer: this is the endpoint that sells bearer tokens.
+        answer.headers().get("www-authenticate"));
+  }
+
+  @Test
+  void theTokenEndpointBrokersAGrantAndHandsBackADockerStyleToken() {
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/token?service=registry.dev.example.com&scope=repository:qits/x:pull",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals(200, answer.status());
+    JsonObject issued = new JsonObject(answer.body());
+    assertNotNull(issued.getString("token"));
+    assertEquals(issued.getString("token"), issued.getString("access_token"));
+    assertEquals(300, issued.getInteger("expires_in"));
+  }
+
+  @Test
+  void theTokenEndpointRefusesCredentialsIdpDoesNotKnow() {
+    assertEquals(
+        401,
+        client().get("registry.dev.example.com", "/token", basic("nobody", "nothing")).status());
+  }
+
+  @Test
+  void theWholeDockerFlowRoundTrips() {
+    // Challenge, token, retry — the three hops a `docker pull` makes, in order, with no shortcut.
+    EdgeClient.Answer challenged = client().get("registry.dev.example.com", "/v2/");
+    assertEquals(401, challenged.status());
+    String realm = challenged.headers().get("www-authenticate").split("realm=\"")[1].split("\"")[0];
+    assertTrue(realm.endsWith("/token"), realm);
+
+    String issued =
+        new JsonObject(
+                client()
+                    .get(
+                        "registry.dev.example.com",
+                        "/token?service=registry.dev.example.com",
+                        basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET))
+                    .body())
+            .getString("token");
+
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", bearer(issued)).line("upstream"));
+  }
+
+  // --- helpers -----------------------------------------------------------------------------------
+
+  /** The issuer the stub idp uses, which is what {@code qits.idp.url} was set to. */
+  private static String issuer() {
+    return ConfigProvider.getConfig().getValue("qits.idp.url", String.class);
+  }
+
+  private static Map<String, String> token() {
+    return bearer(TestTokens.valid(issuer(), List.of(StubGateways.AUDIENCE)));
+  }
+
+  private static Map<String, String> bearer(String jwt) {
+    return Map.of("Authorization", "Bearer " + jwt);
+  }
+
+  private static Map<String, String> basic(String id, String secret) {
+    return Map.of(
+        "Authorization",
+        "Basic "
+            + Base64.getEncoder()
+                .encodeToString((id + ":" + secret).getBytes(StandardCharsets.UTF_8)));
   }
 }

@@ -11,21 +11,36 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Two throwaway environment gateways, one per configured environment, each on an ephemeral loopback
- * port. No docker, no fixture and no fixed port — the whole suite runs from a clone of this
- * repository alone.
+ * Everything behind the edge, stubbed: two environment gateways, the same two environments' {@code
+ * registry} application, and a stand-in qits-platform-idp. Each on an ephemeral loopback port. No
+ * docker, no fixture and no fixed port — the whole suite runs from a clone of this repository
+ * alone.
  *
- * <p>They are <b>two</b> rather than one so that "the edge chose the right environment" is
+ * <p>The gateways are <b>two</b> rather than one so that "the edge chose the right environment" is
  * observable from the outside: each server names itself in every answer, so a test asserts which
- * process received the request rather than only that something did. Their addresses reach the route
- * table as {@code qits.edge.upstream-hosts.<env>} overrides, which is the config path that exists
- * for exactly this and for a developer's local gateway.
+ * process received the request rather than only that something did. The application upstreams are
+ * two for the same reason — an app name has to reach ITS environment's copy. Their addresses reach
+ * the route table as {@code qits.edge.upstream-hosts.<env>} and {@code
+ * qits.edge.apps.registry.hosts.<env>} overrides, the config paths that exist for exactly this.
  *
  * <p>Vert.x rather than a JDK {@code HttpServer}, because one server has to answer three shapes an
  * edge must pass through unchanged: an ordinary request with a body, a chunked response written
  * over time, and a WebSocket upgrade. A JDK {@code HttpServer} cannot do the third at all.
+ *
+ * <p>The stub idp answers the two paths the edge derives from {@code qits.idp.url}: {@code
+ * /idp/jwks} publishes {@link TestTokens}' key, and {@code /idp/token} issues one for a single
+ * known client. It exists so the auth gate is exercised end to end — a real RS256 signature, a real
+ * key fetch, and a real broker hop — rather than against a validator that was told to say yes.
  */
 public class StubGateways implements QuarkusTestResourceLifecycleManager {
+
+  /** The one client id and secret the stub idp knows. */
+  static final String CLIENT_ID = "a-client";
+
+  static final String CLIENT_SECRET = "a-secret";
+
+  /** The audience the stub idp puts in every token, and the one the edge is configured to want. */
+  static final String AUDIENCE = "qits-platform-artifacts";
 
   /** How long {@code /stream} waits between its two chunks — long enough to time from a client. */
   static final long STREAM_GAP_MILLIS = 400;
@@ -45,8 +60,78 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.default-environment", "prod");
     for (String environment : List.of("prod", "dev")) {
       config.put("qits.edge.upstream-hosts." + environment, "127.0.0.1:" + listen(environment));
+      config.put(
+          "qits.edge.apps.registry.hosts." + environment,
+          "127.0.0.1:" + listen("registry-" + environment));
     }
+    // Required, and unreachable on purpose: every environment above overrides it, so a request that
+    // reached this address would be a resolution bug rather than a test that happened to pass.
+    config.put("qits.edge.apps.registry.host-pattern", "{env}-qits-artifacts");
+    config.put("qits.idp.url", "http://127.0.0.1:" + idp() + "/idp");
+    config.put("qits.edge.auth.audience", AUDIENCE);
     return config;
+  }
+
+  /**
+   * qits-platform-idp's two paths, as the edge derives them: the published keys and the {@code
+   * client_credentials} grant. Form parsing is deliberate rather than Vert.x-assisted — the point
+   * is to see the exact bytes the broker sends.
+   */
+  private int idp() {
+    HttpServer server =
+        vertx
+            .createHttpServer()
+            .requestHandler(
+                request -> {
+                  if (request.path().equals("/idp/jwks")) {
+                    request
+                        .response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(TestTokens.jwks().encode());
+                    return;
+                  }
+                  if (!request.path().equals("/idp/token")) {
+                    request.response().setStatusCode(404).end();
+                    return;
+                  }
+                  request
+                      .body()
+                      .onSuccess(
+                          body -> {
+                            String expected =
+                                "Basic "
+                                    + java.util.Base64.getEncoder()
+                                        .encodeToString(
+                                            (CLIENT_ID + ":" + CLIENT_SECRET)
+                                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            boolean grant =
+                                body.toString().contains("grant_type=client_credentials");
+                            if (!expected.equals(request.getHeader("Authorization")) || !grant) {
+                              request
+                                  .response()
+                                  .setStatusCode(401)
+                                  .putHeader("Content-Type", "application/json")
+                                  .end("{\"error\":\"invalid_client\"}");
+                              return;
+                            }
+                            request
+                                .response()
+                                .putHeader("Content-Type", "application/json")
+                                .end(
+                                    new io.vertx.core.json.JsonObject()
+                                        .put(
+                                            "access_token",
+                                            TestTokens.valid(
+                                                "http://127.0.0.1:"
+                                                    + servers.get("idp").actualPort()
+                                                    + "/idp",
+                                                List.of(AUDIENCE)))
+                                        .put("token_type", "Bearer")
+                                        .put("expires_in", 300)
+                                        .encode());
+                          });
+                });
+    return bind("idp", server);
   }
 
   private int listen(String environment) {
@@ -67,18 +152,22 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
                   }
                   socket.writeTextMessage(seen.toString());
                 });
+    return bind(environment, server);
+  }
+
+  private int bind(String name, HttpServer server) {
     try {
       servers.put(
-          environment,
+          name,
           server
               .listen(0, "127.0.0.1")
               .toCompletionStage()
               .toCompletableFuture()
               .get(10, TimeUnit.SECONDS));
     } catch (Exception e) {
-      throw new IllegalStateException("Could not start the stub gateway for " + environment, e);
+      throw new IllegalStateException("Could not start the stub upstream " + name, e);
     }
-    return servers.get(environment).actualPort();
+    return servers.get(name).actualPort();
   }
 
   private void answer(String environment, HttpServerRequest request) {

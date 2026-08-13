@@ -29,8 +29,8 @@ import io.vertx.httpproxy.ProxyResponse;
  * terminator may sit in front of it, and that terminator is the only hop that can tell the truth
  * about {@code https}. Overwriting there would replace a true value with a false one. What it costs
  * is that a direct client can supply its own — which is why nothing may make a trust decision on
- * these three, and nothing does: they are diagnostics and link generation, while authentication
- * terminates at the environment gateway on its own evidence.
+ * these three, and nothing does: they are diagnostics and link generation. What authentication the
+ * edge does make a decision on is the bearer token, which is signed — see {@code EdgeAuth}.
  *
  * <p><b>Nothing else is touched.</b> No header is stripped, no header is added, no path is
  * rewritten, no body is read. {@code X-Qits-*} hygiene in particular is <i>not</i> done here: it
