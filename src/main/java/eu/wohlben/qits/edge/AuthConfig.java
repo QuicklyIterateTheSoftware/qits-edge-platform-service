@@ -33,12 +33,21 @@ public interface AuthConfig {
   boolean enforceOnEnvironments();
 
   /**
-   * The audience a token must name to pass. The campaign's P-idp-3: the platform's claim model has
-   * no registry scope and needs none — the existing audience is the permission, and docker's own
-   * {@code scope} parameter is shaped away here rather than being given meaning.
+   * The audience a token must name to pass, with {@code {env}} standing in for the environment the
+   * vhost named — the same placeholder, and the same semantics, as the host patterns in {@link
+   * EdgeConfig}.
+   *
+   * <p>The campaign's P-idp-3: the platform's claim model has no registry scope and needs none —
+   * the existing audience is the permission, and docker's own {@code scope} parameter is shaped
+   * away here rather than being given a meaning this process would have to enforce.
+   *
+   * <p><b>The placeholder is a boundary, not a convenience.</b> idp's audience values are
+   * env-prefixed, so a pattern makes the token for one environment's registry fail at another
+   * environment's vhost — one entry, and the tiers cannot unlock each other. A value with no
+   * placeholder is a literal and still works, which is what a single-audience deployment wants.
    */
-  @WithDefault("qits-platform-artifacts")
-  String audience();
+  @WithDefault("{env}-qits-artifacts")
+  String audiencePattern();
 
   /** How far this process' clock and idp's may disagree about {@code exp}, in seconds. */
   @WithDefault("30")

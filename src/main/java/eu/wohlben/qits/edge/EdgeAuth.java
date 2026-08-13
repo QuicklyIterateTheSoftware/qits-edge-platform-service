@@ -80,6 +80,20 @@ public class EdgeAuth {
     client = vertx.createHttpClient();
   }
 
+  /**
+   * The audience this vhost demands: the configured pattern with {@code {env}} filled in from the
+   * environment the Host name named.
+   *
+   * <p><b>This is the boundary between tiers.</b> idp's audience values are env-prefixed, so
+   * deriving the demand per request is what stops a token minted for dev's registry from opening
+   * prod's vhost — one entry, and neither tier can unlock the other. A pattern with no placeholder
+   * comes back unchanged, which is a literal audience and is what a single-audience deployment
+   * wants.
+   */
+  static String audienceFor(String pattern, String environment) {
+    return pattern.replace("{env}", environment);
+  }
+
   /** Whether this request is docker fetching a token rather than asking for a registry object. */
   public static boolean isTokenRequest(HttpServerRequest request) {
     return TOKEN_PATH.equals(request.path())
@@ -109,7 +123,11 @@ public class EdgeAuth {
       return Future.succeededFuture(e.getMessage());
     }
     String problem =
-        jwt.problem(idp.issuer(), config.audience(), Instant.now(), config.clockSkewSeconds());
+        jwt.problem(
+            idp.issuer(),
+            audienceFor(config.audiencePattern(), route.environment()),
+            Instant.now(),
+            config.clockSkewSeconds());
     if (problem != null) {
       // Claims before signature: a claim check needs no key, so an expired or misaddressed token is
       // refused without a JWKS lookup — and a made-up kid cannot use one to force a fetch.

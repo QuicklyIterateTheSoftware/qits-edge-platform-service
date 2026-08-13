@@ -39,8 +39,16 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   static final String CLIENT_SECRET = "a-secret";
 
-  /** The audience the stub idp puts in every token, and the one the edge is configured to want. */
-  static final String AUDIENCE = "qits-platform-artifacts";
+  /**
+   * The audiences the stub idp puts in every token: a client's WHOLE allowed list, which is what a
+   * grant naming no audience gets back — and what the live platform's idp does, one value per
+   * environment. The edge demands one of them per request, resolved from the vhost's own
+   * environment, so a token carrying both is the case that has to keep working while a token
+   * carrying one must not cross tiers.
+   */
+  static String audience(String environment) {
+    return environment + "-qits-artifacts";
+  }
 
   /** How long {@code /stream} waits between its two chunks — long enough to time from a client. */
   static final long STREAM_GAP_MILLIS = 400;
@@ -68,7 +76,8 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // reached this address would be a resolution bug rather than a test that happened to pass.
     config.put("qits.edge.apps.registry.host-pattern", "{env}-qits-artifacts");
     config.put("qits.idp.url", "http://127.0.0.1:" + idp() + "/idp");
-    config.put("qits.edge.auth.audience", AUDIENCE);
+    // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED
+    // default, so a change to it is a failing test rather than a silent one.
     return config;
   }
 
@@ -125,7 +134,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
                                                 "http://127.0.0.1:"
                                                     + servers.get("idp").actualPort()
                                                     + "/idp",
-                                                List.of(AUDIENCE)))
+                                                List.of(audience("dev"), audience("prod"))))
                                         .put("token_type", "Bearer")
                                         .put("expires_in", 300)
                                         .encode());

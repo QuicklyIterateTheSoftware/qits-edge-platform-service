@@ -7,11 +7,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * The {@code WWW-Authenticate} value, character by character. It is a wire contract with a client
- * nobody here controls: docker parses it to find the token endpoint, and a challenge it cannot
- * parse fails a pull with no message in any log on either side.
+ * The strings {@code EdgeAuth} builds, without booting an application: the {@code WWW-Authenticate}
+ * value character by character, and the audience it demands.
+ *
+ * <p>The challenge is a wire contract with a client nobody here controls — docker parses it to find
+ * the token endpoint, and one it cannot parse fails a pull with no message in any log on either
+ * side.
  */
 class EdgeChallengeTest {
+
+  @Test
+  void theDemandedAudienceIsTheVhostsOwnEnvironment() {
+    // One entry, and the tiers cannot unlock each other. idp's audience values are env-prefixed, so
+    // a fixed string would either match one environment or, if widened, all of them.
+    assertEquals("dev-qits-artifacts", EdgeAuth.audienceFor("{env}-qits-artifacts", "dev"));
+    assertEquals("prod-qits-artifacts", EdgeAuth.audienceFor("{env}-qits-artifacts", "prod"));
+  }
+
+  @Test
+  void aPatternWithNoPlaceholderIsALiteralAudience() {
+    // What a single-audience deployment configures. It must keep working unchanged.
+    assertEquals("qits-registry", EdgeAuth.audienceFor("qits-registry", "dev"));
+  }
 
   @Test
   void theChallengePointsBackAtThisSameVhostsTokenEndpoint() {

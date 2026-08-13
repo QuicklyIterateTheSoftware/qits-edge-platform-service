@@ -117,7 +117,7 @@ a file.
 | `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
 | `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Application vhosts require a valid idp token |
 | `qits.edge.auth.enforce-on-environments` | `QITS_EDGE_AUTH_ENFORCE_ON_ENVIRONMENTS` | `false` | Environment vhosts do not — **flipping it is a step of its own** |
-| `qits.edge.auth.audience` | `QITS_EDGE_AUTH_AUDIENCE` | `qits-platform-artifacts` | The audience a token must name to pass |
+| `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
 | `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
 | `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
@@ -158,7 +158,13 @@ against the keys fetched from `qits.idp.url/jwks` and cached — idp is overlay-
 cannot reach it, and keeping it off the per-pull path is worth more than the freshness a call-out
 would buy. An unknown `kid` buys **one** refresh, behind a cooldown, so a made-up kid cannot turn
 into a request per request at the identity provider. The checks are RS256 only, exact `iss`, live
-`exp` within the skew, and the configured audience in `aud`.
+`exp` within the skew, and the demanded audience in `aud`.
+
+**The audience is derived per request**, from `qits.edge.auth.audience-pattern` with `{env}` filled
+in from the environment the vhost named — the same placeholder as the host patterns above. idp's
+audience values are env-prefixed, so this is what keeps the tiers apart: a token minted for
+`registry.dev.…` does not open `registry.prod.…`, from one configuration entry. A pattern with no
+placeholder is a literal audience, for a single-audience deployment.
 
 ### The docker flow
 

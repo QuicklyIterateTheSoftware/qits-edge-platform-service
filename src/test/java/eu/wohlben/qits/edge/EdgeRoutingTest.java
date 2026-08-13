@@ -70,10 +70,11 @@ class EdgeRoutingTest {
   void anApplicationSubdomainReachesThatEnvironmentsApplication() {
     // The WP1 decision in one line: the app label picks the upstream, the env label picks whose.
     assertEquals(
-        "registry-dev", client().get("registry.dev.example.com", "/v2/", token()).line("upstream"));
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
     assertEquals(
         "registry-prod",
-        client().get("registry.prod.example.com", "/v2/", token()).line("upstream"));
+        client().get("registry.prod.example.com", "/v2/", token("prod")).line("upstream"));
   }
 
   @Test
@@ -313,7 +314,7 @@ class EdgeRoutingTest {
                         "RS256",
                         TestTokens.claims(
                             issuer(),
-                            List.of(StubGateways.AUDIENCE),
+                            List.of(StubGateways.audience("dev")),
                             Instant.now().plusSeconds(300)))));
     assertEquals(401, answer.status());
     // `error` is what tells docker the credential it holds is dead, so it re-fetches rather than
@@ -339,7 +340,7 @@ class EdgeRoutingTest {
                         "RS256",
                         TestTokens.claims(
                             issuer(),
-                            List.of(StubGateways.AUDIENCE),
+                            List.of(StubGateways.audience("dev")),
                             Instant.now().minusSeconds(3600)))))
             .status());
     assertEquals(
@@ -356,6 +357,32 @@ class EdgeRoutingTest {
                         TestTokens.claims(
                             issuer(), List.of("somebody-else"), Instant.now().plusSeconds(300)))))
             .status());
+  }
+
+  @Test
+  void aTokenForOneEnvironmentDoesNotUnlockAnother() {
+    // The audience the edge demands is derived per request, from the environment the vhost named —
+    // so dev's registry token is refused at prod's registry, and the reverse, from ONE config
+    // entry.
+    // Without the derivation both would pass, and the tiers would share a key.
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
+    assertEquals(401, client().get("registry.prod.example.com", "/v2/", token("dev")).status());
+    assertEquals(401, client().get("registry.dev.example.com", "/v2/", token("prod")).status());
+  }
+
+  @Test
+  void aTokenNamingEveryEnvironmentsAudienceOpensEachOfThem() {
+    // What idp actually mints when the grant asks for no audience: the client's whole allowed list.
+    Map<String, String> whole =
+        bearer(
+            TestTokens.valid(
+                issuer(), List.of(StubGateways.audience("dev"), StubGateways.audience("prod"))));
+    assertEquals(
+        "registry-dev", client().get("registry.dev.example.com", "/v2/", whole).line("upstream"));
+    assertEquals(
+        "registry-prod", client().get("registry.prod.example.com", "/v2/", whole).line("upstream"));
   }
 
   @Test
@@ -429,8 +456,9 @@ class EdgeRoutingTest {
     return ConfigProvider.getConfig().getValue("qits.idp.url", String.class);
   }
 
-  private static Map<String, String> token() {
-    return bearer(TestTokens.valid(issuer(), List.of(StubGateways.AUDIENCE)));
+  /** A token idp would mint for one environment's registry, and that environment's only. */
+  private static Map<String, String> token(String environment) {
+    return bearer(TestTokens.valid(issuer(), List.of(StubGateways.audience(environment))));
   }
 
   private static Map<String, String> bearer(String jwt) {
