@@ -26,3 +26,11 @@ deployment_target: platform
 # dropped. The edge owns the root path space and has no segment, so that path would be proxied to an
 # environment gateway and 404 — the health gate would fail a perfectly healthy edge.
 health_path: /q/health/ready
+
+# STOP-FIRST, because this deployment publishes a host port. Under start-first the successor
+# waits in Pending for a port the predecessor only frees by stopping — which start-first never
+# does — so a one-node swarm deadlocks on the first rolling update. A single binder cannot have
+# the lossless-rollback overlap; the deploy takes the brief gap instead. Measured live on
+# qits-platform-mirror's 2026.813.163303 deploy, the first host-port update since the swarm
+# cutover (2026-08-13).
+update_order: stop-first
