@@ -12,16 +12,21 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Everything behind the edge, stubbed: two environment gateways, the same two environments' {@code
- * registry} application, and a stand-in qits-platform-idp. Each on an ephemeral loopback port. No
- * docker, no fixture and no fixed port — the whole suite runs from a clone of this repository
- * alone.
+ * registry} and {@code mirror} applications, and a stand-in qits-platform-idp. Each on an ephemeral
+ * loopback port. No docker, no fixture and no fixed port — the whole suite runs from a clone of
+ * this repository alone.
  *
  * <p>The gateways are <b>two</b> rather than one so that "the edge chose the right environment" is
  * observable from the outside: each server names itself in every answer, so a test asserts which
  * process received the request rather than only that something did. The application upstreams are
- * two for the same reason — an app name has to reach ITS environment's copy. Their addresses reach
- * the route table as {@code qits.edge.upstream-hosts.<env>} and {@code
- * qits.edge.apps.registry.hosts.<env>} overrides, the config paths that exist for exactly this.
+ * two per app for the same reason — an app name has to reach ITS environment's copy. Their
+ * addresses reach the route table as {@code qits.edge.upstream-hosts.<env>} and {@code
+ * qits.edge.apps.<app>.hosts.<env>} overrides, the config paths that exist for exactly this.
+ *
+ * <p><b>The applications are two so the auth gate has two answers.</b> {@code mirror} is named in
+ * {@code qits.edge.auth.anonymous-read-apps} and {@code registry} is not, so one suite covers both
+ * a vhost whose reads are open and a vhost that is gated on every method — with the same upstream
+ * shape behind each, so the difference asserted is the edge's decision and nothing else.
  *
  * <p>Vert.x rather than a JDK {@code HttpServer}, because one server has to answer three shapes an
  * edge must pass through unchanged: an ordinary request with a body, a chunked response written
@@ -68,13 +73,19 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.default-environment", "prod");
     for (String environment : List.of("prod", "dev")) {
       config.put("qits.edge.upstream-hosts." + environment, "127.0.0.1:" + listen(environment));
-      config.put(
-          "qits.edge.apps.registry.hosts." + environment,
-          "127.0.0.1:" + listen("registry-" + environment));
+      for (String app : List.of("registry", "mirror")) {
+        config.put(
+            "qits.edge.apps." + app + ".hosts." + environment,
+            "127.0.0.1:" + listen(app + "-" + environment));
+      }
     }
     // Required, and unreachable on purpose: every environment above overrides it, so a request that
     // reached this address would be a resolution bug rather than a test that happened to pass.
     config.put("qits.edge.apps.registry.host-pattern", "{env}-qits-artifacts");
+    config.put("qits.edge.apps.mirror.host-pattern", "{env}-qits-mirror");
+    // ONE of the two apps, which is the point: the exemption is per app label, so the suite has a
+    // vhost whose reads are open and a vhost that is not, side by side.
+    config.put("qits.edge.auth.anonymous-read-apps", "mirror");
     config.put("qits.idp.url", "http://127.0.0.1:" + idp() + "/idp");
     // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED
     // default, so a change to it is a failing test rather than a silent one.

@@ -22,7 +22,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The edge end to end, against real stub upstreams on ephemeral loopback ports: two environment
- * gateways, two environments' {@code registry} application, and a stand-in idp.
+ * gateways, two environments' {@code registry} and {@code mirror} applications, and a stand-in idp.
+ * Only {@code mirror} is named in {@code qits.edge.auth.anonymous-read-apps}, so the gated and the
+ * read-open answer are both observable from one boot.
  *
  * <p><b>Why one class rather than four.</b> A WebSocket upgrade through {@code vertx-http-proxy}
  * only survives the FIRST Quarkus start in a JVM — after a restart it silently degrades to a plain
@@ -390,6 +392,71 @@ class EdgeRoutingTest {
     // The rollout switch: qits.edge.auth.enforce-on-environments is off, so the platform's whole
     // existing traffic keeps authenticating one hop further in. Flipping it is a step of its own.
     assertEquals("dev", client().get("dev.example.com", "/anything").line("upstream"));
+  }
+
+  // --- the anonymous-read exemption, per app ----------------------------------------------------
+
+  @Test
+  void anExemptedAppVhostServesAnAnonymousGet() {
+    // `mirror` is named in qits.edge.auth.anonymous-read-apps. A pull with no credential is the
+    // bootstrap case this exists for, and it has to reach the upstream rather than the challenge.
+    assertEquals("mirror-dev", client().get("mirror.dev.example.com", "/v2/").line("upstream"));
+    assertEquals("mirror-prod", client().get("mirror.prod.example.com", "/v2/").line("upstream"));
+  }
+
+  @Test
+  void anExemptedAppVhostServesAnAnonymousHead() {
+    // The other reading method, and docker uses it for every blob it checks before pulling. A HEAD
+    // answer carries no body, so the upstream marker is read from the header the stub also sets.
+    EdgeClient.Answer answer =
+        client().send(HttpMethod.HEAD, "mirror.dev.example.com", "/v2/blob", null, Map.of());
+    assertEquals(200, answer.status());
+    assertEquals("mirror-dev", answer.headers().get("x-upstream"));
+  }
+
+  @Test
+  void anExemptedAppVhostStillGatesEveryWritingMethod() {
+    // The exemption opens READS, never a service. A push is what changes what the platform will
+    // run, and it gets the same challenge as before — including the realm docker needs to act on
+    // it.
+    for (HttpMethod method :
+        new HttpMethod[] {HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE}) {
+      EdgeClient.Answer answer =
+          client().send(method, "mirror.dev.example.com", "/v2/blob", "x", Map.of());
+      assertEquals(401, answer.status(), method + " must still be gated");
+      assertEquals(
+          "Bearer realm=\"http://mirror.dev.example.com/token\",service=\"mirror.dev.example.com\"",
+          answer.headers().get("www-authenticate"));
+      assertNull(answer.line("upstream"), method + " must not have reached the application");
+    }
+  }
+
+  @Test
+  void anAuthenticatedWriteOnAnExemptedAppVhostPasses() {
+    // The other half: the exemption is a way past the gate, not a replacement for it.
+    EdgeClient.Answer answer =
+        client().send(HttpMethod.POST, "mirror.dev.example.com", "/v2/blob", "x", token("dev"));
+    assertEquals("mirror-dev", answer.line("upstream"));
+    assertEquals("POST", answer.line("method"));
+    assertEquals("x", answer.line("body"));
+  }
+
+  @Test
+  void anAppThatWasNotNamedStillRefusesAnAnonymousRead() {
+    // Per app label: `registry` is not on the list, so its reads are gated exactly as before.
+    assertEquals(401, client().get("registry.dev.example.com", "/v2/").status());
+    assertEquals(
+        401,
+        client()
+            .send(HttpMethod.HEAD, "registry.dev.example.com", "/v2/", null, Map.of())
+            .status());
+  }
+
+  @Test
+  void anUnknownAppLabelIsStill404EvenWhereReadsAreOpen() {
+    // The exemption is applied AFTER the label resolves, so it cannot turn a typo into a route.
+    // `mirro` is one letter from an app whose reads are open and is still nobody's name.
+    assertEquals(404, client().get("mirro.dev.example.com", "/v2/").status());
   }
 
   // --- the docker token endpoint ----------------------------------------------------------------

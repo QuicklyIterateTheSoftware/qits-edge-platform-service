@@ -58,8 +58,9 @@ application. Nothing in a request ever contributes a character to an address: a 
 ## What it does not do — the non-goals, on purpose
 
 - **No path knowledge in the routing decision.** The app label picks a whole upstream and the auth
-  gate is per vhost; no prefix matching, no rewriting. `/token` is the single path this process
-  claims, and only on an application vhost.
+  gate is per vhost — per vhost and *method*, where a deployment opened reads, but never per path;
+  no prefix matching, no rewriting. `/token` is the single path this process claims, and only on an
+  application vhost.
 - **No login, no session, no browser flow.** The edge validates a machine credential; the browser
   half of authentication terminates at the environment gateway, which already does it.
 - **No header stripping or injection beyond `X-Forwarded-*`.** `X-Qits-*` hygiene belongs to the
@@ -117,6 +118,7 @@ a file.
 | `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
 | `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Application vhosts require a valid idp token |
 | `qits.edge.auth.enforce-on-environments` | `QITS_EDGE_AUTH_ENFORCE_ON_ENVIRONMENTS` | `false` | Environment vhosts do not — **flipping it is a step of its own** |
+| `qits.edge.auth.anonymous-read-apps` | `QITS_EDGE_AUTH_ANONYMOUS_READ_APPS` | — | App labels whose `GET` and `HEAD` are open; every other method on them still needs a token |
 | `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
 | `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
@@ -165,6 +167,21 @@ in from the environment the vhost named — the same placeholder as the host pat
 audience values are env-prefixed, so this is what keeps the tiers apart: a token minted for
 `registry.dev.…` does not open `registry.prod.…`, from one configuration entry. A pattern with no
 placeholder is a literal audience, for a single-audience deployment.
+
+### Anonymous reads, named per app
+
+`qits.edge.auth.anonymous-read-apps` lists app labels whose **`GET` and `HEAD` pass without a
+credential**. Every other method on those same names keeps the whole check, so this opens reads and
+never a service.
+
+The reads are the bootstrap steps: pulling a base image onto a fresh node, cloning a repository,
+fetching a dependency from the mirror — each happens *before* there is anything to hold a token, and
+each is what a gated vhost breaks first. A push, a tag delete, a `receive-pack` is never a bootstrap
+step.
+
+The list is empty by default, which is full enforcement. It is matched against the app label the
+`Host` name already resolved to, so it reaches app vhosts only — the environment vhost is untouched
+by any value here, and an unconfigured label is still a `404` rather than an open door.
 
 ### The docker flow
 

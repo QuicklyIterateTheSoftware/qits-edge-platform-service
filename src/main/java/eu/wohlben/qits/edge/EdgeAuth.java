@@ -13,7 +13,10 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import org.jboss.logging.Logger;
 
 /**
@@ -41,6 +44,14 @@ import org.jboss.logging.Logger;
  *
  * <p>The token itself is validated OFFLINE against idp's published keys ({@link IdpKeys}), so idp
  * is on the login path and not on the per-pull path.
+ *
+ * <h2>The one gap in a gated vhost</h2>
+ *
+ * <p>A vhost is the decision, but not every METHOD on it has to be. {@link
+ * AuthConfig#anonymousReadApps()} names app labels whose {@code GET} and {@code HEAD} pass without
+ * a credential, because reads are the bootstrap steps — pulling a base image, cloning, fetching a
+ * dependency — that happen before there is anything to hold a token. Writes on the same name keep
+ * the whole check, so the exemption cannot widen into "this service is public".
  *
  * <p>docker's {@code service} and {@code scope} query parameters are read and dropped. The
  * permission is the audience the token already carries; per-repository grants would be a change to
@@ -75,9 +86,47 @@ public class EdgeAuth {
 
   private HttpClient client;
 
+  /** {@link AuthConfig#anonymousReadApps()}, normalised once — see {@link #readApps}. */
+  private Set<String> anonymousReadApps;
+
   @PostConstruct
   void open() {
     client = vertx.createHttpClient();
+    anonymousReadApps = readApps(config.anonymousReadApps().orElse(List.of()));
+  }
+
+  /**
+   * The configured app labels, in the spelling {@link HostEnvironments} produces: stripped, lower
+   * case, blanks dropped. A Host name arrives in any case at all, so matching without this would
+   * make {@code Registry.dev.example.com} gated and {@code registry.dev.example.com} open.
+   */
+  static Set<String> readApps(List<String> configured) {
+    Set<String> names = new LinkedHashSet<>();
+    for (String app : configured) {
+      if (app != null && !app.isBlank()) {
+        names.add(app.strip().toLowerCase(Locale.ROOT));
+      }
+    }
+    return Set.copyOf(names);
+  }
+
+  /**
+   * Whether this request is a read the deployment opened: a {@code GET} or a {@code HEAD}, on an
+   * APP vhost, whose app label was named.
+   *
+   * <p>All three conditions are load-bearing. {@code toApp()} keeps the exemption off the
+   * environment vhost, which routes the platform's whole existing traffic and has its own switch.
+   * The app label is the one the routing decision already resolved, so a label the edge does not
+   * route never reaches here — an unknown app is answered 404 one step earlier. And the method list
+   * is the two that read: everything that changes the service still needs a token.
+   *
+   * <p>Package-private and static so it can be asserted without booting an application.
+   */
+  static boolean anonymousRead(
+      HostEnvironments.Route route, HttpMethod method, Set<String> readApps) {
+    return route.toApp()
+        && (method == HttpMethod.GET || method == HttpMethod.HEAD)
+        && readApps.contains(route.app());
   }
 
   /**
@@ -109,7 +158,7 @@ public class EdgeAuth {
    */
   public Future<String> check(HostEnvironments.Route route, HttpServerRequest request) {
     boolean enforce = route.toApp() ? config.enforceOnApps() : config.enforceOnEnvironments();
-    if (!enforce) {
+    if (!enforce || anonymousRead(route, request.method(), anonymousReadApps)) {
       return Future.succeededFuture(null);
     }
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
