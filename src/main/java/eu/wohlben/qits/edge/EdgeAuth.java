@@ -336,15 +336,33 @@ public class EdgeAuth {
 
   /**
    * The 401 an unauthenticated caller gets: the Distribution spec's error envelope, and the {@code
-   * WWW-Authenticate} header the docker CLI reads to find its token endpoint.
+   * WWW-Authenticate} headers a client reads to learn how to try again.
+   *
+   * <p><b>Two challenges, in this order: Bearer, then Basic.</b> Each one is a whole client.
+   *
+   * <ul>
+   *   <li>Bearer FIRST, because docker and containerd walk the challenges in order and act on the
+   *       first scheme they know. A Basic challenge ahead of it would send them to store-and-resend
+   *       instead of the token endpoint, and the token flow would stop being used at all.
+   *   <li>Basic as well, because maven's resolver transport does the opposite: it holds configured
+   *       credentials and will only spend them against a challenge naming a scheme it implements.
+   *       Offered Bearer alone it never retries, so every uncached resolve inside a build dies 401
+   *       while correct credentials sit unused. The edge accepts Basic on gated requests already —
+   *       this is what says so.
+   * </ul>
+   *
+   * <p>{@code add} rather than {@code putHeader}: two headers of one name, and {@code putHeader}
+   * would replace the first with the second.
    */
   public void challenge(HttpServerRequest request, String reason) {
     String authority = authority(request);
     LOG.debugf("401 on %s%s: %s", authority, request.path(), reason);
-    request
-        .response()
-        .setStatusCode(401)
-        .putHeader(WWW_AUTHENTICATE, bearerChallenge(scheme(request), authority, reason))
+    var response = request.response().setStatusCode(401);
+    response
+        .headers()
+        .add(WWW_AUTHENTICATE, bearerChallenge(scheme(request), authority, reason))
+        .add(WWW_AUTHENTICATE, basicChallenge(authority));
+    response
         .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
         .end(dockerErrors("UNAUTHORIZED", "authentication required").encode());
   }
@@ -373,6 +391,15 @@ public class EdgeAuth {
   }
 
   /**
+   * The Basic challenge value, for the clients that cannot do the token dance. The realm is the
+   * same authority the Bearer challenge names as its {@code service}, so both challenges describe
+   * one door.
+   */
+  static String basicChallenge(String authority) {
+    return "Basic realm=\"" + authority + "\"";
+  }
+
+  /**
    * The token endpoint: docker's GET, HTTP Basic in, a docker-shaped token out.
    *
    * <p>What arrives is an idp client id and secret. They are relayed to idp's own token endpoint
@@ -392,7 +419,7 @@ public class EdgeAuth {
     if (basic == null || !basic.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
       // Basic, not Bearer: this is the endpoint that SELLS bearer tokens, so asking for one here
       // would be a loop. docker sends the stored `docker login` credential when it sees this.
-      basicChallenge(request, "client credentials required");
+      tokenChallenge(request, "client credentials required");
       return;
     }
     String credential = basic.substring(BASIC.length()).trim();
@@ -400,7 +427,7 @@ public class EdgeAuth {
       // A header that says Basic and carries no client id and secret — an empty credential store,
       // a truncated helper answer. There is nothing to ask idp, and asking would hold the client
       // for the whole patience window while an unreachable idp is waited out.
-      basicChallenge(request, "client credentials required");
+      tokenChallenge(request, "client credentials required");
       return;
     }
     LOG.debugf(
@@ -421,12 +448,18 @@ public class EdgeAuth {
                             .encode()));
   }
 
-  /** The 401 that asks for the stored {@code docker login} credential. */
-  private void basicChallenge(HttpServerRequest request, String message) {
+  /**
+   * The 401 that asks for the stored {@code docker login} credential.
+   *
+   * <p>Basic ALONE, and that is the difference from {@link #challenge}: this endpoint authenticates
+   * with Basic and sells bearer tokens, so naming Bearer here would point a client back at the
+   * endpoint it is already talking to.
+   */
+  private void tokenChallenge(HttpServerRequest request, String message) {
     request
         .response()
         .setStatusCode(401)
-        .putHeader(WWW_AUTHENTICATE, "Basic realm=\"" + authority(request) + "\"")
+        .putHeader(WWW_AUTHENTICATE, basicChallenge(authority(request)))
         .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
         .end(dockerErrors("UNAUTHORIZED", message).encode());
   }

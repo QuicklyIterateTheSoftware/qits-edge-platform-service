@@ -303,6 +303,41 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void aGatedRefusalOffersBearerAndThenBasic() {
+    // Two clients, two schemes, and the ORDER is the contract:
+    //   * docker and containerd walk the challenges and act on the first they know, so Bearer must
+    //     come first or the token flow stops being used;
+    //   * maven's resolver only spends its configured credentials against a scheme it implements,
+    //     so without the Basic line every uncached resolve in a build dies 401 with the right
+    //     credentials sitting unused.
+    // Asserted from the raw header list: a map collapses the two into one and proves nothing.
+    EdgeClient.Answer answer = client().get("registry.dev.example.com", "/v2/");
+    assertEquals(401, answer.status());
+    assertEquals(
+        List.of(
+            "Bearer realm=\"http://registry.dev.example.com/token\",service=\"registry.dev.example.com\"",
+            "Basic realm=\"registry.dev.example.com\""),
+        answer.headerValues("www-authenticate"));
+  }
+
+  @Test
+  void everyGatedRefusalCarriesBothChallengesAndNotJustTheAnonymousOne() {
+    // A build resolves through both: the first request of a session carries nothing, and a later
+    // one may carry a credential this vhost refuses. Both have to tell maven that Basic is taken.
+    for (Map<String, String> credential :
+        List.of(
+            Map.<String, String>of(), basic(StubGateways.OTHER_ID, StubGateways.OTHER_SECRET))) {
+      EdgeClient.Answer answer =
+          client().send(HttpMethod.PUT, "registry.dev.example.com", "/v2/blob", "x", credential);
+      assertEquals(401, answer.status());
+      List<String> challenges = answer.headerValues("www-authenticate");
+      assertEquals(2, challenges.size(), challenges.toString());
+      assertTrue(challenges.get(0).startsWith("Bearer realm="), challenges.toString());
+      assertEquals("Basic realm=\"registry.dev.example.com\"", challenges.get(1));
+    }
+  }
+
+  @Test
   void anApplicationVhostRefusesATokenSignedBySomebodyElse() {
     EdgeClient.Answer answer =
         client()
@@ -465,10 +500,11 @@ class EdgeRoutingTest {
   void theTokenEndpointAsksForTheStoredLoginCredential() {
     EdgeClient.Answer answer = client().get("registry.dev.example.com", "/token?service=x&scope=y");
     assertEquals(401, answer.status());
-    assertTrue(
-        answer.headers().get("www-authenticate").startsWith("Basic realm="),
-        // Basic, not Bearer: this is the endpoint that sells bearer tokens.
-        answer.headers().get("www-authenticate"));
+    // Basic ALONE, and that is the difference from a gated request: this is the endpoint that SELLS
+    // bearer tokens, so a Bearer challenge here would point a client back at where it already is.
+    assertEquals(
+        List.of("Basic realm=\"registry.dev.example.com\""),
+        answer.headerValues("www-authenticate"));
   }
 
   @Test
