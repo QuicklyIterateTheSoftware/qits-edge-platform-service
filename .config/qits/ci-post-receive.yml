@@ -74,3 +74,9 @@ steps:
           }
           console.error(`release refused: HTTP ${res.status} ${text}`);
           process.exit(1);
+        }).catch((err) => {
+          console.error(`release call failed: ${err.message}`);
+          process.exit(1);
+        });
+      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID" \
+        "$QITS_CI_BRANCH" "$summary"
