@@ -6,7 +6,7 @@
 
     <groupId>eu.wohlben</groupId>
     <artifactId>qits-platform-edge</artifactId>
-    <version>2026.812.173631</version>
+    <version>2026.814.65508</version>
     <packaging>quarkus</packaging>
 
     <name>qits-platform-edge</name>

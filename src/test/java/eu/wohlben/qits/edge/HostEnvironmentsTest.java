@@ -1,6 +1,8 @@
 package eu.wohlben.qits.edge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -135,6 +137,75 @@ class HostEnvironmentsTest {
                 () -> HostEnvironments.of(List.of("prod"), "staging"))
             .getMessage()
             .contains("qits.edge.default-environment"));
+  }
+
+  // --- the application label ---------------------------------------------------------------------
+
+  private static final HostEnvironments APPS =
+      HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("registry", "githost"));
+
+  @Test
+  void aConfiguredApplicationLabelReachesThatApplicationInThatEnvironment() {
+    assertEquals(
+        new HostEnvironments.Route("dev", "registry", null), APPS.route("registry.dev.localhost"));
+    assertEquals(
+        new HostEnvironments.Route("prod", "registry", null),
+        APPS.route("registry.prod.localhost"));
+    assertEquals(
+        new HostEnvironments.Route("dev", "githost", null),
+        APPS.route("GITHOST.dev.example.com:8080."));
+  }
+
+  @Test
+  void anEnvironmentOnlyNameStillReachesItsGateway() {
+    // The whole of today's behaviour, unchanged: no app, no rejection.
+    assertEquals(new HostEnvironments.Route("dev", null, null), APPS.route("dev.localhost"));
+    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("example.com"));
+    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("127.0.0.1:8080"));
+    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route(null));
+  }
+
+  @Test
+  void anUnconfiguredApplicationLabelIsUnroutable() {
+    // It does NOT become the gateway's. The name is app-shaped, so it was aimed at a service, and
+    // the gateway is the hop that does not authenticate those.
+    HostEnvironments.Route route = APPS.route("mirror.dev.localhost");
+    assertEquals("mirror", route.unknownApp());
+    assertEquals("dev", route.environment(), "the environment is still readable, for the message");
+    assertFalse(route.toApp());
+  }
+
+  @Test
+  void aNameThatIsNotAppShapedIsUntouchedByTheAppRule() {
+    // `example` is not an environment, so `staging.example.com` names no app position at all and
+    // stays what it has always been: the default gateway's.
+    assertNull(APPS.route("staging.example.com").unknownApp());
+    assertNull(APPS.route("anything.at.all.example.com").unknownApp());
+    assertEquals("prod", APPS.route("staging.example.com").environment());
+  }
+
+  @Test
+  void anEdgeWithNoApplicationsRoutesNoAppLabel() {
+    assertEquals("registry", TWO.route("registry.dev.localhost").unknownApp());
+  }
+
+  @Test
+  void anApplicationNameThatCannotBeADnsLabelIsRefused() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("prod"), "prod", List.of("my registry")));
+  }
+
+  @Test
+  void anApplicationMayNotShareAnEnvironmentsName() {
+    // The tie-break reads the first label as an application, so an app called `dev` would swallow
+    // `dev.prod.example.com` and leave the dev environment unreachable by name. Fail at boot.
+    assertTrue(
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("dev")))
+            .getMessage()
+            .contains("both an environment and an application"));
   }
 
   @Test

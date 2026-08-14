@@ -27,10 +27,18 @@ deployment_target: platform
 # environment gateway and 404 — the health gate would fail a perfectly healthy edge.
 health_path: /q/health/ready
 
-# STOP-FIRST, because this deployment publishes a host port. Under start-first the successor
-# waits in Pending for a port the predecessor only frees by stopping — which start-first never
-# does — so a one-node swarm deadlocks on the first rolling update. A single binder cannot have
-# the lossless-rollback overlap; the deploy takes the brief gap instead. Measured live on
-# qits-platform-mirror's 2026.813.163303 deploy, the first host-port update since the swarm
-# cutover (2026-08-13).
-update_order: stop-first
+# INGRESS MODE, which is what retires the stop-first landmine here. A HOST-mode published port is
+# bound on the node by the task itself, so two tasks cannot hold it across a rolling update and a
+# one-node swarm deadlocks in Pending — that is why this said `update_order: stop-first`, measured
+# live on qits-platform-mirror's 2026.813.163303 deploy. In INGRESS mode the port is held by the
+# swarm routing mesh rather than by the container, so the successor starts while the predecessor
+# still serves and start-first (the default, and lossless rollback) works again.
+#
+# It is the enabler for the rest of the unify-ingress campaign, not a tidy-up: with the registry
+# behind this edge, an edge redeploy has to pull its own new image THROUGH the still-running old
+# edge. Under stop-first there is no old edge at that moment, which is the circularity that made
+# "registry behind edge" look impossible.
+#
+# What ingress does NOT change is exposure: swarm's publish syntax has no host-IP field in either
+# mode, so this still binds 0.0.0.0. Scoping is a host firewall's job, not this file's.
+publish_mode: ingress

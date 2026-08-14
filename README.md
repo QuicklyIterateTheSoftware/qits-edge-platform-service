@@ -1,37 +1,40 @@
 # qits-platform-edge
 
 **The platform's L7 edge.** It binds the host's only public port, reads the `Host` name of every
-request, and streams the request unchanged to that environment's gateway. Nothing else.
+request, and streams the request unchanged to whatever that name selects — an environment's gateway,
+or one of that environment's services directly.
 
 A small, stateless Quarkus 3 (Java 25) application that compiles to a **GraalVM native binary**. No
-database, no ORM, no REST layer, no client, no session, no authentication.
+database, no ORM, no REST layer, no client, no session.
 
 ```
                           ┌────────────────────────────────────────┐
   client ──:8080──▶       │ qits-platform-edge  (the only          │
-  Host: home.prod.…       │ published port on the host)            │
-                          │   Host name → environment · /q         │
-                          └──────┬───────────────────┬─────────────┘
-                                 │ docker networks, nothing published
-                   prod          │                   │        dev
-                  ┌──────────────▼─────┐   ┌─────────▼──────────┐
-                  │ prod-qits-gateway  │   │ dev-qits-gateway   │
-                  │  :8080             │   │  :8080             │
-                  └────────────────────┘   └────────────────────┘
+  Host: registry.dev.…    │ published port on the host)            │
+                          │   Host name → upstream · idp · /q      │
+                          └──┬──────────────┬──────────────┬───────┘
+                             │ docker networks, nothing published
+              dev            │      prod    │              │  dev's registry
+        ┌────────────────────▼┐  ┌──────────▼─────────┐  ┌─▼──────────────────┐
+        │ dev-qits-gateway    │  │ prod-qits-gateway  │  │ dev-qits-artifacts │
+        │  :8080              │  │  :8080             │  │  :8080             │
+        └─────────────────────┘  └────────────────────┘  └────────────────────┘
 ```
 
 ## The routing model
 
-Two host spellings, both ending at the same environment:
+A `Host` name selects an environment, and optionally an application inside it:
 
-| Host                    | Environment              |
-| ----------------------- | ------------------------ |
-| `home.prod.example.com` | `prod` — `$app.$env.$domain` |
-| `prod.example.com`      | `prod` — `$env.$domain`  |
-| `example.com`           | the **default**          |
-| `staging.example.com`   | the **default** (`staging` is not configured) |
-| `localhost`, `127.0.0.1`, `[::1]` | the **default** |
-| no `Host` at all        | the **default**          |
+| Host                        | Goes to                                             |
+| --------------------------- | --------------------------------------------------- |
+| `prod.example.com`          | the `prod` gateway — `$env.$domain`                 |
+| `registry.prod.example.com` | `prod`'s `registry` upstream — `$app.$env.$domain`  |
+| `registry.dev.example.com`  | `dev`'s `registry` upstream — same entry, other tier |
+| `example.com`               | the **default** environment's gateway               |
+| `staging.example.com`       | the **default** (`staging` names no environment)    |
+| `localhost`, `127.0.0.1`, `[::1]` | the **default**                               |
+| no `Host` at all            | the **default**                                     |
+| `mirror.dev.example.com`, `mirror` unconfigured | **404** — see below             |
 
 Only the **first two labels** are read, which is why the domain itself is never configured: it may
 be one label, two or three, and the edge does not have to know. An environment name at position 1
@@ -42,24 +45,31 @@ environment name is a coincidence nobody arranges.
 An unmatched name is **not an error**. Every one of them goes to the default environment, so a
 mistyped URL reaches the platform's own page rather than a connection error.
 
-The upstream is `<env>-qits-gateway:8080`, derived from the environment name. Nothing in a request
-ever contributes a character to an address: a `Host` selects an *index into a fixed list*, which is
-the whole SSRF guard.
+**An app-shaped name is the one exception, and it is deliberate.** A first label in front of a
+*known* environment was aimed at a service, and services are the names this edge authenticates —
+falling through to the gateway would hand exactly those requests to the one hop that does not. So an
+unconfigured app label is a **404**, not the gateway. Names that are not app-shaped are untouched by
+the rule.
+
+The upstream is `<env>-qits-gateway:8080` for a gateway and the app's own pattern for an
+application. Nothing in a request ever contributes a character to an address: a `Host` selects an
+*index into a fixed list*, which is the whole SSRF guard.
 
 ## What it does not do — the non-goals, on purpose
 
-- **No authentication.** It does not challenge, does not read a token, does not terminate a login.
-  Authentication terminates at the environment gateway, which already does it and is already tested
-  for it.
+- **No path knowledge in the routing decision.** The app label picks a whole upstream and the auth
+  gate is per vhost — per vhost and *method*, where a deployment opened reads, but never per path;
+  no prefix matching, no rewriting. `/token` is the single path this process claims, and only on an
+  application vhost.
+- **No login, no session, no browser flow.** The edge validates a machine credential; the browser
+  half of authentication terminates at the environment gateway, which already does it.
 - **No header stripping or injection beyond `X-Forwarded-*`.** `X-Qits-*` hygiene belongs to the
   component that *asserts* those headers — the environment gateway. A second implementation here
   would put one security contract in two repositories, and the copy that is not next to the
   injection is the copy that rots. `Authorization`, `Cookie` and every custom header pass through
   untouched.
-- **No path knowledge.** No route table beyond the environment list, no prefix matching, no
-  rewriting. The environment gateway's routes are written against the paths clients type, and a
-  prefix stripped here would break every one of them.
-- **No UI, no SPA, no landing page, no `/api`.** The only path this process answers is `/q`.
+- **No UI, no SPA, no landing page, no `/api`.** The paths this process answers are `/q` and, on an
+  application vhost only, `/token`.
 - **No TLS of its own to configure.** The image carries a Let's Encrypt certificate *slot* and
   nothing in it (see below). With no keystore from the deployment the edge speaks plain HTTP, and a
   terminator in front of it stays a deployment choice; see `X-Forwarded-Proto` below.
@@ -102,11 +112,35 @@ a file.
 | `qits.edge.upstream-host-pattern` | `QITS_EDGE_UPSTREAM_HOST_PATTERN` | `{env}-qits-gateway` | `{env}` is the only placeholder |
 | `qits.edge.upstream-port` | `QITS_EDGE_UPSTREAM_PORT` | `8080` | The port every environment gateway listens on |
 | `qits.edge.upstream-hosts.<env>` | `QITS_EDGE_UPSTREAM_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
+| `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — | **Required per app.** `{env}` is the only placeholder; a platform service names none |
+| `qits.edge.apps.<app>.port` | `QITS_EDGE_APPS_<APP>_PORT` | `8080` | The port that application listens on |
+| `qits.edge.apps.<app>.hosts.<env>` | `QITS_EDGE_APPS_<APP>_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
+| `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
+| `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Application vhosts require a valid idp token |
+| `qits.edge.auth.enforce-on-environments` | `QITS_EDGE_AUTH_ENFORCE_ON_ENVIRONMENTS` | `false` | Environment vhosts do not — **flipping it is a step of its own** |
+| `qits.edge.auth.anonymous-read-apps` | `QITS_EDGE_AUTH_ANONYMOUS_READ_APPS` | — | App labels whose `GET` and `HEAD` are open; every other method on them still needs a token |
+| `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
+| `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
+| `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
 | `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
 
-Two things fail **at startup** rather than per request, deliberately: an environment name that could
-not be a DNS label, and a default that is not in the list. Both would otherwise be a 502 or a
-connection error with nothing to read.
+Four things fail **at startup** rather than per request, deliberately: an environment or application
+name that could not be a DNS label, a default that is not in the list, and an application that
+shares an environment's name (the tie-break would make that environment unreachable). All would
+otherwise be a 502, a 404 or a connection error with nothing to read.
+
+The applications map is shipped **empty**, and an application entry is the on-switch: a name only
+reaches a service when a deployment names it. A deployment declares the whole set without a file:
+
+```
+QITS_EDGE_APPS_REGISTRY_HOST_PATTERN={env}-qits-artifacts
+QITS_EDGE_APPS_GITHOST_HOST_PATTERN={env}-qits-githost
+QITS_EDGE_APPS_MIRROR_HOST_PATTERN=qits-platform-mirror
+```
+
+`{env}` is what keeps a tier's services separate, and its absence is what marks a **platform**
+service — there is one qits-platform-mirror for the whole host, so its entry carries no placeholder
+while an environment's registry carries one and serves every tier from a single line.
 
 `qits.edge.upstream-hosts` exists for the two topologies the pattern cannot describe — a developer
 running one gateway on `localhost:8000`, and this repository's own suite, where the gateways are
@@ -114,6 +148,69 @@ stub servers on ephemeral ports. Prefer the pattern: an override is a second pla
 address is written, and a stale one sends a whole tier's traffic to the wrong process. Note also
 that a `@ConfigMapping` map key cannot be **unset** by a later config source, only overridden, which
 is why none is shipped in `application.properties`.
+
+## Authentication — terminated here, on the first node
+
+The edge sees every request before anything else does and already reads the `Host` header, so it is
+the right and cheapest place to gate. What it gates is a **vhost**, never a path: an application
+vhost fronts a service with no external auth of its own.
+
+A request to an application vhost must carry an idp access token. It is validated **offline**
+against the keys fetched from `qits.idp.url/jwks` and cached — idp is overlay-only, so a host client
+cannot reach it, and keeping it off the per-pull path is worth more than the freshness a call-out
+would buy. An unknown `kid` buys **one** refresh, behind a cooldown, so a made-up kid cannot turn
+into a request per request at the identity provider. The checks are RS256 only, exact `iss`, live
+`exp` within the skew, and the demanded audience in `aud`.
+
+**The audience is derived per request**, from `qits.edge.auth.audience-pattern` with `{env}` filled
+in from the environment the vhost named — the same placeholder as the host patterns above. idp's
+audience values are env-prefixed, so this is what keeps the tiers apart: a token minted for
+`registry.dev.…` does not open `registry.prod.…`, from one configuration entry. A pattern with no
+placeholder is a literal audience, for a single-audience deployment.
+
+### Anonymous reads, named per app
+
+`qits.edge.auth.anonymous-read-apps` lists app labels whose **`GET` and `HEAD` pass without a
+credential**. Every other method on those same names keeps the whole check, so this opens reads and
+never a service.
+
+The reads are the bootstrap steps: pulling a base image onto a fresh node, cloning a repository,
+fetching a dependency from the mirror — each happens *before* there is anything to hold a token, and
+each is what a gated vhost breaks first. A push, a tag delete, a `receive-pack` is never a bootstrap
+step.
+
+The list is empty by default, which is full enforcement. It is matched against the app label the
+`Host` name already resolved to, so it reaches app vhosts only — the environment vhost is untouched
+by any value here, and an unconfigured label is still a `404` rather than an open door.
+
+### The docker flow
+
+`docker login` stores a password and resends it forever, while an idp token lives ~300 seconds and
+cannot be refreshed. The Distribution spec's own answer is the Bearer token-endpoint flow, and it is
+what this implements:
+
+1. docker asks for something and gets `401` with
+   `WWW-Authenticate: Bearer realm="http://<vhost>/token",service="<vhost>"`;
+2. docker GETs that realm with HTTP **Basic** — an idp **client id and client secret**, which is the
+   durable credential a user stores with `docker login`;
+3. the edge brokers a `client_credentials` grant to idp over qits-net and answers
+   `{"token": …, "access_token": …, "expires_in": …}`;
+4. docker retries with `Authorization: Bearer …`, and re-fetches when it expires.
+
+The grant asks idp for **no specific audience**, which gets the client's whole allowed list; naming
+one here would fail at idp with an `invalid_target` the caller cannot read, whereas checking `aud`
+on the way back in puts the refusal where the reason is known. docker's `service` and `scope` query
+parameters are read and dropped: the audience the token carries *is* the permission, and
+per-repository grants would be a change to the platform's claim model rather than to this process.
+
+### The rollout switch
+
+Application vhosts enforce from their first request — nothing reached them before, so there is no
+"before" to stay compatible with. The **environment vhost does not**, and
+`qits.edge.auth.enforce-on-environments` is off: the platform's whole existing traffic comes through
+that path and authenticates one hop further in, at the environment gateway. Flipping it before that
+termination has moved out here would answer every browser, SPA and API client with a `401` it cannot
+act on. It moves when the gateway's auth moves, as a step of its own.
 
 ### Telemetry
 

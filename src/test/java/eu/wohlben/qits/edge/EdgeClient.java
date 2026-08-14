@@ -65,6 +65,10 @@ final class EdgeClient implements AutoCloseable {
     return send(HttpMethod.GET, host, uri, null, Map.of());
   }
 
+  Answer get(String host, String uri, Map<String, String> headers) {
+    return send(HttpMethod.GET, host, uri, null, headers);
+  }
+
   Answer send(
       HttpMethod method, String host, String uri, String body, Map<String, String> headers) {
     RequestOptions options = options(method, host, uri, headers);

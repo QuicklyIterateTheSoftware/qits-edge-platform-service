@@ -6,19 +6,28 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The whole of the edge's routing logic: a Host name in, an environment name out.
+ * The whole of the edge's routing logic: a Host name in, a {@link Route} out.
  *
- * <p>The convention is two spellings, both ending at the same environment:
+ * <p>The convention is two spellings:
  *
  * <pre>
- *   $app.$env.$domain      home.prod.example.com   -> prod
- *   $env.$domain           prod.example.com        -> prod
+ *   $env.$domain           prod.example.com          -> the prod gateway
+ *   $app.$env.$domain      registry.prod.example.com -> prod's registry, direct
  * </pre>
  *
  * <p>Everything else — the apex domain, an unknown environment name, an IP address, {@code
- * localhost}, a missing Host header — resolves to the <b>default environment</b>. There is no
- * "unroutable" answer, because an edge that refuses a name it does not recognise is an edge that
- * answers a mistyped URL with a connection error instead of the platform's own page.
+ * localhost}, a missing Host header — resolves to the <b>default environment's gateway</b>. An edge
+ * that refused a name it does not recognise would answer a mistyped URL with a connection error
+ * instead of the platform's own page.
+ *
+ * <p><b>An app label is refused when it is not configured</b>, and that is the one place the rule
+ * above does not hold. A name of the shape {@code $app.$env.$domain} — a first label in front of a
+ * KNOWN environment — is aimed at a service, and services are the names the edge authenticates. A
+ * fall-through to the gateway would hand exactly those requests to the one hop that does not
+ * authenticate them, so an unconfigured app label is {@link Route#unknownApp() unroutable} and the
+ * edge answers 404. Names that are not app-shaped are untouched by this: {@code
+ * staging.example.com} names no known environment at position 1, so it is still the default
+ * gateway's.
  *
  * <p><b>Only the first two labels are read</b>, which is what makes the domain itself irrelevant.
  * The edge is never told what {@code $domain} is: it may be one label ({@code prod.localhost}), two
@@ -38,20 +47,50 @@ import java.util.Set;
  */
 public final class HostEnvironments {
 
+  /**
+   * Where one Host name goes: an environment always, and an application when the name asked for
+   * one.
+   *
+   * @param environment the environment, never null — the app's environment when there is an app
+   * @param app the configured application the name reached, or null for that environment's gateway
+   * @param unknownApp the app-shaped label that is not configured, or null when the name routes.
+   *     Carried rather than discarded so the 404 can name it.
+   */
+  public record Route(String environment, String app, String unknownApp) {
+
+    static Route gateway(String environment) {
+      return new Route(environment, null, null);
+    }
+
+    /** Whether this name reaches an application directly rather than the environment gateway. */
+    public boolean toApp() {
+      return app != null;
+    }
+  }
+
   private final Set<String> environments;
   private final String defaultEnvironment;
+  private final Set<String> apps;
 
-  private HostEnvironments(Set<String> environments, String defaultEnvironment) {
+  private HostEnvironments(Set<String> environments, String defaultEnvironment, Set<String> apps) {
     this.environments = environments;
     this.defaultEnvironment = defaultEnvironment;
+    this.apps = apps;
+  }
+
+  /** An edge with no application names: {@code $app.$env.$domain} reaches nothing of its own. */
+  public static HostEnvironments of(Collection<String> environments, String defaultEnvironment) {
+    return of(environments, defaultEnvironment, Set.of());
   }
 
   /**
    * @param environments the routable environment names; blanks are dropped, case is not significant
    * @param defaultEnvironment where the apex and every unmatched name go; must be one of the above
+   * @param apps the configured application names — {@code qits.edge.apps}' key set
    * @throws IllegalArgumentException on an empty list, an unusable name, or a default outside it
    */
-  public static HostEnvironments of(Collection<String> environments, String defaultEnvironment) {
+  public static HostEnvironments of(
+      Collection<String> environments, String defaultEnvironment, Collection<String> apps) {
     Set<String> names = new LinkedHashSet<>();
     for (String environment : environments) {
       if (environment == null || environment.isBlank()) {
@@ -84,12 +123,39 @@ public final class HostEnvironments {
               + ". Every unmatched host goes to the default, so a default the edge cannot reach"
               + " would break most of its traffic rather than an edge case of it.");
     }
-    return new HostEnvironments(Set.copyOf(names), fallback);
+    Set<String> appNames = new LinkedHashSet<>();
+    for (String app : apps) {
+      if (app == null || app.isBlank()) {
+        continue;
+      }
+      String name = app.strip().toLowerCase(Locale.ROOT);
+      if (!isLabel(name)) {
+        throw new IllegalArgumentException(
+            "qits.edge.apps holds `"
+                + app
+                + "`, which cannot be a DNS label — an application name is the first label of the"
+                + " host clients type, so it may hold only letters, digits and inner hyphens.");
+      }
+      if (names.contains(name)) {
+        throw new IllegalArgumentException(
+            "`"
+                + name
+                + "` is both an environment and an application. The tie-break reads the first label"
+                + " as an application, so the environment would become unreachable by name.");
+      }
+      appNames.add(name);
+    }
+    return new HostEnvironments(Set.copyOf(names), fallback, Set.copyOf(appNames));
   }
 
   /** The routable environment names, lower case. */
   public Set<String> environments() {
     return environments;
+  }
+
+  /** The routable application names, lower case. */
+  public Set<String> apps() {
+    return apps;
   }
 
   /** Where the apex domain and every unmatched host go. */
@@ -98,27 +164,43 @@ public final class HostEnvironments {
   }
 
   /**
-   * The environment a Host name names, or {@link #defaultEnvironment()} when it names none.
+   * The environment a Host name names, or {@link #defaultEnvironment()} when it names none. The
+   * answer for an app-shaped name is that app's environment, whether or not the app is configured.
    *
    * @param host a Host header or HTTP/2 {@code :authority} value; a port suffix, a trailing dot and
    *     letter case are all tolerated, and {@code null} is the same as an unmatched name
    */
   public String resolve(String host) {
+    return route(host).environment();
+  }
+
+  /**
+   * Where a Host name goes, in full: an environment, an application when the name reached one, and
+   * an unroutable app label when it named one the edge does not have.
+   *
+   * @param host a Host header or HTTP/2 {@code :authority} value; a port suffix, a trailing dot and
+   *     letter case are all tolerated, and {@code null} is the same as an unmatched name
+   */
+  public Route route(String host) {
     String name = normalise(host);
     if (name.isEmpty() || isAddressLiteral(name)) {
       // An address literal carries no name to read. It is how the platform is reached before DNS
       // exists — a bootstrap curling the host's own port — and the default is the right answer.
-      return defaultEnvironment;
+      return Route.gateway(defaultEnvironment);
     }
     String[] labels = name.split("\\.", -1);
     // Position 1 first: see the class javadoc for why the three-label reading wins a tie.
     if (labels.length > 1 && environments.contains(labels[1])) {
-      return labels[1];
+      // App-shaped. The label in front of a known environment names a service or it names nothing —
+      // it does NOT fall through to the gateway, which is the hop that would serve it
+      // unauthenticated.
+      String app = labels[0];
+      return apps.contains(app) ? new Route(labels[1], app, null) : new Route(labels[1], null, app);
     }
     if (environments.contains(labels[0])) {
-      return labels[0];
+      return Route.gateway(labels[0]);
     }
-    return defaultEnvironment;
+    return Route.gateway(defaultEnvironment);
   }
 
   /** Lower case, no surrounding space, no trailing root dot, no port suffix, no IPv6 brackets. */

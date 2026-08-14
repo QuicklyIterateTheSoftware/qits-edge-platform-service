@@ -10,9 +10,9 @@ import java.util.Map;
  * how an environment name becomes an upstream address.
  *
  * <p>There is no route table and no path knowledge here, deliberately. The edge demultiplexes by
- * <b>host name</b> only, and everything it needs to do that is an environment name — so a new
- * environment is one entry in {@link #environments()} and nothing else. Paths, services and
- * segments are the environment gateway's business one hop further in.
+ * <b>host name</b> only — an environment name, and since the ingress campaign an optional
+ * application name in front of it. Paths and segments stay the environment gateway's business one
+ * hop further in: {@link #apps()} maps a whole NAME to a whole service, never a path to one.
  *
  * <p>Every upstream is derived from configuration ONLY. No part of a request selects a host or a
  * port: the Host name picks an environment out of a fixed list, and a name that is not in the list
@@ -92,4 +92,57 @@ public interface EdgeConfig {
    * written, and a stale one sends a whole tier's traffic to the wrong process.
    */
   Map<String, String> upstreamHosts();
+
+  /**
+   * The applications an {@code $app.$env.$domain} host name may reach directly, keyed by the {@code
+   * $app} label. An entry here is what turns {@code registry.dev.localhost} from "the dev gateway"
+   * into "dev's registry", and it is the on-switch: a label with no entry is refused, never
+   * forwarded to the gateway.
+   *
+   * <p>Empty by default, which is the pre-ingress edge exactly: no app label routes anywhere of its
+   * own, and only {@code $env.$domain} works.
+   *
+   * <p>A deployment names the map without a file, one prefix per application:
+   *
+   * <pre>
+   * QITS_EDGE_APPS_REGISTRY_HOST_PATTERN={env}-qits-artifacts
+   * QITS_EDGE_APPS_MIRROR_HOST_PATTERN=qits-platform-mirror
+   * </pre>
+   */
+  Map<String, App> apps();
+
+  /**
+   * One application's upstream, in the same shape as the environment gateway's above: a host
+   * pattern plus a port, with per-environment overrides for the topologies a pattern cannot
+   * describe.
+   */
+  interface App {
+
+    /**
+     * The upstream host, with {@code {env}} standing in for the environment the Host name named.
+     *
+     * <p>The placeholder is what keeps an environment's own services separate: {@code
+     * registry.dev.localhost} resolves {@code {env}-qits-artifacts} to {@code dev-qits-artifacts},
+     * and {@code registry.prod.localhost} to {@code prod-qits-artifacts}, from one entry.
+     *
+     * <p>A PLATFORM service names no placeholder — {@code qits-platform-mirror} is one process for
+     * every environment — and that is the whole difference between the two kinds here.
+     *
+     * <p>No default: an application with no address is a configuration error worth failing the
+     * startup on, not a 502 per request.
+     */
+    String hostPattern();
+
+    /** The port the application listens on. Overridable per environment by {@link #hosts()}. */
+    @WithDefault("8080")
+    int port();
+
+    /**
+     * Per-environment overrides, {@code qits.edge.apps.<app>.hosts.<env> = host} or {@code
+     * host:port}. The same role, and the same warning, as {@link #upstreamHosts()}: it exists for a
+     * developer's local process and for this repository's test suite, and a stale one sends a whole
+     * application's traffic to the wrong process.
+     */
+    Map<String, String> hosts();
+  }
 }

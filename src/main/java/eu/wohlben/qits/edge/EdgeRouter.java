@@ -2,6 +2,7 @@ package eu.wohlben.qits.edge;
 
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.runtime.RouteConstants;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
@@ -25,11 +26,16 @@ import org.jboss.logging.Logger;
  * The edge itself: one catch-all Vert.x route that reads the Host name, picks an environment, and
  * streams the exchange to that environment's gateway verbatim.
  *
- * <p><b>What this does not do</b> is most of what makes it worth having. It does not look at paths,
- * does not hold a route table beyond the environment list, does not authenticate, does not strip or
- * inject identity headers, and serves nothing of its own but {@code /q}. Every one of those belongs
- * to the environment gateway one hop further in, which already does them and is already tested for
- * them; a second implementation here would be a second answer to the same question.
+ * <p><b>What this does not do</b> is still most of what makes it worth having. It does not look at
+ * paths, does not hold a route table beyond the environment and application lists, does not strip
+ * or inject identity headers, and serves nothing of its own but {@code /q}. Those belong to the
+ * environment gateway one hop further in, which already does them and is already tested for them; a
+ * second implementation here would be a second answer to the same question.
+ *
+ * <p><b>Two things it does now do</b>, both host-shaped rather than path-shaped. An {@code
+ * $app.$env.$domain} name reaches a configured service directly instead of that environment's
+ * gateway, and such a name is authenticated here — see {@link EdgeAuth}. Nothing about either is a
+ * path decision: the app label picks a whole upstream, and the auth gate is per vhost.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
  * or response body and forwards a WebSocket upgrade by default, so the platform's interactive
@@ -64,9 +70,15 @@ public class EdgeRouter {
   @ConfigProperty(name = "quarkus.http.non-application-root-path", defaultValue = "/q")
   String nonApplicationRootPath;
 
+  @Inject EdgeAuth auth;
+
   private HostEnvironments hostEnvironments;
 
-  /** One reusable proxy per environment — the origin is fixed, so nothing is built per request. */
+  /**
+   * One reusable proxy per upstream — the origin is fixed, so nothing is built per request. Keyed
+   * by the environment name for a gateway and by {@code app.env} for an application, which is the
+   * host name's own spelling and so needs no second lookup table.
+   */
   private final Map<String, HttpProxy> proxies = new LinkedHashMap<>();
 
   /** The resolved addresses, kept for the startup log and the readiness payload. */
@@ -104,19 +116,31 @@ public class EdgeRouter {
   }
 
   void init(@Observes Router router) {
-    hostEnvironments = HostEnvironments.of(config.environments(), config.defaultEnvironment());
+    hostEnvironments =
+        HostEnvironments.of(
+            config.environments(), config.defaultEnvironment(), config.apps().keySet());
     client = vertx.createHttpClient(proxyClientOptions(config.connectTimeoutMs()));
 
     for (String environment : hostEnvironments.environments()) {
-      Upstream upstream = resolve(environment);
-      upstreams.put(environment, upstream);
-      proxies.put(
-          environment,
-          HttpProxy.reverseProxy(client)
-              .origin(upstream.port(), upstream.host())
-              .addInterceptor(new EdgeHeaders()));
+      register(environment, resolve(environment));
+      // Every application, in every environment. The app entry is one pattern and the environment
+      // list is the other axis, so the whole grid exists at boot and no address is built per
+      // request — the same SSRF guard as the gateways: a Host name selects an index, never a
+      // character of an address.
+      for (String app : hostEnvironments.apps()) {
+        register(app + "." + environment, resolveApp(app, environment));
+      }
     }
     router.route().order(ROUTE_ORDER).handler(this::handle);
+  }
+
+  private void register(String key, Upstream upstream) {
+    upstreams.put(key, upstream);
+    proxies.put(
+        key,
+        HttpProxy.reverseProxy(client)
+            .origin(upstream.port(), upstream.host())
+            .addInterceptor(new EdgeHeaders()));
   }
 
   /** The resolved environment to upstream map — the readiness payload and the startup log. */
@@ -131,12 +155,12 @@ public class EdgeRouter {
 
   void logTable(@Observes StartupEvent ignored) {
     upstreams.forEach(
-        (environment, upstream) ->
+        (name, upstream) ->
             LOG.infof(
-                "environment %-12s -> %s%s",
-                environment,
+                "%-14s -> %s%s",
+                name,
                 upstream,
-                environment.equals(hostEnvironments.defaultEnvironment()) ? "   (default)" : ""));
+                name.equals(hostEnvironments.defaultEnvironment()) ? "   (default)" : ""));
   }
 
   private Upstream resolve(String environment) {
@@ -146,6 +170,16 @@ public class EdgeRouter {
             ? override
             : config.upstreamHostPattern().replace("{env}", environment);
     return Upstream.parse(address, config.upstreamPort());
+  }
+
+  private Upstream resolveApp(String app, String environment) {
+    EdgeConfig.App spec = config.apps().get(app);
+    String override = spec.hosts().get(environment);
+    String address =
+        override != null && !override.isBlank()
+            ? override
+            : spec.hostPattern().replace("{env}", environment);
+    return Upstream.parse(address, spec.port());
   }
 
   private void handle(RoutingContext rc) {
@@ -159,14 +193,74 @@ public class EdgeRouter {
       return;
     }
 
-    String environment = hostEnvironments.resolve(authority(request));
+    HostEnvironments.Route route = hostEnvironments.route(authority(request));
+    if (route.unknownApp() != null) {
+      // NOT a fall-through to the gateway. The name is app-shaped, so it was aimed at a service —
+      // and the gateway is the hop that does not authenticate these. Answering here is the whole
+      // point: a mistyped registry vhost must fail, not quietly reach an unauthenticated route.
+      unknownApp(request, route);
+      return;
+    }
+
+    if (route.toApp() && EdgeAuth.isTokenRequest(request)) {
+      // The docker Bearer flow's own endpoint, advertised in the challenge below. It carries the
+      // credential that BUYS a token, so it is the one path on an app vhost that cannot require
+      // one.
+      auth.token(request);
+      return;
+    }
+
+    Future<String> checked = auth.check(route, request);
+    if (!checked.isComplete()) {
+      // The check crossed an event-loop boundary — a JWKS fetch. Hold the inbound body until there
+      // is somewhere to send it; vertx-http-proxy pauses and resumes the request itself, so handing
+      // it a paused one is the safe state to be in either way.
+      request.pause();
+    }
+    checked
+        .onSuccess(rejection -> dispatch(request, route, rejection))
+        .onFailure(
+            failure -> {
+              LOG.errorf(failure, "could not check the credential on %s", authority(request));
+              // A validator that cannot answer denies. The alternative is an outage of the identity
+              // provider becoming an outage of the auth gate, which is the wrong way round.
+              auth.challenge(request, "the credential could not be checked");
+            });
+  }
+
+  /**
+   * Proxy, or answer the challenge. Split out of {@link #handle} because it is what runs after the
+   * credential check, which may have crossed an event-loop boundary to refresh a signing key.
+   */
+  private void dispatch(HttpServerRequest request, HostEnvironments.Route route, String rejection) {
+    if (rejection != null) {
+      auth.challenge(request, rejection);
+      return;
+    }
     // A WebSocket upgrade short-circuits inside vertx-http-proxy before the interceptor chain is
     // installed, so the forwarded headers have to be written onto the inbound request instead. See
     // EdgeHeaders.applyForwarded.
     if (isWebSocketUpgrade(request)) {
       EdgeHeaders.applyForwarded(request.headers(), request);
     }
-    proxies.get(environment).handle(request);
+    proxies
+        .get(route.toApp() ? route.app() + "." + route.environment() : route.environment())
+        .handle(request);
+  }
+
+  private void unknownApp(HttpServerRequest request, HostEnvironments.Route route) {
+    request
+        .response()
+        .setStatusCode(404)
+        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+        .end(
+            "`"
+                + route.unknownApp()
+                + "` is not an application this edge routes. Configured: "
+                + hostEnvironments.apps()
+                + " — the environment `"
+                + route.environment()
+                + "` was read from the name and is fine.\n");
   }
 
   /**
