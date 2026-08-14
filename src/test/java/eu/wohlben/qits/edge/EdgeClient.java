@@ -6,7 +6,9 @@ import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.SocketAddress;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -33,8 +35,24 @@ import java.util.concurrent.TimeUnit;
  */
 final class EdgeClient implements AutoCloseable {
 
-  /** What the upstream reported back. */
-  record Answer(int status, Map<String, String> headers, String body) {
+  /**
+   * What the upstream reported back.
+   *
+   * @param headers one value per name, the FIRST one received. A response may repeat a name — the
+   *     edge sends two {@code WWW-Authenticate} challenges — and a map has to pick one; first is
+   *     the one that keeps reading like the wire, since a client that knows one scheme acts on the
+   *     first it recognises.
+   * @param raw every header line, in order, names lower-cased. The only way to assert a repeated
+   *     name and its order — see {@link #headerValues}.
+   */
+  record Answer(
+      int status, Map<String, String> headers, List<Map.Entry<String, String>> raw, String body) {
+
+    /** Every value sent under this name, in wire order. */
+    List<String> headerValues(String name) {
+      String wanted = name.toLowerCase(java.util.Locale.ROOT);
+      return raw.stream().filter(e -> e.getKey().equals(wanted)).map(Map.Entry::getValue).toList();
+    }
 
     /** The value of a {@code name=value} line in a stub gateway's report. */
     String line(String name) {
@@ -92,14 +110,17 @@ final class EdgeClient implements AutoCloseable {
                     .map(
                         received -> {
                           Map<String, String> seen = new LinkedHashMap<>();
+                          List<Map.Entry<String, String>> raw = new ArrayList<>();
                           response
                               .headers()
                               .forEach(
-                                  entry ->
-                                      seen.put(
-                                          entry.getKey().toLowerCase(java.util.Locale.ROOT),
-                                          entry.getValue()));
-                          return new Answer(response.statusCode(), seen, received.toString());
+                                  entry -> {
+                                    String name = entry.getKey().toLowerCase(java.util.Locale.ROOT);
+                                    raw.add(Map.entry(name, entry.getValue()));
+                                    seen.putIfAbsent(name, entry.getValue());
+                                  });
+                          return new Answer(
+                              response.statusCode(), seen, List.copyOf(raw), received.toString());
                         }))
         .onSuccess(answer::complete)
         .onFailure(answer::completeExceptionally);

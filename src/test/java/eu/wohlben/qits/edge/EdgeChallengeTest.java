@@ -44,6 +44,15 @@ class EdgeChallengeTest {
   }
 
   @Test
+  void theBasicChallengeNamesTheSameAuthorityTheBearerOneServes() {
+    // One door, described twice. A realm that disagreed with the Bearer challenge's `service` would
+    // read as two credentials to a client that shows the user which one it is asking for.
+    assertEquals(
+        "Basic realm=\"registry.dev.localhost:8080\"",
+        EdgeAuth.basicChallenge("registry.dev.localhost:8080"));
+  }
+
+  @Test
   void aRejectedTokenSaysSoSoTheClientRefetchesRatherThanGivingUp() {
     assertTrue(
         EdgeAuth.bearerChallenge("https", "registry.dev.localhost", "the token expired")
