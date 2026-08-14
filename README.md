@@ -122,6 +122,10 @@ a file.
 | `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
 | `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
+| `qits.edge.auth.basic-cache-ttl-ms` | `QITS_EDGE_AUTH_BASIC_CACHE_TTL_MS` | `300000` | Ceiling on how long a validated HTTP Basic credential is believed; the minted token's own life is the other half |
+| `qits.edge.auth.basic-cache-size` | `QITS_EDGE_AUTH_BASIC_CACHE_SIZE` | `1024` | The most validated credentials held at once, least-recently-used |
+| `qits.edge.auth.idp-retry-window-ms` | `QITS_EDGE_AUTH_IDP_RETRY_WINDOW_MS` | `45000` | How long a redeploying idp is waited out before the edge answers an error |
+| `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
 
 Four things fail **at startup** rather than per request, deliberately: an environment or application
@@ -155,7 +159,8 @@ The edge sees every request before anything else does and already reads the `Hos
 the right and cheapest place to gate. What it gates is a **vhost**, never a path: an application
 vhost fronts a service with no external auth of its own.
 
-A request to an application vhost must carry an idp access token. It is validated **offline**
+A request to an application vhost must carry an idp credential: an access token, or the client id
+and secret it is minted from (see *HTTP Basic* below). A token is validated **offline**
 against the keys fetched from `qits.idp.url/jwks` and cached — idp is overlay-only, so a host client
 cannot reach it, and keeping it off the per-pull path is worth more than the freshness a call-out
 would buy. An unknown `kid` buys **one** refresh, behind a cooldown, so a made-up kid cannot turn
@@ -202,6 +207,49 @@ one here would fail at idp with an `invalid_target` the caller cannot read, wher
 on the way back in puts the refusal where the reason is known. docker's `service` and `scope` query
 parameters are read and dropped: the audience the token carries *is* the permission, and
 per-repository grants would be a change to the platform's claim model rather than to this process.
+
+### HTTP Basic, for the clients that cannot do the dance
+
+maven, npm and git send `Authorization: Basic` and nothing else — none of them reads a Bearer
+challenge, fetches a token and retries — so a gated request carrying **Basic** is accepted on its
+own terms. The edge validates it the only way a client id and secret can be validated: it spends
+them at idp, exactly as `/token` does, and then treats the token that comes back as if the caller
+had presented it. Same issuer, same `exp`, same signature, same demanded audience — a commissioned
+client opens precisely the vhosts its audiences name.
+
+A credential that is not base64 of `<id>:<secret>` is refused **here**, without a call: there is
+nothing to ask idp about, and asking would hold the caller for the whole retry window below.
+
+The result is cached against a **SHA-256 of the credential** — never the credential — for the
+shorter of the minted token's life and `qits.edge.auth.basic-cache-ttl-ms`, in a bounded LRU. Without
+it, a Basic client resends its credential on every request, so every dependency fetch would put an
+idp round trip on the path. What is cached is the credential's own soundness plus the audiences it
+carried; the demanded audience is still answered per request, so one cached validation cannot cross
+tiers. **Refusals are not cached**: a rotated secret must start working the moment it is right.
+
+The `401` stays the Bearer challenge whatever the credential was — docker is the client that reads
+it — and carries `error="invalid_token"` when a credential was presented and refused.
+
+### An identity provider that is not there
+
+idp is a container like any other and is redeployed like any other. For a few seconds its name
+refuses, drops, or accepts a connection and never answers, and on 2026-08-14 a deploy push died with
+"the identity provider could not be reached" for landing inside that window.
+
+Every dial at idp — the `/token` broker, the Basic validation, the JWKS fetch — is therefore
+
+- **bounded per attempt** by `qits.edge.auth.idp-call-timeout-ms`, connection included, and
+- **retried** on connection-classed failures with a doubling backoff until
+  `qits.edge.auth.idp-retry-window-ms` runs out.
+
+An **answer** from idp is never retried: a `401` is idp deciding, and repeating the question would
+turn one refusal into a burst of them. Only the network is.
+
+The per-attempt timeout is the load-bearing half. A Vert.x client is built with no request timeout
+and no idle timeout, so an idp that accepts a connection and then says nothing leaves the call
+outstanding with nothing to end it — no status, no body, until the inbound connection's own idle
+timeout closes it an hour later. A docker client has no timeout of its own on a realm call, so what
+that looks like from the outside is a `docker push` that hangs rather than fails.
 
 ### The rollout switch
 

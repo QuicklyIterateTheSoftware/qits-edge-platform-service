@@ -516,7 +516,243 @@ class EdgeRoutingTest {
         client().get("registry.dev.example.com", "/v2/", bearer(issued)).line("upstream"));
   }
 
+  // --- HTTP Basic, for the clients that cannot do docker's dance --------------------------------
+
+  @Test
+  void aClientIdAndSecretOpenAGatedVhostOnTheirOwn() {
+    // maven, npm and git send Basic and nothing else. The edge spends the credential at idp and
+    // reads the token that comes back, so one commissioned client works for all three.
+    assertEquals(
+        "registry-dev",
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET))
+            .line("upstream"));
+    EdgeClient.Answer written =
+        client()
+            .send(
+                HttpMethod.POST,
+                "registry.dev.example.com",
+                "/v2/blob",
+                "x",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals("registry-dev", written.line("upstream"), "a write is the same decision");
+    assertEquals("x", written.line("body"));
+  }
+
+  @Test
+  void aBasicCredentialCarriesTheSameAudienceDemandAsABearer() {
+    // The whole point of validating rather than trusting: the client is real, its secret is right,
+    // and it is commissioned for an audience this vhost does not demand.
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.OTHER_ID, StubGateways.OTHER_SECRET));
+    assertEquals(401, answer.status());
+    assertTrue(
+        answer.headers().get("www-authenticate").startsWith("Bearer realm="),
+        // The challenge stays docker's, whatever the credential was: docker is the client that
+        // reads it, and the one that sent Basic here does not read challenges at all.
+        answer.headers().get("www-authenticate"));
+    assertTrue(
+        answer.headers().get("www-authenticate").contains("error=\"invalid_token\""),
+        "a credential that was refused says so, unlike a request that carried none");
+    assertNull(answer.line("upstream"));
+  }
+
+  @Test
+  void aWrongSecretIsRefusedAndIsNotRememberedAsARefusal() {
+    // Refusals are not cached: a rotated secret must start working the moment it is right, rather
+    // than staying shut for as long as a cache says it was wrong.
+    int before = StubGateways.grants();
+    assertEquals(
+        401, client().get("registry.dev.example.com", "/v2/", basic("nobody", "nothing")).status());
+    assertEquals(
+        401, client().get("registry.dev.example.com", "/v2/", basic("nobody", "nothing")).status());
+    assertEquals(before + 2, StubGateways.grants(), "each attempt is idp's decision to make");
+  }
+
+  @Test
+  void aValidatedCredentialIsRememberedForATimeAndThenAskedAboutAgain() throws Exception {
+    // A Basic client resends its credential on EVERY request — that is what makes it a Basic
+    // client — so without a cache each dependency fetch would put an idp round trip on the path.
+    Thread.sleep(cacheTtlMs() + 400);
+    int before = StubGateways.grants();
+    assertEquals(
+        "registry-dev",
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET))
+            .line("upstream"));
+    assertEquals(before + 1, StubGateways.grants(), "the first request spends the credential");
+
+    client()
+        .get(
+            "registry.dev.example.com",
+            "/v2/",
+            basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    client()
+        .get(
+            "registry.prod.example.com",
+            "/v2/",
+            basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals(
+        before + 1,
+        StubGateways.grants(),
+        "a remembered credential asks nobody — including on the other tier's vhost");
+
+    Thread.sleep(cacheTtlMs() + 400);
+    client()
+        .get(
+            "registry.dev.example.com",
+            "/v2/",
+            basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals(before + 2, StubGateways.grants(), "and the belief runs out");
+  }
+
+  @Test
+  void aBasicHeaderThatIsNotACredentialIsRefusedWithoutTroublingIdp() {
+    // An empty credential store, a truncated helper answer. There is nothing to ask about, and
+    // asking would hold the caller for the whole patience window while idp is being waited out.
+    int before = StubGateways.grants();
+    assertEquals(
+        401,
+        client()
+            .get("registry.dev.example.com", "/v2/", Map.of("Authorization", "Basic !!not-base64"))
+            .status());
+    assertEquals(
+        401,
+        client()
+            .get("registry.dev.example.com", "/v2/", Map.of("Authorization", "Basic "))
+            .status());
+    assertEquals(before, StubGateways.grants(), "neither reached the identity provider");
+  }
+
+  @Test
+  void anOpenReadStaysOpenWhateverTheCredentialSays() {
+    // The exemption is decided before any credential is read, so a garbage one cannot close a door
+    // that is meant to be open — the same as it has always been for a garbage Bearer.
+    assertEquals(
+        "mirror-dev",
+        client()
+            .get("mirror.dev.example.com", "/v2/", Map.of("Authorization", "Basic !!not-base64"))
+            .line("upstream"));
+  }
+
+  // --- an identity provider that is not there ---------------------------------------------------
+
+  @Test
+  void theBrokerWaitsOutAnIdpThatIsComingBack() throws Exception {
+    // 2026-08-14: a deploy push died with "the identity provider could not be reached" because idp
+    // was a few seconds into a redeploy. A refused connection is not an answer, so it is retried.
+    StubGateways.idpDown();
+    try {
+      java.util.concurrent.CompletableFuture<EdgeClient.Answer> answer =
+          client()
+              .sending(
+                  HttpMethod.GET,
+                  "registry.dev.example.com",
+                  "/token?service=registry.dev.example.com",
+                  null,
+                  basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+      Thread.sleep(400);
+      StubGateways.idpUp();
+      EdgeClient.Answer issued = answer.get(30, java.util.concurrent.TimeUnit.SECONDS);
+      assertEquals(200, issued.status(), issued.body());
+      assertNotNull(new JsonObject(issued.body()).getString("token"));
+    } finally {
+      StubGateways.idpUp();
+    }
+  }
+
+  @Test
+  void anIdpThatAcceptsAndNeverAnswersStillEndsInAnAnswerHere() {
+    // THE HANG, and the only path in this process that could produce one: a Vert.x client is built
+    // with no request timeout, so a connection that is accepted and never answered leaves the
+    // caller with no status, no body and nothing to time out against. docker has no timeout of its
+    // own on a realm call, so it waits for as long as the socket lives.
+    long start = System.currentTimeMillis();
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/token?service=registry.dev.example.com",
+                basic(StubGateways.SINKHOLE_ID, StubGateways.SINKHOLE_SECRET));
+    long took = System.currentTimeMillis() - start;
+    assertEquals(502, answer.status());
+    assertTrue(answer.body().contains("UNAVAILABLE"), answer.body());
+    assertTrue(took < 25_000, "the window bounds it, and it took " + took + "ms");
+  }
+
+  @Test
+  void aBasicRequestAgainstASilentIdpIsDeniedRatherThanHeld() {
+    // The same certainty on the gate: a check that cannot be made denies, and it denies in bounded
+    // time. An open-ended wait here would hold the connection instead of answering it.
+    long start = System.currentTimeMillis();
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.SINKHOLE_ID, StubGateways.SINKHOLE_SECRET));
+    long took = System.currentTimeMillis() - start;
+    assertEquals(401, answer.status());
+    assertNull(answer.line("upstream"));
+    assertTrue(took < 25_000, "the window bounds it, and it took " + took + "ms");
+  }
+
+  // --- the token endpoint's own credential-less arms ---------------------------------------------
+
+  @Test
+  void everyShapeOfMissingCredentialIsAnsweredPromptlyAndWhole() {
+    // What docker does after the challenge is call the realm, and with nothing stored it calls it
+    // with no credential or an empty one. Each of these must be a COMPLETE response — a body, a
+    // length, an end — because the client that gets it is waiting with no timeout of its own.
+    for (Map<String, String> headers :
+        List.of(
+            Map.<String, String>of(),
+            Map.of("Authorization", "Basic"),
+            Map.of("Authorization", "Basic "),
+            Map.of(
+                "Authorization",
+                "Basic "
+                    + Base64.getEncoder().encodeToString(":".getBytes(StandardCharsets.UTF_8))),
+            Map.of("Authorization", "Basic !!not-base64"))) {
+      for (HttpMethod method : new HttpMethod[] {HttpMethod.GET, HttpMethod.POST}) {
+        long start = System.currentTimeMillis();
+        EdgeClient.Answer answer =
+            client()
+                .send(
+                    method,
+                    "registry.dev.example.com",
+                    "/token?service=registry.dev.example.com",
+                    method == HttpMethod.POST ? "grant_type=client_credentials" : null,
+                    headers);
+        assertEquals(401, answer.status(), method + " " + headers);
+        assertTrue(
+            answer.headers().get("www-authenticate").startsWith("Basic realm="),
+            answer.headers().get("www-authenticate"));
+        assertTrue(answer.body().contains("UNAUTHORIZED"), answer.body());
+        assertTrue(
+            System.currentTimeMillis() - start < 5_000, method + " " + headers + " was not prompt");
+      }
+    }
+  }
+
   // --- helpers -----------------------------------------------------------------------------------
+
+  /**
+   * {@code qits.edge.auth.basic-cache-ttl-ms}, which StubGateways shrinks to a suite's patience.
+   */
+  private static long cacheTtlMs() {
+    return ConfigProvider.getConfig().getValue("qits.edge.auth.basic-cache-ttl-ms", Long.class);
+  }
 
   /** The issuer the stub idp uses, which is what {@code qits.idp.url} was set to. */
   private static String issuer() {

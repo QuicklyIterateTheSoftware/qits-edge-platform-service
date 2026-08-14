@@ -115,7 +115,15 @@ public class IdpKeys {
 
   private Future<Map<String, RSAPublicKey>> fetch() {
     RequestOptions options =
-        new RequestOptions().setMethod(HttpMethod.GET).setAbsoluteURI(idp.jwksUri());
+        new RequestOptions()
+            .setMethod(HttpMethod.GET)
+            .setAbsoluteURI(idp.jwksUri())
+            // BOUNDED, and this one is not a nicety either: a fetch is SHARED — every request that
+            // met an unknown kid waits on the same future, and `inFlight` is only cleared when it
+            // completes. An idp that accepts the connection and never answers would therefore wedge
+            // this cache for the life of the process, not for one request.
+            .setConnectTimeout(config.idpCallTimeoutMs())
+            .setTimeout(config.idpCallTimeoutMs());
     return client
         .request(options)
         .compose(HttpClientRequest::send)

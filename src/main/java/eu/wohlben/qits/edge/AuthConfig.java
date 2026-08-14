@@ -86,6 +86,50 @@ public interface AuthConfig {
   long clockSkewSeconds();
 
   /**
+   * How long a validated HTTP Basic credential is believed without asking idp again, in
+   * milliseconds — a CEILING, not a fixed life: the entry also dies with the token idp minted for
+   * it, whichever comes first.
+   *
+   * <p>The cache is what keeps a maven, npm or git client — none of which can do docker's token
+   * dance, so each resends its credential on every request — from putting one idp round trip on
+   * every dependency fetch. Five minutes is idp's own token life, so the ceiling is rarely the
+   * binding half.
+   */
+  @WithDefault("300000")
+  long basicCacheTtlMs();
+
+  /**
+   * The most credentials held at once. A bound rather than a tuning knob: the key is a caller's, so
+   * an unbounded map is a caller-sized allocation.
+   */
+  @WithDefault("1024")
+  int basicCacheSize();
+
+  /**
+   * How long the edge keeps trying to reach idp before it answers an error, in milliseconds.
+   *
+   * <p>idp is redeployed like any other container, and for a few seconds its name refuses, drops or
+   * accepts-and-never-answers. This is the window in which that is invisible: a client that is told
+   * "no" retries a whole push, one that waits two seconds does not notice. It bounds the sequence,
+   * so a caller is always answered.
+   */
+  @WithDefault("45000")
+  long idpRetryWindowMs();
+
+  /**
+   * How long ONE call to idp may take, in milliseconds, connection included.
+   *
+   * <p><b>This is the value that makes an answer certain.</b> A Vert.x client is built with no
+   * request timeout and no idle timeout, so an address that accepts a connection and then says
+   * nothing — a swarm VIP whose task is still starting — leaves the call outstanding with nothing
+   * to end it. The caller waiting on the other side gets no status and no body until {@code
+   * quarkus.http.idle-timeout} closes the inbound connection an hour later, and a docker client has
+   * no timeout of its own on a realm call: it waits.
+   */
+  @WithDefault("5000")
+  long idpCallTimeoutMs();
+
+  /**
    * The shortest gap between two JWKS fetches, in milliseconds. An unknown {@code kid} triggers one
    * refresh; this is what stops a caller with a made-up kid from turning that into a request per
    * request at the identity provider.
