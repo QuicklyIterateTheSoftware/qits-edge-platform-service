@@ -5,7 +5,8 @@ request, and streams the request unchanged to whatever that name selects — an 
 or one of that environment's services directly.
 
 A small, stateless Quarkus 3 (Java 25) application that compiles to a **GraalVM native binary**. No
-database, no ORM, no REST layer, no client, no session.
+database, no ORM, no REST layer. It holds no session of its own either: the browser gate reads
+idp's, caches what idp said, and forgets it.
 
 ```
                           ┌────────────────────────────────────────┐
@@ -61,13 +62,15 @@ application. Nothing in a request ever contributes a character to an address: a 
   gate is per vhost — per vhost and *method*, where a deployment opened reads, but never per path;
   no prefix matching, no rewriting. `/token` is the single path this process claims, and only on an
   application vhost.
-- **No login, no session, no browser flow.** The edge validates a machine credential; the browser
-  half of authentication terminates at the environment gateway, which already does it.
-- **No header stripping or injection beyond `X-Forwarded-*`.** `X-Qits-*` hygiene belongs to the
-  component that *asserts* those headers — the environment gateway. A second implementation here
-  would put one security contract in two repositories, and the copy that is not next to the
-  injection is the copy that rots. `Authorization`, `Cookie` and every custom header pass through
-  untouched.
+- **No login page and no session of its own.** The edge *reads* a session — it introspects the
+  `qits-session` cookie at idp and turns it into identity headers (see *Browser sessions* below) —
+  but it issues none, stores none, and serves no page. Registration, login and logout are
+  qits-platform-idp's, reached through the anonymous `/idp/` prefix like any other path.
+- **No header stripping or injection beyond `X-Forwarded-*` and `X-Qits-*`.** The reserved prefix is
+  stripped, and the three identity headers are asserted, only on the environment vhost and only
+  while the session gate is on. The environment gateway still does its own hygiene and has to: a
+  request can reach it from qits-net without passing this process. `Authorization`, `Cookie` and
+  every custom header pass through untouched.
 - **No UI, no SPA, no landing page, no `/api`.** The paths this process answers are `/q` and, on an
   application vhost only, `/token`.
 - **No TLS of its own to configure.** The image carries a Let's Encrypt certificate *slot* and
@@ -126,12 +129,22 @@ a file.
 | `qits.edge.auth.basic-cache-size` | `QITS_EDGE_AUTH_BASIC_CACHE_SIZE` | `1024` | The most validated credentials held at once, least-recently-used |
 | `qits.edge.auth.idp-retry-window-ms` | `QITS_EDGE_AUTH_IDP_RETRY_WINDOW_MS` | `45000` | How long a redeploying idp is waited out before the edge answers an error |
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
+| `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on the environment vhost — **the rollout flag** |
+| `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
+| `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent |
+| `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all |
+| `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
+| `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
+| `qits.edge.sessions.stale-grace-ms` | `QITS_EDGE_SESSIONS_STALE_GRACE_MS` | `60000` | How long a cached session outlives an **unreachable** idp |
+| `qits.edge.sessions.client-id` | `QITS_EDGE_SESSIONS_CLIENT_ID` | — | The edge's own idp client (`{env}-qits-edge`), for introspection |
+| `qits.edge.sessions.client-secret` | `QITS_EDGE_SESSIONS_CLIENT_SECRET` | — | Its secret. Both are seeded by the bootstrap |
 | `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
 
-Four things fail **at startup** rather than per request, deliberately: an environment or application
-name that could not be a DNS label, a default that is not in the list, and an application that
-shares an environment's name (the tie-break would make that environment unreachable). All would
-otherwise be a 502, a 404 or a connection error with nothing to read.
+Five things fail **at startup** rather than per request, deliberately: an environment or application
+name that could not be a DNS label, a default that is not in the list, an application that shares an
+environment's name (the tie-break would make that environment unreachable), and the session gate
+turned on with no client id and secret to introspect with. All would otherwise be a 502, a 404, a
+connection error or a 401 on every request, with nothing to read.
 
 The applications map is shipped **empty**, and an application entry is the on-switch: a name only
 reaches a service when a deployment names it. A deployment declares the whole set without a file:
@@ -251,6 +264,66 @@ outstanding with nothing to end it — no status, no body, until the inbound con
 timeout closes it an hour later. A docker client has no timeout of its own on a realm call, so what
 that looks like from the outside is a `docker push` that hangs rather than fails.
 
+## Browser sessions — the other half, dark behind a flag
+
+Machine credentials are the section above. A **person** carries neither a token nor a client secret,
+so the environment vhost — the one name a browser ever types — gates a `qits-session` cookie
+instead. `qits.edge.sessions.enabled` is **off**: the gate lands before idp can issue a session and
+before the environment gateway reads the headers, so it ships inert and is flipped as a step of its
+own (see `user-authentication-plan.md` in the home repository for the order and why it is one).
+
+With the flag on, a request to `$env.$domain` is decided like this:
+
+1. every inbound `X-Qits-*` header is dropped — the reserved prefix is what a hop *asserts*, so
+   nothing a client sends under it may survive;
+2. an `Authorization: Bearer` or `Basic` takes the machine path above, checked in full, and is
+   proxied with **no** identity headers — a machine's identity is in its token;
+3. a `qits-session` cookie is introspected at idp and becomes `X-Qits-User`, `X-Qits-User-Id` and
+   `X-Qits-Roles` (comma-separated — a role never holds a comma, and one that did is dropped);
+4. a path under `/idp/` is proxied anonymously, because the login page has to be reachable by
+   somebody who cannot log in yet;
+5. anything else is refused: a **navigation** (`Sec-Fetch-Mode: navigate`, or a `GET` accepting
+   `text/html`) gets `302` to `/idp/login?redirect=<path>`, and everything else gets `401`.
+
+Application vhosts are untouched by every line of it — nothing browses a registry.
+
+**The redirect target can only ever be a path on this host.** It is where a browser is sent *after*
+authenticating, so anything naming another origin would turn the platform's own login into a
+redirector for somebody else's; `//host`, `/\host`, an absolute URL and a value holding a control
+character all collapse to `/`.
+
+**A dead cookie still reaches `/idp/`.** The prefix answers every caller with no usable credential,
+not only the ones carrying none — otherwise a browser holding a revoked session would be redirected
+to a login page it is refused at, forever. This is the one place the order differs from the plan's,
+and the reason is that loop.
+
+**A 401 here carries no `WWW-Authenticate`**, unlike an application vhost's. A `Basic` challenge
+pops the browser's own credential dialog on every background fetch a logged-out tab makes, and the
+credential a browser holds is a cookie. The JSON body names the login page instead, so an SPA can
+send the user there itself.
+
+### Introspection, and the cache in front of it
+
+The cookie is **opaque** — 256 random bits, stored hashed at idp — so this process cannot decide
+anything about it alone: it `POST`s `<qits.idp.url>/api/sessions/introspect` with its own client id
+and secret in HTTP Basic and reads `{userId, username, roles, expiresAt}`. A non-200 is a refusal.
+The alternative, a signed cookie verified offline against the JWKS already held here, would cost
+revocation — a logout would be a row idp changed and nobody read.
+
+The dial is bounded exactly like every other call at idp (`idp-call-timeout-ms` per attempt,
+connection-classed retries inside `idp-retry-window-ms`, an **answer** never retried). The result is
+cached against a **SHA-256 of the cookie** — never the cookie — in a bounded LRU, for
+`cache-ttl-ms`. Refusals are not cached: a browser that has just logged in must not keep being
+refused.
+
+`stale-grace-ms` is the lesson the token broker paid for on 2026-08-14: idp is redeployed like any
+other container, and for a few seconds its name refuses or never answers. A machine retries a push
+and nobody notices; a person is logged out mid-click. So a session idp has already vouched for
+answers for that much longer while idp is **unreachable** — never when idp *answers* no, and never
+past the session's own `expiresAt`, so it widens no door that was open.
+
+**Revocation lags by `cache-ttl-ms`** (30 seconds by default). Stated so nobody files it as a bug.
+
 ### The rollout switch
 
 Application vhosts enforce from their first request — nothing reached them before, so there is no
@@ -335,7 +408,7 @@ Spotless (google-java-format) runs at `process-sources`, so formatting is never 
 
 ## The suite
 
-Everything end to end lives in **one** `@QuarkusTest` class, and it has to stay that way. A
+Everything end to end lives in **one** `@QuarkusTest` class per JVM, and it has to stay that way. A
 WebSocket upgrade through `vertx-http-proxy` only survives the **first** Quarkus start in a JVM;
 after a restart it silently degrades to a plain proxied GET, so the handshake fails with nothing
 logged anywhere. It is a property of the test harness, not of this code (qits-gateway paid for
@@ -343,6 +416,12 @@ finding it, and works around it with a second surefire execution). A restart hap
 class needs a different configuration from the one before it — so one class, one test resource, one
 start is the cheapest immunity. **Splitting `EdgeRoutingTest` is how the socket tests start failing
 for no visible reason.**
+
+`EdgeSessionGateTest` is the one exception and it pays the fare: the session gate is a boot-time
+flag, so proving both of its states needs two starts. It runs in a **second surefire execution**,
+which forks a second JVM in which its application is the first start — the same workaround
+qits-gateway uses, spelled out in `pom.xml`. `EdgeRoutingTest` keeps the flag **off**, which is what
+makes it the proof that off changes nothing: it is unchanged.
 
 Two harness details worth knowing before they cost an afternoon:
 

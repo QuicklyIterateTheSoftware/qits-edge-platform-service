@@ -9,9 +9,11 @@ import io.vertx.httpproxy.ProxyContext;
 import io.vertx.httpproxy.ProxyInterceptor;
 import io.vertx.httpproxy.ProxyRequest;
 import io.vertx.httpproxy.ProxyResponse;
+import java.util.List;
 
 /**
- * Everything the edge does to a request, which is two things and nothing else.
+ * Everything the edge does to a request: two things always, and a third while the session gate is
+ * on.
  *
  * <p><b>1. It keeps the client's Host.</b> {@code vertx-http-proxy} leaves a proxied request's
  * authority unset, and the Vert.x client then fills the {@code Host} header in from the socket it
@@ -32,11 +34,15 @@ import io.vertx.httpproxy.ProxyResponse;
  * these three, and nothing does: they are diagnostics and link generation. What authentication the
  * edge does make a decision on is the bearer token, which is signed — see {@code EdgeAuth}.
  *
- * <p><b>Nothing else is touched.</b> No header is stripped, no header is added, no path is
- * rewritten, no body is read. {@code X-Qits-*} hygiene in particular is <i>not</i> done here: it
- * belongs to the component that asserts those headers, which is the environment gateway. Doing it
- * twice would put one contract in two repositories, and the copy that is not next to the injection
- * is the copy that rots.
+ * <p><b>3. It keeps the {@code X-Qits-*} namespace honest</b>, but only on the environment vhost
+ * and only while {@link SessionsConfig#enabled()} — see {@link #applyIdentity}. Until the edge
+ * asserted an identity of its own, this hygiene belonged to the component that asserts those
+ * headers, which was the environment gateway alone; the edge terminating browser sessions is what
+ * moved a copy of it here. The gateway still does its own, and has to: a request may reach it from
+ * qits-net without passing this process at all.
+ *
+ * <p><b>Nothing else is touched.</b> No other header is stripped, no path is rewritten, no body is
+ * read. {@code Authorization}, {@code Cookie} and every custom header pass through as they arrived.
  *
  * <p>{@code ProxyInterceptor} has no single abstract method, so this is a class rather than a
  * lambda. Nothing about it is environment-specific, so one instance is shared by every proxy.
@@ -46,6 +52,76 @@ final class EdgeHeaders implements ProxyInterceptor {
   static final String FOR = "X-Forwarded-For";
   static final String HOST = "X-Forwarded-Host";
   static final String PROTO = "X-Forwarded-Proto";
+
+  /**
+   * The platform's reserved header namespace: what a hop ASSERTS about a request and what every
+   * service behind it believes unconditionally. The strip rule is the same prefix, which is the
+   * whole point — an enumerated list's failure mode is adding a trusted header and forgetting to
+   * extend it, a silent, additive mistake no test naturally catches. The spelling is
+   * qits-gateway's, because it is the same contract one hop further in.
+   */
+  static final String RESERVED_PREFIX = "X-Qits-";
+
+  /** The principal NAME — what an upstream writes into an audit column. */
+  static final String USER = RESERVED_PREFIX + "User";
+
+  /** The stable subject id, which outlives a rename. */
+  static final String USER_ID = RESERVED_PREFIX + "User-Id";
+
+  /**
+   * The role strings, comma-separated. New with browser sessions, and nothing downstream is obliged
+   * to read it yet — it is asserted from the start because adding a trusted header later means
+   * re-proving the strip rule.
+   */
+  static final String ROLES = RESERVED_PREFIX + "Roles";
+
+  /**
+   * Whether a header name belongs to the reserved namespace. Case-insensitive: header names are,
+   * and a client sending {@code x-qits-user} must be treated exactly like one sending {@code
+   * X-Qits-User}.
+   */
+  static boolean isReserved(String name) {
+    return name != null
+        && name.length() > RESERVED_PREFIX.length()
+        && name.regionMatches(true, 0, RESERVED_PREFIX, 0, RESERVED_PREFIX.length());
+  }
+
+  /**
+   * Drop every inbound {@code X-Qits-*} header, then assert the session's own — the
+   * strip-then-inject of the forward-auth contract, on one request's header map.
+   *
+   * <p><b>Both halves stay in this one method, and that is the rule rather than a tidiness.</b> The
+   * forged header and the trusted one have the same name, so the code that writes the trusted value
+   * has to be downstream of the code that removes the forged one; splitting them puts a security
+   * property in the hands of a call order somewhere else.
+   *
+   * <p><b>Called on the INBOUND request's map</b>, by {@link EdgeRouter} at the single point where
+   * a request leaves this process for an upstream. That is what covers the two paths at once: an
+   * ordinary proxied request copies these headers, and a WebSocket upgrade — which short-circuits
+   * inside {@code vertx-http-proxy} before the interceptor chain is installed, so {@link
+   * #handleProxyRequest} never runs for it — is forwarded from this same map. An upgrade was the
+   * way a forged {@code X-Qits-User} reached the gateway through the front door before this
+   * existed.
+   *
+   * @param session the validated session whose identity is asserted, or null to strip and assert
+   *     nothing — an anonymous request, or a machine credential, whose identity is in its token
+   */
+  static void applyIdentity(MultiMap headers, EdgeSessions.Session session) {
+    // Snapshot the names first: removing from the map while iterating its own name view would
+    // otherwise skip entries.
+    for (String name : List.copyOf(headers.names())) {
+      if (isReserved(name)) {
+        headers.remove(name);
+      }
+    }
+    if (session == null) {
+      return;
+    }
+    // Only now, with the namespace provably empty, is it safe to write into it.
+    headers.set(USER, session.username());
+    headers.set(USER_ID, session.userId());
+    headers.set(ROLES, session.roles());
+  }
 
   @Override
   public Future<ProxyResponse> handleProxyRequest(ProxyContext context) {
