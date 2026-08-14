@@ -1,21 +1,25 @@
 package eu.wohlben.qits.edge;
 
 import io.vertx.core.Future;
-import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
-import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import org.jboss.logging.Logger;
 
@@ -44,6 +48,20 @@ import org.jboss.logging.Logger;
  *
  * <p>The token itself is validated OFFLINE against idp's published keys ({@link IdpKeys}), so idp
  * is on the login path and not on the per-pull path.
+ *
+ * <h2>The other half: clients that cannot do the dance</h2>
+ *
+ * <p>maven, npm and git send HTTP Basic and nothing else — there is no client in any of them that
+ * reads a {@code WWW-Authenticate: Bearer} challenge, fetches a token and retries. So a gated
+ * request carrying {@code Authorization: Basic} is validated the only way a client id and secret
+ * can be: by spending them at idp ({@link IdpGrants}) and reading the token that comes back. What
+ * happens next is the Bearer path exactly — same issuer, same expiry, same signature, same demanded
+ * audience — so a commissioned client opens precisely the vhosts its audiences name and no others.
+ *
+ * <p><b>The result is cached against a HASH of the credential</b>, never the credential, for the
+ * shorter of the minted token's life and {@link AuthConfig#basicCacheTtlMs()}. Without it every
+ * dependency fetch would put an idp round trip on the path, which is the thing offline validation
+ * exists to avoid. Refusals are not cached — see {@link #checkBasic}.
  *
  * <h2>The one gap in a gated vhost</h2>
  *
@@ -76,24 +94,45 @@ public class EdgeAuth {
   private static final String BEARER = "bearer ";
   private static final String BASIC = "basic ";
 
-  @Inject Vertx vertx;
-
   @Inject AuthConfig config;
 
   @Inject Idp idp;
 
   @Inject IdpKeys keys;
 
-  private HttpClient client;
+  @Inject IdpGrants grants;
 
   /** {@link AuthConfig#anonymousReadApps()}, normalised once — see {@link #readApps}. */
   private Set<String> anonymousReadApps;
 
+  /**
+   * Credential fingerprint to what idp said about it. Bounded and least-recently-used: the key
+   * comes from a caller, so an unbounded map is a caller-sized allocation.
+   */
+  private Map<String, Validated> validated;
+
   @PostConstruct
   void open() {
-    client = vertx.createHttpClient();
     anonymousReadApps = readApps(config.anonymousReadApps().orElse(List.of()));
+    int capacity = config.basicCacheSize();
+    validated =
+        Collections.synchronizedMap(
+            // Access-ordered, so the entry evicted is the one longest unused rather than the one
+            // written longest ago — a busy client stays cached while a one-off caller ages out.
+            new LinkedHashMap<>(16, 0.75f, true) {
+              @Override
+              protected boolean removeEldestEntry(Map.Entry<String, Validated> eldest) {
+                return size() > capacity;
+              }
+            });
   }
+
+  /**
+   * A credential idp accepted: the audiences the token it minted carried, and when this belief
+   * stops. The audiences are kept rather than a yes/no, because the demanded audience is a
+   * per-request question — one cached validation must still refuse the vhost of another tier.
+   */
+  private record Validated(JsonArray audiences, long expiresAtMillis) {}
 
   /**
    * The configured app labels, in the spelling {@link HostEnvironments} produces: stripped, lower
@@ -162,6 +201,12 @@ public class EdgeAuth {
       return Future.succeededFuture(null);
     }
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+    String audience = audienceFor(config.audiencePattern(), route.environment());
+    if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
+      // A client id and secret, sent by something that cannot do docker's token dance — maven, npm,
+      // git. Spending them at idp is the only way to know they are good.
+      return checkBasic(header.substring(BASIC.length()).trim(), audience);
+    }
     if (header == null || !header.toLowerCase(Locale.ROOT).startsWith(BEARER)) {
       return Future.succeededFuture("no bearer token");
     }
@@ -171,12 +216,7 @@ public class EdgeAuth {
     } catch (IllegalArgumentException e) {
       return Future.succeededFuture(e.getMessage());
     }
-    String problem =
-        jwt.problem(
-            idp.issuer(),
-            audienceFor(config.audiencePattern(), route.environment()),
-            Instant.now(),
-            config.clockSkewSeconds());
+    String problem = jwt.problem(idp.issuer(), audience, Instant.now(), config.clockSkewSeconds());
     if (problem != null) {
       // Claims before signature: a claim check needs no key, so an expired or misaddressed token is
       // refused without a JWKS lookup — and a made-up kid cannot use one to force a fetch.
@@ -184,6 +224,114 @@ public class EdgeAuth {
     }
     return keys.find(jwt.kid())
         .map(key -> jwt.signatureMatches(key) ? null : "the token's signature does not verify");
+  }
+
+  /**
+   * Whether an HTTP Basic credential opens this vhost: cached belief first, then idp.
+   *
+   * <p><b>Only the acceptance is cached.</b> A refusal is not, and briefly caching one would be
+   * worse than useless: the case it would speed up is a client whose secret was just rotated, which
+   * would then keep being refused after the operator fixed it — a stuck door with no way to knock.
+   * The cost of not caching is one idp call per wrong credential, which is idp's rate limit to
+   * enforce and not a decision this process can make on its behalf.
+   *
+   * <p>An idp that cannot be reached at all is a FAILED future, never a refusal: the caller denies
+   * on it (a validator that cannot answer must not open the door) but it is not written down as a
+   * verdict about the credential.
+   */
+  private Future<String> checkBasic(String credential, String audience) {
+    if (!isClientCredentials(credential)) {
+      // Refused HERE, without a call. A credential that cannot be a client id and a secret has
+      // nothing to ask idp about, and asking would spend the whole patience window on it during an
+      // idp outage — which is how a client with no credential at all comes to hang.
+      return Future.succeededFuture("the credential is not a client id and a secret");
+    }
+    String fingerprint = fingerprint(credential);
+    Validated known = validated.get(fingerprint);
+    if (known != null && known.expiresAtMillis() > System.currentTimeMillis()) {
+      return Future.succeededFuture(refusalFor(known.audiences(), audience));
+    }
+    return grants
+        .grant("Basic " + credential)
+        .compose(
+            grant -> {
+              if (grant.status() != 200) {
+                return Future.succeededFuture("the identity provider refused these credentials");
+              }
+              SignedJwt minted;
+              try {
+                minted = SignedJwt.parse(new JsonObject(grant.body()).getString("access_token"));
+              } catch (RuntimeException e) {
+                return Future.succeededFuture("the identity provider issued no usable token");
+              }
+              String problem =
+                  minted.problem(idp.issuer(), Instant.now(), config.clockSkewSeconds());
+              if (problem != null) {
+                return Future.succeededFuture(problem);
+              }
+              // The same signature check a presented Bearer gets. The key is already cached, so it
+              // is arithmetic — and running the one code path means a credential can never buy
+              // more than the token it stands for.
+              return keys.find(minted.kid())
+                  .map(
+                      key -> {
+                        if (!minted.signatureMatches(key)) {
+                          return "the minted token's signature does not verify";
+                        }
+                        validated.put(fingerprint, remember(minted));
+                        return refusalFor(minted.audiences(), audience);
+                      });
+            });
+  }
+
+  /** null when these audiences include the one this vhost demands, the reason when they do not. */
+  private static String refusalFor(JsonArray audiences, String audience) {
+    return audiences.contains(audience) ? null : "the credential is not for " + audience;
+  }
+
+  /** How long to believe a credential: the token's own life, capped by configuration. */
+  private Validated remember(SignedJwt minted) {
+    long now = System.currentTimeMillis();
+    long tokenLifeMs = minted.expiry() == null ? 0 : minted.expiry().toEpochMilli() - now;
+    return new Validated(
+        minted.audiences(), now + Math.max(0, Math.min(config.basicCacheTtlMs(), tokenLifeMs)));
+  }
+
+  /**
+   * Whether this is base64 of {@code <client id>:<secret>} — RFC 7617's shape and nothing about
+   * whether idp knows it.
+   *
+   * <p>The credential is decoded here and NOWHERE else: this process does not log it, store it or
+   * carry it past this call, and what it relays to idp is the header exactly as it arrived.
+   */
+  static boolean isClientCredentials(String credential) {
+    if (credential == null || credential.isBlank()) {
+      return false;
+    }
+    String decoded;
+    try {
+      decoded = new String(Base64.getDecoder().decode(credential), StandardCharsets.UTF_8);
+    } catch (IllegalArgumentException notBase64) {
+      return false;
+    }
+    int colon = decoded.indexOf(':');
+    return colon > 0 && colon < decoded.length() - 1;
+  }
+
+  /**
+   * A credential as a cache key. SHA-256, so the secret itself is never a map key, a log line or
+   * anything a heap dump could hand over.
+   */
+  static String fingerprint(String credential) {
+    try {
+      return Base64.getUrlEncoder()
+          .withoutPadding()
+          .encodeToString(
+              MessageDigest.getInstance("SHA-256")
+                  .digest(credential.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is not usable in this JVM", e);
+    }
   }
 
   /**
@@ -228,63 +376,63 @@ public class EdgeAuth {
    * The token endpoint: docker's GET, HTTP Basic in, a docker-shaped token out.
    *
    * <p>What arrives is an idp client id and secret. They are relayed to idp's own token endpoint
-   * verbatim — this process never sees them decoded, never stores them, and makes no decision about
-   * them; idp authenticates the client and decides its audiences, exactly as it does for every
-   * other machine caller on the platform.
+   * verbatim — this process stores nothing and decides nothing about them beyond their SHAPE; idp
+   * authenticates the client and decides its audiences, exactly as it does for every other machine
+   * caller on the platform.
+   *
+   * <p><b>Every arm of this method ends a response.</b> That is the whole requirement docker places
+   * on it: the CLI reaches this endpoint from a challenge it was handed and has no timeout of its
+   * own, so an arm that answers nothing is a client that waits forever rather than one that fails.
+   * A credential that is missing or is not a credential is answered here, without a call; a call is
+   * bounded by {@link AuthConfig#idpCallTimeoutMs()} inside {@link AuthConfig#idpRetryWindowMs()};
+   * and both outcomes of that end a response.
    */
   public void token(HttpServerRequest request) {
     String basic = request.getHeader(HttpHeaders.AUTHORIZATION);
     if (basic == null || !basic.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
       // Basic, not Bearer: this is the endpoint that SELLS bearer tokens, so asking for one here
       // would be a loop. docker sends the stored `docker login` credential when it sees this.
-      request
-          .response()
-          .setStatusCode(401)
-          .putHeader(WWW_AUTHENTICATE, "Basic realm=\"" + authority(request) + "\"")
-          .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
-          .end(dockerErrors("UNAUTHORIZED", "client credentials required").encode());
+      basicChallenge(request, "client credentials required");
+      return;
+    }
+    String credential = basic.substring(BASIC.length()).trim();
+    if (!isClientCredentials(credential)) {
+      // A header that says Basic and carries no client id and secret — an empty credential store,
+      // a truncated helper answer. There is nothing to ask idp, and asking would hold the client
+      // for the whole patience window while an unreachable idp is waited out.
+      basicChallenge(request, "client credentials required");
       return;
     }
     LOG.debugf(
         "token request for service=%s scope=%s",
         request.getParam("service"), request.getParam("scope"));
 
-    RequestOptions options =
-        new RequestOptions().setMethod(HttpMethod.POST).setAbsoluteURI(idp.tokenEndpoint());
-    client
-        .request(options)
-        .compose(
-            idpRequest -> {
-              idpRequest.putHeader(HttpHeaders.AUTHORIZATION, basic);
-              idpRequest.putHeader(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded");
-              idpRequest.putHeader(HttpHeaders.ACCEPT, "application/json");
-              // NO `audience` parameter, which asks idp for the client's whole allowed list. The
-              // alternative — naming the audience here — makes a client that lacks it fail at idp
-              // with an invalid_target the caller cannot read. Asking for everything and checking
-              // the audience on the way back in puts the refusal where the reason is known.
-              return idpRequest.send("grant_type=client_credentials");
-            })
-        .compose(
-            response ->
-                response.body().map(body -> new IdpAnswer(response.statusCode(), body.toString())))
+    grants
+        .grant(basic)
         .onSuccess(answer -> relay(request, answer))
         .onFailure(
-            failure -> {
-              LOG.errorf(failure, "could not reach %s", idp.tokenEndpoint());
-              request
-                  .response()
-                  .setStatusCode(502)
-                  .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
-                  .end(
-                      dockerErrors("UNAVAILABLE", "the identity provider could not be reached")
-                          .encode());
-            });
+            failure ->
+                request
+                    .response()
+                    .setStatusCode(502)
+                    .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
+                    .end(
+                        dockerErrors("UNAVAILABLE", "the identity provider could not be reached")
+                            .encode()));
   }
 
-  private record IdpAnswer(int status, String body) {}
+  /** The 401 that asks for the stored {@code docker login} credential. */
+  private void basicChallenge(HttpServerRequest request, String message) {
+    request
+        .response()
+        .setStatusCode(401)
+        .putHeader(WWW_AUTHENTICATE, "Basic realm=\"" + authority(request) + "\"")
+        .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
+        .end(dockerErrors("UNAUTHORIZED", message).encode());
+  }
 
   /** idp's RFC 6749 token response, redressed as the Distribution spec's. */
-  private void relay(HttpServerRequest request, IdpAnswer answer) {
+  private void relay(HttpServerRequest request, IdpGrants.Grant answer) {
     if (answer.status() != 200) {
       LOG.warnf("idp refused a token request with %d", answer.status());
       request

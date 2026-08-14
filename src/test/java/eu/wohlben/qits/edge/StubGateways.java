@@ -33,16 +33,65 @@ import java.util.concurrent.TimeUnit;
  * over time, and a WebSocket upgrade. A JDK {@code HttpServer} cannot do the third at all.
  *
  * <p>The stub idp answers the two paths the edge derives from {@code qits.idp.url}: {@code
- * /idp/jwks} publishes {@link TestTokens}' key, and {@code /idp/token} issues one for a single
- * known client. It exists so the auth gate is exercised end to end — a real RS256 signature, a real
- * key fetch, and a real broker hop — rather than against a validator that was told to say yes.
+ * /idp/jwks} publishes {@link TestTokens}' key, and {@code /idp/token} issues one for the clients
+ * below. It exists so the auth gate is exercised end to end — a real RS256 signature, a real key
+ * fetch, and a real broker hop — rather than against a validator that was told to say yes.
+ *
+ * <p><b>Three clients, because a credential has three answers.</b> One is commissioned for both
+ * environments' registries, one is commissioned for something else entirely — the client that is
+ * genuine and still opens nothing here — and one is a black hole the stub accepts and never
+ * answers, which is the shape a redeploying idp takes and the only way to prove that the edge
+ * answers anyway. {@link #idpDown} and {@link #idpUp} add the fourth shape, a refused connection.
  */
 public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
-  /** The one client id and secret the stub idp knows. */
+  /** The client the registry vhosts are for: idp mints it both environments' audiences. */
   static final String CLIENT_ID = "a-client";
 
   static final String CLIENT_SECRET = "a-secret";
+
+  /** A real client with a real secret, commissioned for an audience no vhost here demands. */
+  static final String OTHER_ID = "other-client";
+
+  static final String OTHER_SECRET = "other-secret";
+
+  /** The credential the stub idp accepts a connection for and then never answers. */
+  static final String SINKHOLE_ID = "sinkhole";
+
+  static final String SINKHOLE_SECRET = "sinkhole";
+
+  /** The running instance, so a test can take the identity provider away and give it back. */
+  private static volatile StubGateways running;
+
+  /** How many grants the stub idp has been asked for — what proves a cache hit made no call. */
+  private static final java.util.concurrent.atomic.AtomicInteger GRANTS =
+      new java.util.concurrent.atomic.AtomicInteger();
+
+  static int grants() {
+    return GRANTS.get();
+  }
+
+  /** Stop the stub idp and free its port, so the next call to it is REFUSED. */
+  static void idpDown() {
+    StubGateways stub = running;
+    if (stub != null && stub.servers.containsKey("idp")) {
+      stub.servers
+          .remove("idp")
+          .close()
+          .toCompletionStage()
+          .toCompletableFuture()
+          .orTimeout(10, TimeUnit.SECONDS)
+          .join();
+    }
+  }
+
+  /** Put it back on the SAME port, which is the address the edge was configured with at boot. */
+  static void idpUp() {
+    StubGateways stub = running;
+    if (stub != null && !stub.servers.containsKey("idp")) {
+      stub.bind("idp", stub.idpServer(), stub.idpPort);
+    }
+  }
 
   /**
    * The audiences the stub idp puts in every token: a client's WHOLE allowed list, which is what a
@@ -65,9 +114,13 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   private Vertx vertx;
   private final Map<String, HttpServer> servers = new HashMap<>();
 
+  /** Kept so the stub idp can come back on the address the edge already resolved. */
+  private int idpPort;
+
   @Override
   public Map<String, String> start() {
     vertx = Vertx.vertx();
+    running = this;
     Map<String, String> config = new HashMap<>();
     config.put("qits.edge.environments", "prod,dev");
     config.put("qits.edge.default-environment", "prod");
@@ -86,7 +139,13 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // ONE of the two apps, which is the point: the exemption is per app label, so the suite has a
     // vhost whose reads are open and a vhost that is not, side by side.
     config.put("qits.edge.auth.anonymous-read-apps", "mirror");
-    config.put("qits.idp.url", "http://127.0.0.1:" + idp() + "/idp");
+    idpPort = bind("idp", idpServer(), 0);
+    config.put("qits.idp.url", "http://127.0.0.1:" + idpPort + "/idp");
+    // The three time bounds, shrunk to a suite's patience. Their SHIPPED values are pinned in
+    // EdgeChallengeTest instead: a default is a deployment fact and must not be readable from here.
+    config.put("qits.edge.auth.basic-cache-ttl-ms", "2000");
+    config.put("qits.edge.auth.idp-retry-window-ms", "3000");
+    config.put("qits.edge.auth.idp-call-timeout-ms", "1000");
     // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED
     // default, so a change to it is a failing test rather than a silent one.
     return config;
@@ -97,61 +156,77 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
    * client_credentials} grant. Form parsing is deliberate rather than Vert.x-assisted — the point
    * is to see the exact bytes the broker sends.
    */
-  private int idp() {
-    HttpServer server =
-        vertx
-            .createHttpServer()
-            .requestHandler(
-                request -> {
-                  if (request.path().equals("/idp/jwks")) {
-                    request
-                        .response()
-                        .putHeader("Content-Type", "application/json")
-                        .end(TestTokens.jwks().encode());
-                    return;
-                  }
-                  if (!request.path().equals("/idp/token")) {
-                    request.response().setStatusCode(404).end();
-                    return;
-                  }
-                  request
-                      .body()
-                      .onSuccess(
-                          body -> {
-                            String expected =
-                                "Basic "
-                                    + java.util.Base64.getEncoder()
-                                        .encodeToString(
-                                            (CLIENT_ID + ":" + CLIENT_SECRET)
-                                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                            boolean grant =
-                                body.toString().contains("grant_type=client_credentials");
-                            if (!expected.equals(request.getHeader("Authorization")) || !grant) {
-                              request
-                                  .response()
-                                  .setStatusCode(401)
-                                  .putHeader("Content-Type", "application/json")
-                                  .end("{\"error\":\"invalid_client\"}");
-                              return;
-                            }
-                            request
-                                .response()
-                                .putHeader("Content-Type", "application/json")
-                                .end(
-                                    new io.vertx.core.json.JsonObject()
-                                        .put(
-                                            "access_token",
-                                            TestTokens.valid(
-                                                "http://127.0.0.1:"
-                                                    + servers.get("idp").actualPort()
-                                                    + "/idp",
-                                                List.of(audience("dev"), audience("prod"))))
-                                        .put("token_type", "Bearer")
-                                        .put("expires_in", 300)
-                                        .encode());
-                          });
-                });
-    return bind("idp", server);
+  private HttpServer idpServer() {
+    return vertx
+        .createHttpServer()
+        .requestHandler(
+            request -> {
+              if (request.path().equals("/idp/jwks")) {
+                request
+                    .response()
+                    .putHeader("Content-Type", "application/json")
+                    .end(TestTokens.jwks().encode());
+                return;
+              }
+              if (!request.path().equals("/idp/token")) {
+                request.response().setStatusCode(404).end();
+                return;
+              }
+              GRANTS.incrementAndGet();
+              request.body().onSuccess(body -> grant(request, body.toString()));
+            });
+  }
+
+  /** The {@code client_credentials} grant, per client. */
+  private void grant(HttpServerRequest request, String body) {
+    List<String> audiences = audiencesFor(request.getHeader("Authorization"));
+    if (audiences == null || !body.contains("grant_type=client_credentials")) {
+      request
+          .response()
+          .setStatusCode(401)
+          .putHeader("Content-Type", "application/json")
+          .end("{\"error\":\"invalid_client\"}");
+      return;
+    }
+    if (audiences.isEmpty()) {
+      // The black hole: the connection was accepted and is never answered, which is what a
+      // container that is being replaced does to a request that reached it a moment too early.
+      return;
+    }
+    request
+        .response()
+        .putHeader("Content-Type", "application/json")
+        .end(
+            new io.vertx.core.json.JsonObject()
+                .put(
+                    "access_token",
+                    TestTokens.valid("http://127.0.0.1:" + idpPort + "/idp", audiences))
+                .put("token_type", "Bearer")
+                .put("expires_in", 300)
+                .encode());
+  }
+
+  /**
+   * The audiences this credential is commissioned for: null when the stub knows no such client, and
+   * an EMPTY list for the credential that is never answered at all.
+   */
+  private static List<String> audiencesFor(String authorization) {
+    if (basic(CLIENT_ID, CLIENT_SECRET).equals(authorization)) {
+      return List.of(audience("dev"), audience("prod"));
+    }
+    if (basic(OTHER_ID, OTHER_SECRET).equals(authorization)) {
+      return List.of("somebody-else");
+    }
+    if (basic(SINKHOLE_ID, SINKHOLE_SECRET).equals(authorization)) {
+      return List.of();
+    }
+    return null;
+  }
+
+  static String basic(String id, String secret) {
+    return "Basic "
+        + java.util.Base64.getEncoder()
+            .encodeToString((id + ":" + secret).getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 
   private int listen(String environment) {
@@ -172,15 +247,18 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
                   }
                   socket.writeTextMessage(seen.toString());
                 });
-    return bind(environment, server);
+    return bind(environment, server, 0);
   }
 
-  private int bind(String name, HttpServer server) {
+  /**
+   * @param port 0 for one the kernel picks; a number to come back on the one already published
+   */
+  private int bind(String name, HttpServer server, int port) {
     try {
       servers.put(
           name,
           server
-              .listen(0, "127.0.0.1")
+              .listen(port, "127.0.0.1")
               .toCompletionStage()
               .toCompletableFuture()
               .get(10, TimeUnit.SECONDS));
@@ -244,6 +322,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   @Override
   public void stop() {
+    running = null;
     if (vertx != null) {
       vertx.close();
     }

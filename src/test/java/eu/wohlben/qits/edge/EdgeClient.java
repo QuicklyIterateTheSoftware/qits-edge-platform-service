@@ -71,6 +71,15 @@ final class EdgeClient implements AutoCloseable {
 
   Answer send(
       HttpMethod method, String host, String uri, String body, Map<String, String> headers) {
+    return await(sending(method, host, uri, body, headers));
+  }
+
+  /**
+   * The same request, not waited for. A test that has to change the world WHILE the edge is
+   * answering — take the identity provider away and give it back — needs the request in flight.
+   */
+  CompletableFuture<Answer> sending(
+      HttpMethod method, String host, String uri, String body, Map<String, String> headers) {
     RequestOptions options = options(method, host, uri, headers);
     CompletableFuture<Answer> answer = new CompletableFuture<>();
     client
@@ -94,7 +103,7 @@ final class EdgeClient implements AutoCloseable {
                         }))
         .onSuccess(answer::complete)
         .onFailure(answer::completeExceptionally);
-    return await(answer);
+    return answer;
   }
 
   /**

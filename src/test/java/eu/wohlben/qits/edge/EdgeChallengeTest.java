@@ -2,6 +2,7 @@ package eu.wohlben.qits.edge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -133,6 +134,82 @@ class EdgeChallengeTest {
     // without this normalisation `Mirror` in configuration would open nothing.
     assertEquals(Set.of("mirror", "registry"), EdgeAuth.readApps(List.of(" Mirror ", "REGISTRY")));
     assertEquals(Set.of(), EdgeAuth.readApps(List.of("", "  ")));
+  }
+
+  // --- HTTP Basic ------------------------------------------------------------------------------
+
+  @Test
+  void aCredentialIsBase64OfAClientIdAndASecret() {
+    // The shape, and nothing about whether idp knows it. What this rejects never reaches idp, so a
+    // client with an empty credential store is answered here rather than made to wait for one.
+    assertTrue(EdgeAuth.isClientCredentials(encode("a-client:a-secret")));
+    assertTrue(
+        EdgeAuth.isClientCredentials(encode("a-client:a:secret")), "a secret may hold a colon");
+    assertFalse(EdgeAuth.isClientCredentials(null));
+    assertFalse(EdgeAuth.isClientCredentials(""));
+    assertFalse(EdgeAuth.isClientCredentials("!!not-base64"));
+    assertFalse(EdgeAuth.isClientCredentials(encode("no-colon-at-all")));
+    assertFalse(EdgeAuth.isClientCredentials(encode(":")), "no id and no secret is neither");
+    assertFalse(EdgeAuth.isClientCredentials(encode("an-id:")), "a client id alone is not one");
+    assertFalse(EdgeAuth.isClientCredentials(encode(":a-secret")));
+  }
+
+  @Test
+  void aCachedCredentialIsHeldAsAHashAndNeverAsItself() {
+    // The cache key is a caller's SECRET. A hash is what keeps it out of a map, a log line and a
+    // heap dump, and the same credential has to keep finding its own entry.
+    String credential = encode("a-client:a-secret");
+    String fingerprint = EdgeAuth.fingerprint(credential);
+    assertEquals(fingerprint, EdgeAuth.fingerprint(credential));
+    assertNotEquals(fingerprint, EdgeAuth.fingerprint(encode("a-client:another-secret")));
+    assertFalse(fingerprint.contains("a-secret"));
+    assertFalse(fingerprint.contains(credential));
+  }
+
+  // --- the patience the identity provider is given ----------------------------------------------
+
+  @Test
+  void onlyTheConnectionIsWaitedOut() {
+    // An ANSWER from idp is idp deciding, and it arrives as a Grant rather than a failure — so the
+    // only thing this classifies is the network, and every shape of it is safe to repeat.
+    assertTrue(IdpGrants.connectionClassed(new java.net.ConnectException("Connection refused")));
+    assertTrue(IdpGrants.connectionClassed(new java.net.UnknownHostException("qits-platform-idp")));
+    assertTrue(IdpGrants.connectionClassed(new java.util.concurrent.TimeoutException()));
+    assertTrue(
+        IdpGrants.connectionClassed(
+            new RuntimeException(new java.io.IOException("Connection reset by peer"))));
+    // Vert.x reports these two as a plain exception with no cause, so the message is the only
+    // evidence there is.
+    assertTrue(IdpGrants.connectionClassed(new RuntimeException("Connection was closed")));
+    assertTrue(IdpGrants.connectionClassed(new RuntimeException("The timeout period elapsed")));
+    assertFalse(IdpGrants.connectionClassed(new IllegalStateException("not a network problem")));
+  }
+
+  @Test
+  void theWaitBetweenTriesDoublesAndIsCapped() {
+    assertEquals(IdpGrants.FIRST_BACKOFF_MS, IdpGrants.backoffMs(0));
+    assertEquals(IdpGrants.FIRST_BACKOFF_MS * 2, IdpGrants.backoffMs(1));
+    assertEquals(IdpGrants.FIRST_BACKOFF_MS * 4, IdpGrants.backoffMs(2));
+    assertEquals(IdpGrants.BACKOFF_CAP_MS, IdpGrants.backoffMs(30), "a long window is still tries");
+  }
+
+  @Test
+  void theShippedTimeBoundsAreTheDeploymentsAndNotTheSuites() throws Exception {
+    // The suite shrinks all three so its own tests are quick. What a deployment gets is here, and
+    // the call timeout is the one that matters most: without it there is no answer at all.
+    assertEquals("5000", shippedDefault("idpCallTimeoutMs"));
+    assertEquals("45000", shippedDefault("idpRetryWindowMs"));
+    assertEquals("300000", shippedDefault("basicCacheTtlMs"));
+    assertEquals("1024", shippedDefault("basicCacheSize"));
+  }
+
+  private static String shippedDefault(String key) throws Exception {
+    return AuthConfig.class.getMethod(key).getAnnotation(WithDefault.class).value();
+  }
+
+  private static String encode(String plain) {
+    return java.util.Base64.getEncoder()
+        .encodeToString(plain.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 
   private static HostEnvironments.Route app(String app, String environment) {

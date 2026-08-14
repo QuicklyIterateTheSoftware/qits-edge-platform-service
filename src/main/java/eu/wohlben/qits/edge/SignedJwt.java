@@ -84,6 +84,27 @@ public record SignedJwt(
    * @param clockSkewSeconds how far the two clocks may disagree
    */
   public String problem(String issuer, String audience, Instant now, long clockSkewSeconds) {
+    String problem = problem(issuer, now, clockSkewSeconds);
+    if (problem != null) {
+      return problem;
+    }
+    return audiences().contains(audience) ? null : "the token is not for " + audience;
+  }
+
+  /**
+   * The same checks WITHOUT the audience one — everything a token is or is not on its own, before
+   * anybody asks what it is for.
+   *
+   * <p>Split out because a credential validated at the edge is cached, and what is cached is the
+   * token's OWN soundness plus the audiences it named; the demanded audience is a per-request
+   * question, resolved from the vhost, and answering it from the cached list is what keeps one
+   * cached validation from crossing tiers.
+   *
+   * @param issuer the {@code iss} every accepted token must carry, exactly
+   * @param now the moment to judge {@code exp} against
+   * @param clockSkewSeconds how far the two clocks may disagree
+   */
+  public String problem(String issuer, Instant now, long clockSkewSeconds) {
     if (!RS256.equals(algorithm)) {
       // Refusing `none` is the point, and refusing every other alg with it is the cheap way to do
       // it: an accepted algorithm the idp never signs with is an accepted algorithm we do not
@@ -103,10 +124,13 @@ public record SignedJwt(
     if (now.getEpochSecond() > expiry + clockSkewSeconds) {
       return "the token expired";
     }
-    if (!audiences().contains(audience)) {
-      return "the token is not for " + audience;
-    }
     return null;
+  }
+
+  /** When this token expires, or null when it names no {@code exp}. */
+  public Instant expiry() {
+    Long expiry = number(claims.getValue("exp"));
+    return expiry == null ? null : Instant.ofEpochSecond(expiry);
   }
 
   /** The {@code aud} claim, which JWT allows to be one string or an array of them. */
