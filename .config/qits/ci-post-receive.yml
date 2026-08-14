@@ -39,3 +39,38 @@ steps:
       # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
       # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
       # that broke the release of 2026-08-11.
+
+  # The self-release door: a push to maintenance/* asks qits-workspaces to release the branch
+  # once the build step above is green. The sibling-standard step, verbatim from qits-gateway;
+  # that recipe is where the pattern is maintained and the copies should keep matching.
+  - image: qits/build-images/node-base:latest
+    branches:
+      - prefix: maintenance/
+    timeout-seconds: 300
+    script: |
+      set -eu
+      case "$QITS_CI_BRANCH" in
+        maintenance/*) ;;
+        *) echo "not a maintenance branch: $QITS_CI_BRANCH"; exit 1 ;;
+      esac
+      summary=$(git log -1 --format=%s)
+      node -e '
+        const [url, branch, summary] = process.argv.slice(1);
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ branch, summary }),
+        }).then(async (res) => {
+          const text = await res.text();
+          let body = {};
+          try { body = JSON.parse(text); } catch {}
+          if (res.ok) {
+            console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
+            return;
+          }
+          if (res.status === 409 && body.reason === "ALREADY_INTEGRATED") {
+            console.log(`${branch} is already released - nothing to do`);
+            return;
+          }
+          console.error(`release refused: HTTP ${res.status} ${text}`);
+          process.exit(1);
