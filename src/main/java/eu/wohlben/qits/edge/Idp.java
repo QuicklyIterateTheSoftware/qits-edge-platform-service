@@ -39,4 +39,16 @@ public class Idp {
   public String tokenEndpoint() {
     return issuer() + "/token";
   }
+
+  /**
+   * {@code <issuer>/api/sessions/introspect} — a browser session's cookie in, the user it belongs
+   * to out. Derived like the two above, from the one key that names the receiver.
+   *
+   * <p>Under {@code /api} rather than beside {@code /token}: the protocol endpoints are the OIDC
+   * ones and this is not an OIDC endpoint. It is idp's own API, guarded by the caller's HTTP Basic
+   * client credentials, and it lives where the rest of idp's API does.
+   */
+  public String introspectionEndpoint() {
+    return issuer() + "/api/sessions/introspect";
+  }
 }

@@ -429,6 +429,42 @@ class EdgeRoutingTest {
     assertEquals("dev", client().get("dev.example.com", "/anything").line("upstream"));
   }
 
+  // --- the browser gate, dark
+  // ---------------------------------------------------------------------
+
+  @Test
+  void aSessionCookieChangesNothingWhileTheGateIsOff() throws Exception {
+    // qits.edge.sessions.enabled is off in this suite, which is the shipped default, and off has to
+    // mean the edge of before it existed: no introspection, no redirect, no stripping. The whole
+    // rest of this class is the other half of that claim — it is unchanged.
+    int before = StubGateways.introspections();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "dev.example.com",
+                "/api/projects",
+                null,
+                Map.of(
+                    "Cookie", "qits-session=" + StubGateways.SESSION,
+                    "X-Qits-User", "whoever",
+                    "X-Qits-Roles", "qits:root",
+                    "Sec-Fetch-Mode", "navigate"));
+
+    assertEquals(200, answer.status(), "a navigation is not redirected while the gate is off");
+    assertEquals("dev", answer.line("upstream"));
+    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"), "nothing is stripped either");
+    assertEquals("qits:root", answer.upstreamHeader("X-Qits-Roles"));
+    assertEquals(before, StubGateways.introspections(), "and idp was never asked");
+  }
+
+  @Test
+  void aWebSocketUpgradeIsNotGatedEitherWhileTheGateIsOff() {
+    String seen =
+        client().handshake("dev.example.com", "/terminal", Map.of("X-Qits-User", "whoever"));
+    assertTrue(seen.lines().anyMatch("x-qits-user=whoever"::equals), seen);
+  }
+
   // --- the anonymous-read exemption, per app ----------------------------------------------------
 
   @Test

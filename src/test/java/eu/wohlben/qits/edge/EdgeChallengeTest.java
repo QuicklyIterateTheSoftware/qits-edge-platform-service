@@ -3,22 +3,27 @@ package eu.wohlben.qits.edge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.smallrye.config.WithDefault;
 import io.vertx.core.http.HttpMethod;
+import io.vertx.core.json.JsonArray;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
- * The decisions {@code EdgeAuth} makes without touching a socket: the {@code WWW-Authenticate}
- * value character by character, the audience it demands, and which requests skip the gate entirely.
+ * The decisions {@code EdgeAuth} and {@code EdgeSessions} make without touching a socket: the
+ * {@code WWW-Authenticate} value character by character, the audience it demands, which requests
+ * skip the gate entirely, and — for the browser half — what a cookie header says, what may be
+ * redirected, and where a login may return to.
  *
  * <p>The challenge is a wire contract with a client nobody here controls — docker parses it to find
  * the token endpoint, and one it cannot parse fails a pull with no message in any log on either
- * side.
+ * side. The browser half's contracts are the same kind of thing one hop out: a cookie name idp
+ * sets, a login path its SPA serves, and a redirect target that must never leave this host.
  */
 class EdgeChallengeTest {
 
@@ -212,8 +217,146 @@ class EdgeChallengeTest {
     assertEquals("1024", shippedDefault("basicCacheSize"));
   }
 
+  // --- the browser gate's own decisions ----------------------------------------------------------
+
+  @Test
+  void theBrowserGateShipsOffAndWithTheContractedNames() throws Exception {
+    // OFF is the rollout plan: the gate lands before idp can issue a session and before the
+    // gateway can read the headers, so it ships inert and is flipped as a step of its own.
+    assertEquals("false", sessionDefault("enabled"));
+    // The cookie and the path are a contract with qits-platform-idp and its SPA, so they are pinned
+    // here rather than left to a deployment to keep in step.
+    assertEquals("qits-session", sessionDefault("cookieName"));
+    assertEquals("/idp/login", sessionDefault("loginPath"));
+    assertEquals("/idp/", sessionDefault("anonymousPrefixes"));
+    assertEquals("30000", sessionDefault("cacheTtlMs"));
+    assertEquals("1024", sessionDefault("cacheSize"));
+    assertEquals("60000", sessionDefault("staleGraceMs"));
+  }
+
+  @Test
+  void theEdgesOwnIdpCredentialHasNoDefault() throws Exception {
+    // A credential is a deployment fact. The bootstrap injects QITS_EDGE_SESSIONS_CLIENT_ID and
+    // QITS_EDGE_SESSIONS_CLIENT_SECRET, and a value here would be a client id every installation
+    // shared.
+    assertNull(SessionsConfig.class.getMethod("clientId").getAnnotation(WithDefault.class));
+    assertNull(SessionsConfig.class.getMethod("clientSecret").getAnnotation(WithDefault.class));
+  }
+
+  @Test
+  void theSessionCookieIsReadOutOfEverythingABrowserSends() {
+    // A browser sends every cookie it holds for the host, in whatever order, with spaces after the
+    // semicolons — and a server is allowed to quote a value.
+    assertEquals("abc", EdgeSessions.cookieValue("qits-session=abc", "qits-session"));
+    assertEquals(
+        "abc", EdgeSessions.cookieValue("theme=dark; qits-session=abc; tz=CET", "qits-session"));
+    assertEquals("abc", EdgeSessions.cookieValue("qits-session=\"abc\"", "qits-session"));
+    assertNull(EdgeSessions.cookieValue("theme=dark", "qits-session"));
+    assertNull(EdgeSessions.cookieValue("qits-session=", "qits-session"));
+    assertNull(EdgeSessions.cookieValue(null, "qits-session"));
+    // Cookie names are case-sensitive, so this is a different cookie and not this one.
+    assertNull(EdgeSessions.cookieValue("QITS-SESSION=abc", "qits-session"));
+  }
+
+  @Test
+  void onlyARequestThatCouldRenderALoginPageIsRedirected() {
+    // Sec-Fetch-Mode answers it whenever it is there: `navigate` is the one value that means a
+    // document is being loaded, and everything else is a request made by a page that already
+    // exists.
+    assertTrue(EdgeSessions.isNavigation(HttpMethod.GET, "navigate", "text/html"));
+    assertTrue(EdgeSessions.isNavigation(HttpMethod.POST, "navigate", null), "a form post is one");
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, "cors", "text/html"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, "websocket", "text/html"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, "no-cors", null));
+    // With no header at all — curl, an old client — the method and Accept are what a navigation
+    // looked like before the header existed.
+    assertTrue(
+        EdgeSessions.isNavigation(
+            HttpMethod.GET, null, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, null, "application/json"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, null, "text/event-stream"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.POST, null, "text/html"));
+    assertFalse(EdgeSessions.isNavigation(HttpMethod.GET, null, null));
+  }
+
+  @Test
+  void theRedirectTargetCanOnlyEverBeAPathOnThisHost() {
+    // An open redirect through the platform's own login page: the value is where a browser is sent
+    // AFTER authenticating, so anything that can name another origin turns login into a
+    // redirector.
+    assertEquals("/projects/7?tab=runs", EdgeSessions.redirectTarget("/projects/7?tab=runs"));
+    assertEquals("/", EdgeSessions.redirectTarget("//evil.example.com/steal"));
+    assertEquals("/", EdgeSessions.redirectTarget("https://evil.example.com/steal"));
+    // A backslash is a slash to every browser's URL parser, whatever the RFC says.
+    assertEquals("/", EdgeSessions.redirectTarget("/\\evil.example.com"));
+    assertEquals("/", EdgeSessions.redirectTarget("\\\\evil.example.com"));
+    // A carriage return in a header value is a second header.
+    assertEquals("/", EdgeSessions.redirectTarget("/ok\r\nLocation: http://evil.example.com"));
+    assertEquals("/", EdgeSessions.redirectTarget(null));
+    assertEquals("/", EdgeSessions.redirectTarget(""));
+  }
+
+  @Test
+  void theAnonymousCarveOutIsAPrefixAndNothingElse() {
+    List<String> idp = List.of("/idp/");
+    assertTrue(EdgeSessions.anonymous("/idp/login", idp));
+    assertTrue(EdgeSessions.anonymous("/idp/assets/main-ab12cd.js", idp));
+    assertTrue(EdgeSessions.anonymous("/idp/api/auth/login", idp));
+    assertFalse(EdgeSessions.anonymous("/idpsomething", idp), "the slash is part of the prefix");
+    assertFalse(EdgeSessions.anonymous("/projects", idp));
+    assertFalse(EdgeSessions.anonymous(null, idp));
+    assertEquals(List.of("/idp/"), EdgeSessions.prefixes(List.of(" /idp/ ", "", "  ")));
+  }
+
+  @Test
+  void aRoleSetBecomesOneHeaderValueThatCannotBeSplit() {
+    // Comma-separated is safe because a role is $app:$resource:$role and holds no comma. One that
+    // somehow did would arrive downstream as TWO roles, so it is dropped rather than carried.
+    assertEquals(
+        "qits-platform:admin,qits:admin",
+        EdgeSessions.rolesHeader(new JsonArray(List.of("qits-platform:admin", "qits:admin"))));
+    assertEquals("", EdgeSessions.rolesHeader(new JsonArray()));
+    assertEquals("", EdgeSessions.rolesHeader(null));
+    assertEquals(
+        "qits:admin",
+        EdgeSessions.rolesHeader(new JsonArray(List.of("qits:admin", "smuggled,qits:root"))));
+    assertEquals(
+        "qits:admin",
+        EdgeSessions.rolesHeader(new JsonArray(List.of("qits:admin", "a\r\nX-Qits-User: root"))));
+  }
+
+  @Test
+  void anIdentityWithNoUsableNameIsRefusedRatherThanSanitised() {
+    // Both fields go into headers an upstream believes unconditionally. A strange answer must never
+    // become a strange identity, and nothing about the platform's own idp sends one.
+    assertNotNull(EdgeSessions.read("{\"userId\":\"an-id\",\"username\":\"operator\"}"));
+    assertNull(EdgeSessions.read("{\"userId\":\"an-id\"}"));
+    assertNull(EdgeSessions.read("{\"username\":\"operator\"}"));
+    assertNull(EdgeSessions.read("{\"userId\":\"an-id\",\"username\":\"a\\r\\nb\"}"));
+    assertNull(EdgeSessions.read("not json at all"));
+  }
+
+  @Test
+  void aSessionWithNoReadableExpiryIsStillBelievedForTheCachesOwnWindow() {
+    // idp has just said the session is good; a date this process could not parse is not a reason to
+    // log somebody out, and the cache TTL bounds the belief either way.
+    assertEquals(
+        Long.MAX_VALUE,
+        EdgeSessions.read("{\"userId\":\"an-id\",\"username\":\"operator\"}").expiresAtMillis());
+    assertEquals(
+        java.time.Instant.parse("2030-01-01T00:00:00Z").toEpochMilli(),
+        EdgeSessions.read(
+                "{\"userId\":\"an-id\",\"username\":\"operator\","
+                    + "\"expiresAt\":\"2030-01-01T00:00:00Z\"}")
+            .expiresAtMillis());
+  }
+
   private static String shippedDefault(String key) throws Exception {
     return AuthConfig.class.getMethod(key).getAnnotation(WithDefault.class).value();
+  }
+
+  private static String sessionDefault(String key) throws Exception {
+    return SessionsConfig.class.getMethod(key).getAnnotation(WithDefault.class).value();
   }
 
   private static String encode(String plain) {

@@ -1,0 +1,107 @@
+package eu.wohlben.qits.edge;
+
+import io.smallrye.config.ConfigMapping;
+import io.smallrye.config.WithDefault;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * The browser half of authentication, terminated at the edge — and the switch that keeps it dark.
+ *
+ * <p>{@link AuthConfig} gates MACHINES: a token or a client id and secret, per vhost. This group
+ * gates PEOPLE, and only on the environment vhost, because that is the one name a browser ever
+ * types. A valid {@code qits-session} cookie becomes the {@code X-Qits-User} / {@code
+ * X-Qits-User-Id} / {@code X-Qits-Roles} headers every service already trusts; anything else is
+ * sent to the login page or refused.
+ *
+ * <p><b>{@link #enabled()} is off, and that is the whole rollout plan.</b> The gate lands before
+ * the identity provider can issue a session and before the environment gateway can read the
+ * headers, so it ships inert and is flipped as a step of its own — after idp and its pages are
+ * live, and before the gateway's own {@code local} variant retires. With the flag off nothing in a
+ * request's path changes, which is what makes the release safe to make at any time.
+ */
+@ConfigMapping(prefix = "qits.edge.sessions")
+public interface SessionsConfig {
+
+  /**
+   * Whether the environment vhost demands a credential from a browser. OFF: see the class javadoc —
+   * turning it on before idp issues sessions would answer every browser with a redirect to a page
+   * that cannot log anybody in.
+   */
+  @WithDefault("false")
+  boolean enabled();
+
+  /** The cookie idp sets and this process reads. Opaque: 256 random bits, stored hashed at idp. */
+  @WithDefault("qits-session")
+  String cookieName();
+
+  /**
+   * Where a browser with no session is sent. A path on this same host, never an absolute URL: the
+   * login page is served by idp through this very edge, so a name here would be a second place the
+   * deployment's own address is written.
+   */
+  @WithDefault("/idp/login")
+  String loginPath();
+
+  /**
+   * The path prefixes served without any credential at all. {@code /idp/} wholesale, and one prefix
+   * rather than a list of assets is the point: the login and register pages need their SPA files,
+   * the protocol endpoints authenticate their own callers, and {@code /idp/api/*} guards itself. An
+   * asset-path list would drift the first time the SPA renames a bundle.
+   *
+   * <p>These are paths on the ENVIRONMENT vhost, so the prefix reaches the environment gateway and
+   * is answered by idp behind it, exactly as it is today.
+   */
+  @WithDefault("/idp/")
+  List<String> anonymousPrefixes();
+
+  /**
+   * How long an introspected session is believed without asking idp again, in milliseconds — and
+   * therefore how long a logout or a revocation lingers. Thirty seconds rather than the Basic
+   * cache's five minutes: a machine credential is revoked by rotating a secret, which is rare and
+   * planned, whereas a person pressing "log out" expects the door to shut while they are still
+   * looking at it.
+   */
+  @WithDefault("30000")
+  long cacheTtlMs();
+
+  /**
+   * The most sessions held at once. A bound rather than a tuning knob, the same reason as {@link
+   * AuthConfig#basicCacheSize()}: the key comes from a caller, so an unbounded map is a
+   * caller-sized allocation.
+   */
+  @WithDefault("1024")
+  int cacheSize();
+
+  /**
+   * How long past its freshness a cached session still answers while idp cannot be reached, in
+   * milliseconds.
+   *
+   * <p><b>The lesson this exists for</b> is the one the token broker paid for on 2026-08-14: idp is
+   * a container like any other and is redeployed like any other, and for a few seconds its name
+   * refuses, drops or accepts-and-never-answers. A machine retries a push; a person watching a page
+   * go blank sees the platform log them out. So a session idp has already vouched for outlives a
+   * cutover — the session's own expiry is still honoured, so this widens no door that was open.
+   */
+  @WithDefault("60000")
+  long staleGraceMs();
+
+  /**
+   * The edge's own static idp client id, for introspection. {@code {env}-qits-edge} on the
+   * platform, seeded by the bootstrap.
+   *
+   * <p><b>No default, and that is deliberate.</b> A credential is a deployment fact — the bootstrap
+   * injects {@code QITS_EDGE_SESSIONS_CLIENT_ID} and {@code QITS_EDGE_SESSIONS_CLIENT_SECRET}, and
+   * those two spellings are a contract with cli/qits-cli-bootstrap. Absent while {@link #enabled()}
+   * is off is the ordinary state and costs nothing; absent while it is ON fails at STARTUP — see
+   * {@link EdgeSessions}, because the alternative is an edge that refuses every browser for a
+   * reason only a stack trace holds.
+   */
+  Optional<String> clientId();
+
+  /**
+   * The secret half of {@link #clientId()}. Never logged, never cached, never sent anywhere but
+   * idp's introspection endpoint.
+   */
+  Optional<String> clientSecret();
+}

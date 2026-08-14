@@ -31,6 +31,11 @@ import org.jboss.logging.Logger;
  * $app.$env.$domain} name fronts a service with no external auth of its own, so the name is the
  * decision and {@link AuthConfig} is the switch.
  *
+ * <p><b>This class is the MACHINE half.</b> A token, or the client id and secret it is minted from.
+ * The browser half — a session cookie, on the environment vhost — is {@link EdgeSessions}, and it
+ * calls back into this one: a machine credential presented there is checked by exactly these rules,
+ * so a commissioned client that works today keeps working when the browser gate is turned on.
+ *
  * <h2>The docker half</h2>
  *
  * <p>{@code docker login} stores a password and resends it forever, while an idp token lives ~300
@@ -189,6 +194,23 @@ public class EdgeAuth {
   }
 
   /**
+   * Whether this request carries a machine credential at all — a scheme this class can check,
+   * whatever it turns out to say.
+   *
+   * <p>Read by {@link EdgeSessions}' gate, which sends such a request down this path rather than
+   * looking for a cookie: a Bearer or a Basic is a machine saying who it is, and a machine has no
+   * session to introspect.
+   */
+  public static boolean carriesCredential(HttpServerRequest request) {
+    String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+    if (header == null) {
+      return false;
+    }
+    String scheme = header.toLowerCase(Locale.ROOT);
+    return scheme.startsWith(BEARER) || scheme.startsWith(BASIC);
+  }
+
+  /**
    * Whether this request may proceed.
    *
    * @return a future holding null when it may, or the reason it may not. A failed future means the
@@ -200,6 +222,19 @@ public class EdgeAuth {
     if (!enforce || anonymousRead(route, request.method(), anonymousReadApps)) {
       return Future.succeededFuture(null);
     }
+    return checkCredential(route, request);
+  }
+
+  /**
+   * The credential check itself, WITHOUT the vhost switch above.
+   *
+   * <p>The switch answers "does this vhost demand a credential"; this answers "is the one that was
+   * presented good". They come apart on the environment vhost with the session gate on: that vhost
+   * may not demand a credential of a browser, and a request that carries one anyway must still be
+   * held to every rule — otherwise an {@code Authorization} header of any junk at all would be a
+   * way past the gate. See {@link EdgeSessions}' step 2.
+   */
+  public Future<String> checkCredential(HostEnvironments.Route route, HttpServerRequest request) {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
     String audience = audienceFor(config.audiencePattern(), route.environment());
     if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {

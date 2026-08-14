@@ -26,16 +26,20 @@ import org.jboss.logging.Logger;
  * The edge itself: one catch-all Vert.x route that reads the Host name, picks an environment, and
  * streams the exchange to that environment's gateway verbatim.
  *
- * <p><b>What this does not do</b> is still most of what makes it worth having. It does not look at
- * paths, does not hold a route table beyond the environment and application lists, does not strip
- * or inject identity headers, and serves nothing of its own but {@code /q}. Those belong to the
- * environment gateway one hop further in, which already does them and is already tested for them; a
- * second implementation here would be a second answer to the same question.
+ * <p><b>What this does not do</b> is still most of what makes it worth having. It holds no route
+ * table beyond the environment and application lists, rewrites no path, reads no body, and serves
+ * nothing of its own but {@code /q}. Answering a request is the environment gateway's job one hop
+ * further in, and a second implementation here would be a second answer to the same question.
  *
- * <p><b>Two things it does now do</b>, both host-shaped rather than path-shaped. An {@code
- * $app.$env.$domain} name reaches a configured service directly instead of that environment's
- * gateway, and such a name is authenticated here — see {@link EdgeAuth}. Nothing about either is a
- * path decision: the app label picks a whole upstream, and the auth gate is per vhost.
+ * <p><b>Three things it does do.</b> The first two are host-shaped rather than path-shaped: an
+ * {@code $app.$env.$domain} name reaches a configured service directly instead of that
+ * environment's gateway, and such a name is authenticated here — see {@link EdgeAuth}. The app
+ * label picks a whole upstream, and the machine gate is per vhost.
+ *
+ * <p>The third is {@link EdgeSessions}' browser gate on the environment vhost, and it is the one
+ * thing here that reads a path — the anonymous {@code /idp/} prefix and nothing else. It ships OFF
+ * ({@code qits.edge.sessions.enabled}); while it is off, every line below behaves as it did before
+ * it existed.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
  * or response body and forwards a WebSocket upgrade by default, so the platform's interactive
@@ -71,6 +75,8 @@ public class EdgeRouter {
   String nonApplicationRootPath;
 
   @Inject EdgeAuth auth;
+
+  @Inject EdgeSessions sessions;
 
   private HostEnvironments hostEnvironments;
 
@@ -210,6 +216,14 @@ public class EdgeRouter {
       return;
     }
 
+    if (!route.toApp() && sessions.enabled()) {
+      // The environment vhost is the one a browser types, so it is the one with a browser's gate on
+      // it. Application vhosts keep the machine gate below and nothing else — no session, no
+      // stripping, no redirect: nothing browses a registry.
+      gate(request, route);
+      return;
+    }
+
     Future<String> checked = auth.check(route, request);
     if (!checked.isComplete()) {
       // The check crossed an event-loop boundary — a JWKS fetch. Hold the inbound body until there
@@ -229,6 +243,79 @@ public class EdgeRouter {
   }
 
   /**
+   * The gated request of the user-authentication plan, in the order the plan sets out: a machine
+   * credential, then a session cookie, then an anonymous prefix, then a refusal. Step 1 — dropping
+   * every inbound {@code X-Qits-*} — is {@link #proxy}'s, which is the single point any of these
+   * paths can reach an upstream through.
+   *
+   * <p>Reached only while {@link EdgeSessions#enabled()}, so with the flag off not one line of it
+   * runs and the request takes exactly the path it took before this existed.
+   */
+  private void gate(HttpServerRequest request, HostEnvironments.Route route) {
+    if (EdgeAuth.carriesCredential(request)) {
+      // CI dialing through the gateway, a curl with the workstation pair, a git push: the session
+      // gate is a third acceptable credential, never a replacement for these. Checked in full even
+      // though this vhost's own switch may not demand one — an unchecked Authorization header would
+      // otherwise be a way past the whole gate.
+      Future<String> checked = auth.checkCredential(route, request);
+      if (!checked.isComplete()) {
+        request.pause();
+      }
+      checked
+          .onSuccess(rejection -> dispatch(request, route, rejection))
+          .onFailure(
+              failure -> {
+                LOG.errorf(failure, "could not check the credential on %s", authority(request));
+                auth.challenge(request, "the credential could not be checked");
+              });
+      return;
+    }
+
+    String cookie = sessions.cookie(request);
+    if (cookie == null) {
+      unauthenticated(request, route);
+      return;
+    }
+    Future<EdgeSessions.Session> introspected = sessions.introspect(cookie);
+    if (!introspected.isComplete()) {
+      // The same reason as the credential check above: the answer comes from idp, over a socket.
+      request.pause();
+    }
+    introspected
+        .onSuccess(
+            session -> {
+              if (session == null) {
+                unauthenticated(request, route);
+                return;
+              }
+              proxy(request, route, session);
+            })
+        .onFailure(
+            failure -> {
+              LOG.errorf(failure, "could not introspect a session for %s", authority(request));
+              unauthenticated(request, route);
+            });
+  }
+
+  /**
+   * What happens to a request with no usable session: the anonymous prefixes first, then the
+   * refusal.
+   *
+   * <p><b>The order matters and it is not the plan's.</b> The plan lists the cookie step before the
+   * anonymous one, which is right for a cookie that works — but a browser holding a session idp has
+   * since revoked would then be refused at {@code /idp/login} and redirected to {@code /idp/login},
+   * forever. The prefix is what a caller with no usable credential is entitled to, so it answers
+   * every one of them.
+   */
+  private void unauthenticated(HttpServerRequest request, HostEnvironments.Route route) {
+    if (sessions.anonymous(request.path())) {
+      proxy(request, route, null);
+      return;
+    }
+    sessions.refuse(request);
+  }
+
+  /**
    * Proxy, or answer the challenge. Split out of {@link #handle} because it is what runs after the
    * credential check, which may have crossed an event-loop boundary to refresh a signing key.
    */
@@ -236,6 +323,23 @@ public class EdgeRouter {
     if (rejection != null) {
       auth.challenge(request, rejection);
       return;
+    }
+    // No session, so no identity: a machine's own is in the token it carried.
+    proxy(request, route, null);
+  }
+
+  /**
+   * <b>The one way out of this process</b>, for every route above and both transports. Which is
+   * what makes the header work here rather than in three places: a request that reaches an upstream
+   * has passed through this method, so what it does is done always.
+   */
+  private void proxy(
+      HttpServerRequest request, HostEnvironments.Route route, EdgeSessions.Session session) {
+    if (sessions.enabled() && !route.toApp()) {
+      // Strip, then assert — see EdgeHeaders.applyIdentity, where both halves live in one method on
+      // purpose. On the ordinary path the proxy copies these headers upstream; on an upgrade it
+      // forwards this same map, so one call covers a path the interceptor chain never sees.
+      EdgeHeaders.applyIdentity(request.headers(), session);
     }
     // A WebSocket upgrade short-circuits inside vertx-http-proxy before the interceptor chain is
     // installed, so the forwarded headers have to be written onto the inbound request instead. See

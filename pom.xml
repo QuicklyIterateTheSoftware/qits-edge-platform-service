@@ -135,6 +135,42 @@
                          inside the forked JVM would land. See EdgeClient.handshake. -->
                     <argLine>-Djdk.httpclient.allowRestrictedHeaders=host</argLine>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/EdgeSessionGateTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <!-- The browser session gate, in a JVM of its own, and it needs one twice
+                             over.
+
+                             qits.edge.sessions.enabled is read at boot, so proving both of its
+                             states means two Quarkus starts. In ONE JVM the second start is a
+                             restart — after which a WebSocket upgrade through vertx-http-proxy
+                             silently degrades to a plain proxied GET and the socket tests of
+                             whichever class ran second fail with nothing logged anywhere. It is a
+                             property of the harness rather than of this code, and qits-gateway paid
+                             for finding it.
+
+                             A second surefire execution forks a second JVM, which is the whole
+                             mechanism: in it, this class's application is the first start, and both
+                             suites keep their socket tests. -->
+                        <id>session-gate-tests</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/EdgeSessionGateTest.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <!-- Same formatter as the rest of the platform (google-java-format, needs JDK 21+),

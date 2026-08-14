@@ -32,10 +32,16 @@ import java.util.concurrent.TimeUnit;
  * edge must pass through unchanged: an ordinary request with a body, a chunked response written
  * over time, and a WebSocket upgrade. A JDK {@code HttpServer} cannot do the third at all.
  *
- * <p>The stub idp answers the two paths the edge derives from {@code qits.idp.url}: {@code
- * /idp/jwks} publishes {@link TestTokens}' key, and {@code /idp/token} issues one for the clients
- * below. It exists so the auth gate is exercised end to end — a real RS256 signature, a real key
- * fetch, and a real broker hop — rather than against a validator that was told to say yes.
+ * <p>The stub idp answers the three paths the edge derives from {@code qits.idp.url}: {@code
+ * /idp/jwks} publishes {@link TestTokens}' key, {@code /idp/token} issues one for the clients
+ * below, and {@code /idp/api/sessions/introspect} answers for the browser sessions. It exists so
+ * the auth gate is exercised end to end — a real RS256 signature, a real key fetch, a real broker
+ * hop and a real introspection — rather than against a validator that was told to say yes.
+ *
+ * <p><b>Three sessions, because a cookie has three answers.</b> One is live, one is expired and one
+ * starts live and can be {@link #revoke revoked} while the suite runs — which is what proves a
+ * revocation is obeyed within the cache's own window rather than at the end of it. {@link
+ * #introspections()} counts the calls, so a cache hit is provable by the call that did not happen.
  *
  * <p><b>Three clients, because a credential has three answers.</b> One is commissioned for both
  * environments' registries, one is commissioned for something else entirely — the client that is
@@ -60,6 +66,27 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   static final String SINKHOLE_SECRET = "sinkhole";
 
+  /** The edge's OWN idp client, the one it introspects browser sessions with. */
+  static final String EDGE_ID = "an-edge";
+
+  static final String EDGE_SECRET = "an-edge-secret";
+
+  /** A live session: the cookie value a browser would send. */
+  static final String SESSION = "a-live-session";
+
+  /** One idp refuses because it has run out. */
+  static final String EXPIRED_SESSION = "an-expired-session";
+
+  /** Live until {@link #revoke()}, which is how a logout is staged mid-suite. */
+  static final String REVOCABLE_SESSION = "a-revocable-session";
+
+  static final String SESSION_USER = "operator";
+
+  static final String SESSION_USER_ID = "b7e4a1c2-0000-4000-8000-00000000beef";
+
+  /** The two rows the register token grants the first account, per the plan. */
+  static final List<String> SESSION_ROLES = List.of("qits-platform:admin", "qits:admin");
+
   /** The running instance, so a test can take the identity provider away and give it back. */
   private static volatile StubGateways running;
 
@@ -67,8 +94,28 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   private static final java.util.concurrent.atomic.AtomicInteger GRANTS =
       new java.util.concurrent.atomic.AtomicInteger();
 
+  /** The same, for introspection. */
+  private static final java.util.concurrent.atomic.AtomicInteger INTROSPECTIONS =
+      new java.util.concurrent.atomic.AtomicInteger();
+
+  private static volatile boolean revoked;
+
   static int grants() {
     return GRANTS.get();
+  }
+
+  static int introspections() {
+    return INTROSPECTIONS.get();
+  }
+
+  /** Revoke {@link #REVOCABLE_SESSION} — a logout, as far as the edge can tell. */
+  static void revoke() {
+    revoked = true;
+  }
+
+  /** Put it back, so one test's logout is not every later test's. */
+  static void restore() {
+    revoked = false;
   }
 
   /** Stop the stub idp and free its port, so the next call to it is REFUSED. */
@@ -109,7 +156,14 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   /** The header names a WebSocket handshake reports back, so a test can assert what arrived. */
   static final List<String> REPORTED_HANDSHAKE_HEADERS =
-      List.of("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Qits-User", "Cookie");
+      List.of(
+          "X-Forwarded-For",
+          "X-Forwarded-Host",
+          "X-Forwarded-Proto",
+          "X-Qits-User",
+          "X-Qits-User-Id",
+          "X-Qits-Roles",
+          "Cookie");
 
   private Vertx vertx;
   private final Map<String, HttpServer> servers = new HashMap<>();
@@ -146,6 +200,14 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.auth.basic-cache-ttl-ms", "2000");
     config.put("qits.edge.auth.idp-retry-window-ms", "3000");
     config.put("qits.edge.auth.idp-call-timeout-ms", "1000");
+    // The session gate's own credential and time bounds. Shipped here rather than in the profile
+    // that turns the gate ON, because they are facts about this stub idp: the credential it accepts
+    // and the patience its ports deserve. The FLAG stays the profile's, which is what lets the same
+    // resource serve both a suite with the gate off and one with it on.
+    config.put("qits.edge.sessions.client-id", EDGE_ID);
+    config.put("qits.edge.sessions.client-secret", EDGE_SECRET);
+    config.put("qits.edge.sessions.cache-ttl-ms", "1000");
+    config.put("qits.edge.sessions.stale-grace-ms", "8000");
     // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED
     // default, so a change to it is a failing test rather than a silent one.
     return config;
@@ -168,6 +230,11 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
                     .end(TestTokens.jwks().encode());
                 return;
               }
+              if (request.path().equals("/idp/api/sessions/introspect")) {
+                INTROSPECTIONS.incrementAndGet();
+                request.body().onSuccess(body -> introspect(request, body.toString()));
+                return;
+              }
               if (!request.path().equals("/idp/token")) {
                 request.response().setStatusCode(404).end();
                 return;
@@ -175,6 +242,40 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
               GRANTS.incrementAndGet();
               request.body().onSuccess(body -> grant(request, body.toString()));
             });
+  }
+
+  /**
+   * {@code POST /idp/api/sessions/introspect} — the edge's own client id and secret in HTTP Basic,
+   * the cookie value in the body, and the user it belongs to out.
+   *
+   * <p>Everything it refuses is a <b>non-200</b>, which is the contract: an unknown, expired or
+   * revoked session is idp DECIDING, and the edge must not retry it or cache it.
+   */
+  private void introspect(HttpServerRequest request, String body) {
+    if (!basic(EDGE_ID, EDGE_SECRET).equals(request.getHeader("Authorization"))) {
+      // The introspection endpoint is not an oracle: without the edge's own credential, nobody gets
+      // to ask this stub about anybody's cookie either.
+      request.response().setStatusCode(401).end();
+      return;
+    }
+    String token = new io.vertx.core.json.JsonObject(body).getString("token");
+    boolean live = SESSION.equals(token) || (REVOCABLE_SESSION.equals(token) && !revoked);
+    if (!live) {
+      request.response().setStatusCode(404).end();
+      return;
+    }
+    request
+        .response()
+        .putHeader("Content-Type", "application/json")
+        .end(
+            new io.vertx.core.json.JsonObject()
+                .put("userId", SESSION_USER_ID)
+                .put("username", SESSION_USER)
+                .put("roles", new io.vertx.core.json.JsonArray(SESSION_ROLES))
+                .put(
+                    "expiresAt",
+                    java.time.Instant.now().plus(java.time.Duration.ofHours(12)).toString())
+                .encode());
   }
 
   /** The {@code client_credentials} grant, per client. */
@@ -323,6 +424,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   @Override
   public void stop() {
     running = null;
+    revoked = false;
     if (vertx != null) {
       vertx.close();
     }
