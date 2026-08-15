@@ -39,6 +39,7 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
       Integer navigationPosition) {}
 
   @Inject EdgeRoutes routes;
+  @Inject EdgeConfig config;
 
   @Override
   public String consumerId() {
@@ -67,31 +68,37 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
       return;
     }
     try {
-      List<EdgeEndpoint> endpoints = new ArrayList<>();
-      for (EndpointPayload endpoint : active.endpoints()) {
-        if (endpoint == null || endpoint.upstreamPort() == null) {
-          throw new IllegalArgumentException("An endpoint has no upstream port.");
+      List<String> environments =
+          active.environmentName() == null || active.environmentName().isBlank()
+              ? config.environments()
+              : List.of(active.environmentName());
+      for (String environment : environments) {
+        List<EdgeEndpoint> endpoints = new ArrayList<>();
+        for (EndpointPayload endpoint : active.endpoints()) {
+          if (endpoint == null || endpoint.upstreamPort() == null) {
+            throw new IllegalArgumentException("An endpoint has no upstream port.");
+          }
+          endpoints.add(
+              new EdgeEndpoint(
+                  environment,
+                  active.applicationName(),
+                  endpoint.path(),
+                  new Upstream(endpoint.upstreamHost(), endpoint.upstreamPort()),
+                  endpoint.navigationLabel(),
+                  endpoint.navigationPosition()));
         }
-        endpoints.add(
-            new EdgeEndpoint(
-                active.environmentName(),
+        boolean replaced =
+            routes.replace(
+                environment,
                 active.applicationName(),
-                endpoint.path(),
-                new Upstream(endpoint.upstreamHost(), endpoint.upstreamPort()),
-                endpoint.navigationLabel(),
-                endpoint.navigationPosition()));
-      }
-      boolean replaced =
-          routes.replace(
-              active.environmentName(),
-              active.applicationName(),
-              frame.id(),
-              frame.occurredAt(),
-              endpoints);
-      if (replaced) {
-        LOG.infof(
-            "activated %d direct routes for %s in %s from DeploymentActive %s",
-            endpoints.size(), active.applicationName(), active.environmentName(), frame.id());
+                frame.id(),
+                frame.occurredAt(),
+                endpoints);
+        if (replaced) {
+          LOG.infof(
+              "activated %d direct routes for %s in %s from DeploymentActive %s",
+              endpoints.size(), active.applicationName(), environment, frame.id());
+        }
       }
     } catch (IllegalArgumentException poison) {
       // An invalid route declaration will remain invalid on the next catch-up. Settling it keeps a
@@ -107,11 +114,9 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
       DeploymentActivePayload payload =
           CanonicalJson.payloadTo(frame.payload(), DeploymentActivePayload.class);
       if (payload.applicationName() == null
-          || payload.applicationName().isBlank()
-          || payload.environmentName() == null
-          || payload.environmentName().isBlank()) {
+          || payload.applicationName().isBlank()) {
         LOG.warnf(
-            "%s %s carries no applicationName/environmentName; it is settled unhandled",
+            "%s %s carries no applicationName; it is settled unhandled",
             frame.name(), frame.id());
         return null;
       }
