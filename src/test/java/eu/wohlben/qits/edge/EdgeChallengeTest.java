@@ -11,6 +11,7 @@ import io.smallrye.config.WithDefault;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.JsonArray;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +40,42 @@ class EdgeChallengeTest {
   void aPatternWithNoPlaceholderIsALiteralAudience() {
     // What a single-audience deployment configures. It must keep working unchanged.
     assertEquals("qits-registry", EdgeAuth.audienceFor("qits-registry", "dev"));
+  }
+
+  @Test
+  void aDirectVhostCanDemandItsOwnAudienceWithoutChangingTheDefault() {
+    EdgeConfig.App githost =
+        new EdgeConfig.App() {
+          @Override
+          public String audiencePattern() {
+            return "{env}-qits-githost";
+          }
+
+          @Override
+          public String hostPattern() {
+            return "{env}-qits-githost";
+          }
+
+          @Override
+          public int port() {
+            return 8080;
+          }
+
+          @Override
+          public Map<String, String> hosts() {
+            return Map.of();
+          }
+        };
+
+    assertEquals(
+        "dev-qits-githost",
+        EdgeAuth.audienceFor(app("githost", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
+    assertEquals(
+        "dev-qits-artifacts",
+        EdgeAuth.audienceFor(app("registry", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
+    assertEquals(
+        "prod-qits-artifacts",
+        EdgeAuth.audienceFor(HostEnvironments.Route.gateway("prod"), "{env}-qits-artifacts", Map.of("githost", githost)));
   }
 
   @Test

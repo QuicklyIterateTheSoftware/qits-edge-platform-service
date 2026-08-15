@@ -101,6 +101,9 @@ public class EdgeAuth {
 
   @Inject AuthConfig config;
 
+  /** Direct-vhost entries own the per-application audience pattern. */
+  @Inject EdgeConfig edgeConfig;
+
   @Inject Idp idp;
 
   @Inject IdpKeys keys;
@@ -187,6 +190,23 @@ public class EdgeAuth {
     return pattern.replace("{env}", environment);
   }
 
+  /**
+   * Resolve the audience for one route without widening the historic default. An application may
+   * opt into its own resource audience; an unknown or environment route deliberately keeps the
+   * configured global audience.
+   */
+  static String audienceFor(
+      HostEnvironments.Route route, String defaultPattern, Map<String, EdgeConfig.App> apps) {
+    String pattern = defaultPattern;
+    if (route.toApp()) {
+      EdgeConfig.App app = apps.get(route.app());
+      if (app != null) {
+        pattern = app.audiencePattern();
+      }
+    }
+    return audienceFor(pattern, route.environment());
+  }
+
   /** Whether this request is docker fetching a token rather than asking for a registry object. */
   public static boolean isTokenRequest(HttpServerRequest request) {
     return TOKEN_PATH.equals(request.path())
@@ -236,14 +256,7 @@ public class EdgeAuth {
    */
   public Future<String> checkCredential(HostEnvironments.Route route, HttpServerRequest request) {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-    String pattern = config.audiencePattern();
-    if (route.toApp()) {
-      EdgeConfig.App app = config.apps().get(route.app());
-      if (app != null) {
-        pattern = app.audiencePattern();
-      }
-    }
-    String audience = audienceFor(pattern, route.environment());
+    String audience = audienceFor(route, config.audiencePattern(), edgeConfig.apps());
     if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
       String credential = header.substring(BASIC.length()).trim();
       String workstationToken = oauth2Token(credential);
