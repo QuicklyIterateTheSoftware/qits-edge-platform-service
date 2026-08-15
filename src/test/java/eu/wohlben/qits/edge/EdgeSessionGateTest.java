@@ -10,6 +10,7 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.vertx.core.http.HttpMethod;
+import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.Map;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -39,6 +41,8 @@ import org.junit.jupiter.api.Test;
 @TestProfile(EdgeSessionGateTest.SessionsOn.class)
 class EdgeSessionGateTest {
 
+  @Inject EdgeRoutes routes;
+
   /**
    * The flag, and nothing else. The credential and the time bounds are {@code StubGateways}', which
    * is where the facts about this stub idp belong — so the difference between the two suites is
@@ -59,6 +63,25 @@ class EdgeSessionGateTest {
       client = new EdgeClient(RestAssured.port);
     }
     return client;
+  }
+
+  @BeforeEach
+  void publishEnvironmentEndpoint() {
+    String address =
+        ConfigProvider.getConfig().getValue("qits.test.environment-upstreams.dev", String.class);
+    routes.replace(
+        "dev",
+        "session-test-environment",
+        "session-test-dev",
+        java.time.Instant.EPOCH,
+        List.of(
+            new EdgeEndpoint(
+                "dev",
+                "session-test-environment",
+                "/",
+                Upstream.parse(address, 8080),
+                null,
+                null)));
   }
 
   @AfterEach

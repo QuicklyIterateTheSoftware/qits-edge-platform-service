@@ -38,7 +38,7 @@ public class EdgeRoutes {
     byEnvironment = readAll();
   }
 
-  /** The longest matching active prefix in this environment, or null for gateway compatibility. */
+  /** The longest matching active prefix in this environment, or null when no deployment owns it. */
   public EdgeEndpoint resolve(String environment, String path) {
     for (EdgeEndpoint endpoint : byEnvironment.getOrDefault(environment, List.of())) {
       if (endpoint.matches(path)) {

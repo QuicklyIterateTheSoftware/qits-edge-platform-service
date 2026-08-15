@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -72,12 +73,37 @@ class EdgeRoutingTest {
     }
   }
 
+  @BeforeEach
+  void publishEnvironmentFixture() throws Exception {
+    clearProjection();
+    for (String environment : List.of("dev", "prod")) {
+      routes.replace(
+          environment,
+          "test-environment",
+          "test-" + environment,
+          Instant.EPOCH,
+          List.of(
+              new EdgeEndpoint(
+                  environment,
+                  "test-environment",
+                  "/",
+                  upstream("qits.test.environment-upstreams." + environment),
+                  null,
+                  null)));
+    }
+  }
+
   // --- the routing decision ------------------------------------------------------------------
 
   @Test
-  void anEnvironmentSubdomainReachesThatEnvironmentsGateway() {
-    assertEquals("dev", client().get("dev.example.com", "/anything").line("upstream"));
-    assertEquals("prod", client().get("prod.example.com", "/anything").line("upstream"));
+  void anUnclaimedEnvironmentPathIsAnAuthoritative404RatherThanGatewayTraffic() throws Exception {
+    clearProjection();
+    EdgeClient.Answer dev = client().get("dev.example.com", "/anything");
+    EdgeClient.Answer prod = client().get("prod.example.com", "/anything");
+    assertEquals(404, dev.status());
+    assertEquals(404, prod.status());
+    assertNull(dev.line("upstream"), "the legacy gateway must receive no traffic");
+    assertNull(prod.line("upstream"), "the legacy gateway must receive no traffic");
   }
 
   @Test
@@ -103,14 +129,17 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void aDeploymentActiveEndpointIsProxiedDirectlyBeforeTheGatewayFallback() {
+  void aDeploymentActiveEndpointIsProxiedDirectlyAndNoFallbackRemains() throws Exception {
+    clearProjection();
     activateArtifacts();
 
     assertEquals(
         "registry-dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
     // The route's prefix boundary matters: /artifacts catches a child, never this merely similar
-    // word, which stays on the compatibility gateway.
-    assertEquals("dev", client().get("dev.example.com", "/artifacts-old").line("upstream"));
+    // word, which has no active endpoint and therefore has no legacy fallback.
+    EdgeClient.Answer absent = client().get("dev.example.com", "/artifacts-old");
+    assertEquals(404, absent.status());
+    assertNull(absent.line("upstream"));
   }
 
   @Test

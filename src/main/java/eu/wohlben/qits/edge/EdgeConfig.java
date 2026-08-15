@@ -8,12 +8,12 @@ import java.util.Map;
 
 /**
  * The edge's whole configuration surface: which environments exist, which one is the fallback, and
- * how an environment name becomes an upstream address.
+ * and the direct application vhosts it owns.
  *
  * <p>There is no route table and no path knowledge here, deliberately. The edge demultiplexes by
  * <b>host name</b> only — an environment name, and since the ingress campaign an optional
- * application name in front of it. Paths and segments stay the environment gateway's business one
- * hop further in: {@link #apps()} maps a whole NAME to a whole service, never a path to one.
+ * application name in front of it. Deployment events own environment-vhost paths; {@link #apps()}
+ * maps a whole NAME to a whole service, never a path to one.
  *
  * <p>Every upstream is derived from configuration ONLY. No part of a request selects a host or a
  * port: the Host name picks an environment out of a fixed list, and a name that is not in the list
@@ -51,54 +51,8 @@ public interface EdgeConfig {
   String defaultEnvironment();
 
   /**
-   * The upstream host for an environment, with {@code {env}} standing in for its name. The platform
-   * convention is one gateway per environment, named after it.
-   */
-  @WithDefault("{env}-qits-gateway")
-  String upstreamHostPattern();
-
-  /**
-   * The port every environment gateway listens on. Overridable per environment by a {@code
-   * host:port} value in {@link #upstreamHosts()}.
-   */
-  @WithDefault("8080")
-  int upstreamPort();
-
-  /**
-   * How long the proxy waits for a TCP connection to an environment gateway, in milliseconds.
-   *
-   * <p>Vert.x defaults to 60 000, which was harmless while a gateway name either resolved to a live
-   * container or refused the connection at once. Under swarm it is not: a service name resolves to
-   * a virtual IP that exists before any task is healthy, so a connection to a gateway that is still
-   * starting is not refused — it is dropped, and the request hangs for the whole timeout before the
-   * edge answers 502. Five seconds keeps the outermost hop's failure fast, which is what a browser
-   * (and whatever fronts this) can act on.
-   *
-   * <p>This is the CONNECT phase only. It has nothing to do with the idle timeout, which is 0 for
-   * terminal sockets, SSE channels and slow layer pushes — see {@code EdgeRouter}.
-   */
-  @WithDefault("5000")
-  int connectTimeoutMs();
-
-  /**
-   * Per-environment upstream overrides, {@code qits.edge.upstream-hosts.<env> = host} or {@code
-   * host:port} — the same {@code host[:port]} shape qits-gateway's {@code proxy-hosts} takes.
-   *
-   * <p>It exists for the two topologies the pattern cannot describe: a developer running one
-   * gateway on {@code localhost:8000}, and this repository's own test suite, where the gateways are
-   * stub servers on ephemeral ports. A deployment on {@code qits-net} needs none of it — the
-   * pattern is already the container's DNS name.
-   *
-   * <p><b>Prefer the pattern.</b> An override is a second place an environment's address is
-   * written, and a stale one sends a whole tier's traffic to the wrong process.
-   */
-  Map<String, String> upstreamHosts();
-
-  /**
    * The applications an {@code $app.$env.$domain} host name may reach directly, keyed by the {@code
-   * $app} label. An entry here is what turns {@code registry.dev.localhost} from "the dev gateway"
-   * into "dev's registry", and it is the on-switch: a label with no entry is refused, never
-   * forwarded to the gateway.
+   * $app} label. A label with no entry is refused.
    *
    * <p>Empty by default, which is the pre-ingress edge exactly: no app label routes anywhere of its
    * own, and only {@code $env.$domain} works.
@@ -139,9 +93,9 @@ public interface EdgeConfig {
   interface App {
 
     /**
-     * The audience accepted for this application's direct vhost.  It defaults to the historic
-     * registry audience so existing application entries retain their behaviour; applications
-     * such as githost can name their own resource audience.
+     * The audience accepted for this application's direct vhost. It defaults to the historic
+     * registry audience so existing application entries retain their behaviour; applications such
+     * as githost can name their own resource audience.
      */
     @WithDefault("{env}-qits-artifacts")
     String audiencePattern();
@@ -167,9 +121,8 @@ public interface EdgeConfig {
 
     /**
      * Per-environment overrides, {@code qits.edge.apps.<app>.hosts.<env> = host} or {@code
-     * host:port}. The same role, and the same warning, as {@link #upstreamHosts()}: it exists for a
-     * developer's local process and for this repository's test suite, and a stale one sends a whole
-     * application's traffic to the wrong process.
+     * host:port}. It exists for a developer's local process and for this repository's test suite; a
+     * stale override sends a whole tier's traffic to the wrong process.
      */
     Map<String, String> hosts();
   }

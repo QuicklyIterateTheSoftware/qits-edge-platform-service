@@ -1,6 +1,5 @@
 package eu.wohlben.qits.edge;
 
-import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.runtime.RouteConstants;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -16,7 +15,6 @@ import io.vertx.httpproxy.HttpProxy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -24,12 +22,11 @@ import org.jboss.logging.Logger;
 
 /**
  * The edge itself: one catch-all Vert.x route that reads the Host name, picks an environment, and
- * streams the exchange to that environment's gateway verbatim.
+ * streams each admitted exchange to a deployment-published endpoint or configured application.
  *
  * <p><b>What this does not do</b> is still most of what makes it worth having. It holds no route
- * table beyond the environment and application lists, rewrites no path, reads no body, and serves
- * nothing of its own but {@code /q}. Answering a request is the environment gateway's job one hop
- * further in, and a second implementation here would be a second answer to the same question.
+ * table beyond the deployment projection and application list, rewrites no path, reads no body, and
+ * serves nothing of its own but {@code /q}.
  *
  * <p><b>Three things it does do.</b> The first two are host-shaped rather than path-shaped: an
  * {@code $app.$env.$domain} name reaches a configured service directly instead of that
@@ -84,21 +81,14 @@ public class EdgeRouter {
 
   private HostEnvironments hostEnvironments;
 
-  /**
-   * One reusable proxy per upstream — the origin is fixed, so nothing is built per request. Keyed
-   * by the environment name for a gateway and by {@code app.env} for an application, which is the
-   * host name's own spelling and so needs no second lookup table.
-   */
-  private final Map<String, HttpProxy> proxies = new LinkedHashMap<>();
+  /** One reusable proxy per configured application vhost. */
+  private final Map<String, HttpProxy> appProxies = new java.util.LinkedHashMap<>();
 
   /**
    * Direct deployment endpoints arrive after boot, so their proxies are created lazily and reused.
    */
   private final Map<Upstream, HttpProxy> endpointProxies =
       new java.util.concurrent.ConcurrentHashMap<>();
-
-  /** The resolved addresses, kept for the startup log and the readiness payload. */
-  private final Map<String, Upstream> upstreams = new LinkedHashMap<>();
 
   private HttpClient client;
 
@@ -122,12 +112,6 @@ public class EdgeRouter {
         // long exchange alive, and a timeout here would sever exactly what that exists for
         // — a terminal socket, an SSE channel, a slow layer push.
         .setIdleTimeout(0)
-        // The OTHER timeout, and not a contradiction of the line above: this one bounds only the
-        // wait for a TCP connection, before there is an exchange to keep alive. Vert.x defaults to
-        // 60s, and under swarm a gateway's name resolves to a virtual IP that exists before any
-        // task is healthy — so a connection to a starting gateway is dropped rather than refused,
-        // and every request to that environment hung for a full minute before the 502. See
-        // EdgeConfig.connectTimeoutMs.
         .setConnectTimeout(connectTimeoutMs);
   }
 
@@ -135,57 +119,31 @@ public class EdgeRouter {
     hostEnvironments =
         HostEnvironments.of(
             config.environments(), config.defaultEnvironment(), config.apps().keySet());
-    client = vertx.createHttpClient(proxyClientOptions(config.connectTimeoutMs()));
+    client = vertx.createHttpClient(proxyClientOptions(5_000));
 
     for (String environment : hostEnvironments.environments()) {
-      register(environment, resolve(environment));
       // Every application, in every environment. The app entry is one pattern and the environment
       // list is the other axis, so the whole grid exists at boot and no address is built per
       // request — the same SSRF guard as the gateways: a Host name selects an index, never a
       // character of an address.
       for (String app : hostEnvironments.apps()) {
-        register(app + "." + environment, resolveApp(app, environment));
+        registerApp(app + "." + environment, resolveApp(app, environment));
       }
     }
     router.route().order(ROUTE_ORDER).handler(this::handle);
   }
 
-  private void register(String key, Upstream upstream) {
-    upstreams.put(key, upstream);
-    proxies.put(
+  private void registerApp(String key, Upstream upstream) {
+    appProxies.put(
         key,
         HttpProxy.reverseProxy(client)
             .origin(upstream.port(), upstream.host())
             .addInterceptor(new EdgeHeaders()));
   }
 
-  /** The resolved environment to upstream map — the readiness payload and the startup log. */
-  public Map<String, Upstream> upstreams() {
-    return Map.copyOf(upstreams);
-  }
-
   /** Where an unmatched Host name goes. */
   public String defaultEnvironment() {
     return hostEnvironments.defaultEnvironment();
-  }
-
-  void logTable(@Observes StartupEvent ignored) {
-    upstreams.forEach(
-        (name, upstream) ->
-            LOG.infof(
-                "%-14s -> %s%s",
-                name,
-                upstream,
-                name.equals(hostEnvironments.defaultEnvironment()) ? "   (default)" : ""));
-  }
-
-  private Upstream resolve(String environment) {
-    String override = config.upstreamHosts().get(environment);
-    String address =
-        override != null && !override.isBlank()
-            ? override
-            : config.upstreamHostPattern().replace("{env}", environment);
-    return Upstream.parse(address, config.upstreamPort());
   }
 
   private Upstream resolveApp(String app, String environment) {
@@ -211,8 +169,7 @@ public class EdgeRouter {
 
     if (!projectionBootstrap.authoritative()) {
       // A persisted snapshot can be stale or wholly absent until the startup replay has reached
-      // qits-events' confirmed head. Do not let a request observe that partial world through the
-      // old gateway either: callers get an explicit, retryable admission refusal instead.
+      // qits-events' confirmed head. Callers get an explicit, retryable admission refusal instead.
       request
           .response()
           .setStatusCode(503)
@@ -370,19 +327,19 @@ public class EdgeRouter {
     if (isWebSocketUpgrade(request)) {
       EdgeHeaders.applyForwarded(request.headers(), request);
     }
-    // Deployment events own path routing. A matched endpoint is proxied directly; only a path no
-    // active deployment claimed takes the compatibility gateway, which keeps this rollout safe.
-    // Admission above has already proved the startup replay reached qits-events' head, so the
-    // persisted snapshot is authoritative rather than merely a possibly stale cache.
+    // Deployment events own environment-vhost path routing. Admission above has already proved the
+    // startup replay reached qits-events' head, so no compatibility fallback may invent a route.
     EdgeEndpoint endpoint =
         route.toApp() ? null : routes.resolve(route.environment(), request.path());
     if (endpoint != null) {
       endpointProxy(endpoint.upstream()).handle(request);
       return;
     }
-    proxies
-        .get(route.toApp() ? route.app() + "." + route.environment() : route.environment())
-        .handle(request);
+    if (route.toApp()) {
+      appProxies.get(route.app() + "." + route.environment()).handle(request);
+      return;
+    }
+    unknownPath(request, route.environment());
   }
 
   private HttpProxy endpointProxy(Upstream upstream) {
@@ -415,6 +372,19 @@ public class EdgeRouter {
                 + " — the environment `"
                 + route.environment()
                 + "` was read from the name and is fine.\n");
+  }
+
+  private void unknownPath(HttpServerRequest request, String environment) {
+    request
+        .response()
+        .setStatusCode(404)
+        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+        .end(
+            "No active deployment endpoint in environment `"
+                + environment
+                + "` matches `"
+                + request.path()
+                + "`.\n");
   }
 
   /**

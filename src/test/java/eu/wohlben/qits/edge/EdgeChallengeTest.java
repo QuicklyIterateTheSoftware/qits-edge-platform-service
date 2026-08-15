@@ -69,13 +69,18 @@ class EdgeChallengeTest {
 
     assertEquals(
         "dev-qits-githost",
-        EdgeAuth.audienceFor(app("githost", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
+        EdgeAuth.audienceFor(
+            app("githost", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
     assertEquals(
         "dev-qits-artifacts",
-        EdgeAuth.audienceFor(app("registry", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
+        EdgeAuth.audienceFor(
+            app("registry", "dev"), "{env}-qits-artifacts", Map.of("githost", githost)));
     assertEquals(
         "prod-qits-artifacts",
-        EdgeAuth.audienceFor(HostEnvironments.Route.gateway("prod"), "{env}-qits-artifacts", Map.of("githost", githost)));
+        EdgeAuth.audienceFor(
+            HostEnvironments.Route.environment("prod"),
+            "{env}-qits-artifacts",
+            Map.of("githost", githost)));
   }
 
   @Test
@@ -159,7 +164,7 @@ class EdgeChallengeTest {
     // traffic. No value in this list may widen it — not even one that spells an environment name.
     assertFalse(
         EdgeAuth.anonymousRead(
-            HostEnvironments.Route.gateway("dev"), HttpMethod.GET, Set.of("mirror", "dev")));
+            HostEnvironments.Route.environment("dev"), HttpMethod.GET, Set.of("mirror", "dev")));
   }
 
   @Test

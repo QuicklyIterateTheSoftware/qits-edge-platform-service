@@ -179,7 +179,8 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.environments", "prod,dev");
     config.put("qits.edge.default-environment", "prod");
     for (String environment : List.of("prod", "dev")) {
-      config.put("qits.edge.upstream-hosts." + environment, "127.0.0.1:" + listen(environment));
+      config.put(
+          "qits.test.environment-upstreams." + environment, "127.0.0.1:" + listen(environment));
       for (String app : List.of("registry", "mirror")) {
         config.put(
             "qits.edge.apps." + app + ".hosts." + environment,

@@ -11,14 +11,12 @@ import java.util.Set;
  * <p>The convention is two spellings:
  *
  * <pre>
- *   $env.$domain           prod.example.com          -> the prod gateway
+ *   $env.$domain           prod.example.com          -> prod's deployment endpoints
  *   $app.$env.$domain      registry.prod.example.com -> prod's registry, direct
  * </pre>
  *
  * <p>Everything else — the apex domain, an unknown environment name, an IP address, {@code
- * localhost}, a missing Host header — resolves to the <b>default environment's gateway</b>. An edge
- * that refused a name it does not recognise would answer a mistyped URL with a connection error
- * instead of the platform's own page.
+ * localhost}, a missing Host header — resolves to the <b>default environment</b>.
  *
  * <p><b>An app label is refused when it is not configured</b>, and that is the one place the rule
  * above does not hold. A name of the shape {@code $app.$env.$domain} — a first label in front of a
@@ -58,11 +56,11 @@ public final class HostEnvironments {
    */
   public record Route(String environment, String app, String unknownApp) {
 
-    static Route gateway(String environment) {
+    static Route environment(String environment) {
       return new Route(environment, null, null);
     }
 
-    /** Whether this name reaches an application directly rather than the environment gateway. */
+    /** Whether this name reaches a configured application vhost rather than deployment routing. */
     public boolean toApp() {
       return app != null;
     }
@@ -186,7 +184,7 @@ public final class HostEnvironments {
     if (name.isEmpty() || isAddressLiteral(name)) {
       // An address literal carries no name to read. It is how the platform is reached before DNS
       // exists — a bootstrap curling the host's own port — and the default is the right answer.
-      return Route.gateway(defaultEnvironment);
+      return Route.environment(defaultEnvironment);
     }
     String[] labels = name.split("\\.", -1);
     // Position 1 first: see the class javadoc for why the three-label reading wins a tie.
@@ -198,9 +196,9 @@ public final class HostEnvironments {
       return apps.contains(app) ? new Route(labels[1], app, null) : new Route(labels[1], null, app);
     }
     if (environments.contains(labels[0])) {
-      return Route.gateway(labels[0]);
+      return Route.environment(labels[0]);
     }
-    return Route.gateway(defaultEnvironment);
+    return Route.environment(defaultEnvironment);
   }
 
   /** Lower case, no surrounding space, no trailing root dot, no port suffix, no IPv6 brackets. */
