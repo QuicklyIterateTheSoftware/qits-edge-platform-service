@@ -139,6 +139,14 @@ public interface EdgeConfig {
   interface App {
 
     /**
+     * The audience accepted for this application's direct vhost.  It defaults to the historic
+     * registry audience so existing application entries retain their behaviour; applications
+     * such as githost can name their own resource audience.
+     */
+    @WithDefault("{env}-qits-artifacts")
+    String audiencePattern();
+
+    /**
      * The upstream host, with {@code {env}} standing in for the environment the Host name named.
      *
      * <p>The placeholder is what keeps an environment's own services separate: {@code

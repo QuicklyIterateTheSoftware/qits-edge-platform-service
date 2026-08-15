@@ -236,7 +236,14 @@ public class EdgeAuth {
    */
   public Future<String> checkCredential(HostEnvironments.Route route, HttpServerRequest request) {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-    String audience = audienceFor(config.audiencePattern(), route.environment());
+    String pattern = config.audiencePattern();
+    if (route.toApp()) {
+      EdgeConfig.App app = config.apps().get(route.app());
+      if (app != null) {
+        pattern = app.audiencePattern();
+      }
+    }
+    String audience = audienceFor(pattern, route.environment());
     if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
       String credential = header.substring(BASIC.length()).trim();
       String workstationToken = oauth2Token(credential);
