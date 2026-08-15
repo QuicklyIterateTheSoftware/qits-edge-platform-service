@@ -38,13 +38,23 @@ RUN ./mvnw --version
 # The whole tree, not a file list — see .dockerignore for why that is affordable.
 COPY . .
 
+# The edge now consumes qits-eventstream from the platform Maven repository. Mirror only that
+# repository id so Maven permits the deployment-local HTTP endpoint without weakening its global
+# external-HTTP blocker.
+ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
+ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
+
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
 #
 # -DskipTests, deliberately: the suite has already run in the pipeline step that reached this build,
 # and running it here would fork a second Quarkus per class inside a builder image for no new
 # information. A red suite must stop the pipeline, not the image.
-RUN ./mvnw -B -ntp package -Dnative -DskipTests -Dquarkus.native.native-image-xmx=4g
+RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
+    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml package -Dnative -DskipTests \
+      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dquarkus.native.native-image-xmx=4g
 
 # --- runtime -------------------------------------------------------------------------------------
 # `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.

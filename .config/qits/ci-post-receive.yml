@@ -29,7 +29,8 @@ steps:
       # ignores a secret no RUN mounts, and a missing env source is NOT an error (measured on buildx
       # v0.36.1, the build runs green with the variable unset).
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-edge:$QITS_CI_SHA"
-      docker build \
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
