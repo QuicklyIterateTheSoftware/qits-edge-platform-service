@@ -2,15 +2,19 @@ package eu.wohlben.qits.edge;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.agroal.api.AgroalDataSource;
+import io.quarkus.agroal.DataSource;
 import io.quarkus.test.common.WithTestResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.JsonObject;
+import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -37,6 +41,14 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 @WithTestResource(StubGateways.class)
 class EdgeRoutingTest {
+
+  @Inject DeploymentActiveSubscriber deployments;
+
+  @Inject EdgeRoutes routes;
+
+  @Inject
+  @DataSource("edge")
+  AgroalDataSource edgeDataSource;
 
   private static EdgeClient client;
 
@@ -88,6 +100,194 @@ class EdgeRoutingTest {
     assertEquals(404, answer.status());
     assertTrue(answer.body().contains("registy"), answer.body());
     assertNull(answer.line("upstream"), "it must not have reached any upstream");
+  }
+
+  @Test
+  void aDeploymentActiveEndpointIsProxiedDirectlyBeforeTheGatewayFallback() {
+    activateArtifacts();
+
+    assertEquals(
+        "registry-dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
+    // The route's prefix boundary matters: /artifacts catches a child, never this merely similar
+    // word, which stays on the compatibility gateway.
+    assertEquals("dev", client().get("dev.example.com", "/artifacts-old").line("upstream"));
+  }
+
+  @Test
+  void mainNavigationComesFromTheActiveEndpointSnapshot() {
+    activateArtifacts();
+
+    EdgeClient.Answer navigation = client().get("dev.example.com", "/main-navigation");
+    assertEquals(200, navigation.status());
+    assertEquals("no-store", navigation.headers().get("cache-control"));
+    assertEquals(
+        List.of("Home", "Artifacts"),
+        new JsonObject(navigation.body())
+            .getJsonArray("links").stream()
+                .map(value -> ((JsonObject) value).getString("label"))
+                .toList());
+    assertEquals(
+        List.of("/", "/artifacts/"),
+        new JsonObject(navigation.body())
+            .getJsonArray("links").stream()
+                .map(value -> ((JsonObject) value).getString("href"))
+                .toList());
+  }
+
+  @Test
+  void startupRebuildsAnEmptyProjectionFromHistoricalDeploymentsBeforeItBecomesReady()
+      throws Exception {
+    // A lost edge database is a real recovery path, not an empty development fixture. The
+    // eventstream claim ledger may survive it, so the production bootstrap explicitly rewinds its
+    // replay-from-epoch consumer and applies every application's latest historical snapshot.
+    clearProjection();
+
+    DeploymentProjectionBootstrap[] bootstrap = new DeploymentProjectionBootstrap[1];
+    DeploymentProjectionCatchup historicalLog =
+        new DeploymentProjectionCatchup() {
+          @Override
+          public eu.wohlben.qits.eventstream.control.CatchupResult rebuildFromEpoch(
+              String consumerId) {
+            assertEquals(DeploymentActiveSubscriber.CONSUMER_ID, consumerId);
+            deployments.onFrame(
+                deployment(
+                    "qits-artifacts",
+                    "dev",
+                    "history-artifacts",
+                    upstream("qits.edge.apps.registry.hosts.dev"),
+                    "/history-artifacts",
+                    "Artifacts"));
+            deployments.onFrame(
+                deployment(
+                    "qits-workspaces",
+                    "dev",
+                    "history-workspaces",
+                    upstream("qits.edge.apps.mirror.hosts.dev"),
+                    "/history-workspaces",
+                    "Workspaces"));
+            assertFalse(
+                bootstrap[0].authoritative(),
+                "the snapshots must commit before the edge admits their routes");
+            return new eu.wohlben.qits.eventstream.control.CatchupResult(
+                consumerId,
+                eu.wohlben.qits.eventstream.control.CatchupResult.Status.REACHED_HEAD,
+                2);
+          }
+
+          @Override
+          public eu.wohlben.qits.eventstream.control.CatchupResult catchUp(String consumerId) {
+            throw new AssertionError("a confirmed head must not need a retry");
+          }
+        };
+    bootstrap[0] =
+        new DeploymentProjectionBootstrap(historicalLog, true, java.time.Duration.ofMillis(1));
+
+    bootstrap[0].catchUpUntilReady();
+
+    assertTrue(bootstrap[0].authoritative());
+    assertNotNull(routes.resolve("dev", "/history-artifacts/api/files"));
+    assertNotNull(routes.resolve("dev", "/history-workspaces/42"));
+    assertEquals(
+        List.of("Home", "Artifacts", "Workspaces"),
+        routes.navigation("dev").stream().map(NavigationRoute.Link::label).toList());
+  }
+
+  private void clearProjection() throws java.sql.SQLException {
+    try (java.sql.Connection connection = edgeDataSource.getConnection();
+        java.sql.PreparedStatement endpoints =
+            connection.prepareStatement("delete from edge_endpoint");
+        java.sql.PreparedStatement snapshots =
+            connection.prepareStatement("delete from edge_deployment_snapshot")) {
+      endpoints.executeUpdate();
+      snapshots.executeUpdate();
+    }
+    routes.load(null);
+  }
+
+  private static Upstream upstream(String property) {
+    return Upstream.parse(ConfigProvider.getConfig().getValue(property, String.class), 8080);
+  }
+
+  private static eu.wohlben.qits.eventstream.control.EventFrame deployment(
+      String application,
+      String environment,
+      String eventId,
+      Upstream upstream,
+      String path,
+      String label) {
+    return new eu.wohlben.qits.eventstream.control.EventFrame(
+        eventId,
+        "DeploymentActive",
+        Instant.now(),
+        new JsonObject()
+            .put("applicationName", application)
+            .put("environmentName", environment)
+            .put(
+                "endpoints",
+                new io.vertx.core.json.JsonArray()
+                    .add(
+                        new JsonObject()
+                            .put("path", path)
+                            .put("upstreamHost", upstream.host())
+                            .put("upstreamPort", upstream.port())
+                            .put("navigationLabel", label)
+                            .put("navigationPosition", 1)))
+            .encode(),
+        null,
+        null);
+  }
+
+  @Test
+  void anExplicitlyEmptySnapshotRemovesThePredecessorsRoutes() {
+    activateArtifacts();
+    deployments.onFrame(
+        new eu.wohlben.qits.eventstream.control.EventFrame(
+            java.util.UUID.randomUUID().toString(),
+            "DeploymentActive",
+            Instant.now(),
+            new JsonObject()
+                .put("applicationName", "qits-artifacts")
+                .put("environmentName", "dev")
+                .put("endpoints", new io.vertx.core.json.JsonArray())
+                .encode(),
+            null,
+            null));
+
+    assertEquals("dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
+  }
+
+  private void activateArtifacts() {
+    String configured =
+        ConfigProvider.getConfig().getValue("qits.edge.apps.registry.hosts.dev", String.class);
+    Upstream upstream = Upstream.parse(configured, 8080);
+    String payload =
+        new JsonObject()
+            .put("applicationName", "qits-artifacts")
+            .put("environmentName", "dev")
+            .put(
+                "endpoints",
+                new io.vertx.core.json.JsonArray()
+                    .add(
+                        new JsonObject()
+                            .put("path", "/artifacts")
+                            .put("upstreamHost", upstream.host())
+                            .put("upstreamPort", upstream.port())
+                            .put("navigationLabel", "Artifacts")
+                            .put("navigationPosition", 3))
+                    .add(
+                        new JsonObject()
+                            .put("path", "/v2")
+                            .put("upstreamHost", upstream.host())
+                            .put("upstreamPort", upstream.port())))
+            .encode();
+    deployments.onFrame(
+        new eu.wohlben.qits.eventstream.control.EventFrame(
+            java.util.UUID.randomUUID().toString(),
+            "DeploymentActive",
+            Instant.now(),
+            payload,
+            null,
+            null));
   }
 
   @Test

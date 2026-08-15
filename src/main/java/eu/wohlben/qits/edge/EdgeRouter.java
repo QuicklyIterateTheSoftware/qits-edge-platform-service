@@ -78,6 +78,10 @@ public class EdgeRouter {
 
   @Inject EdgeSessions sessions;
 
+  @Inject EdgeRoutes routes;
+
+  @Inject DeploymentProjectionBootstrap projectionBootstrap;
+
   private HostEnvironments hostEnvironments;
 
   /**
@@ -86,6 +90,12 @@ public class EdgeRouter {
    * host name's own spelling and so needs no second lookup table.
    */
   private final Map<String, HttpProxy> proxies = new LinkedHashMap<>();
+
+  /**
+   * Direct deployment endpoints arrive after boot, so their proxies are created lazily and reused.
+   */
+  private final Map<Upstream, HttpProxy> endpointProxies =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   /** The resolved addresses, kept for the startup log and the readiness payload. */
   private final Map<String, Upstream> upstreams = new LinkedHashMap<>();
@@ -196,6 +206,19 @@ public class EdgeRouter {
       // the Host name says. It is the one thing an orchestrator must be able to ask the edge about
       // itself rather than about an environment behind it.
       rc.next();
+      return;
+    }
+
+    if (!projectionBootstrap.authoritative()) {
+      // A persisted snapshot can be stale or wholly absent until the startup replay has reached
+      // qits-events' confirmed head. Do not let a request observe that partial world through the
+      // old gateway either: callers get an explicit, retryable admission refusal instead.
+      request
+          .response()
+          .setStatusCode(503)
+          .putHeader(HttpHeaders.RETRY_AFTER, "1")
+          .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+          .end("edge deployment routing is catching up; retry shortly\\n");
       return;
     }
 
@@ -347,9 +370,36 @@ public class EdgeRouter {
     if (isWebSocketUpgrade(request)) {
       EdgeHeaders.applyForwarded(request.headers(), request);
     }
+    // Deployment events own path routing. A matched endpoint is proxied directly; only a path no
+    // active deployment claimed takes the compatibility gateway, which keeps this rollout safe.
+    // Admission above has already proved the startup replay reached qits-events' head, so the
+    // persisted snapshot is authoritative rather than merely a possibly stale cache.
+    EdgeEndpoint endpoint =
+        route.toApp() ? null : routes.resolve(route.environment(), request.path());
+    if (endpoint != null) {
+      endpointProxy(endpoint.upstream()).handle(request);
+      return;
+    }
     proxies
         .get(route.toApp() ? route.app() + "." + route.environment() : route.environment())
         .handle(request);
+  }
+
+  private HttpProxy endpointProxy(Upstream upstream) {
+    return endpointProxies.computeIfAbsent(
+        upstream,
+        address ->
+            HttpProxy.reverseProxy(client)
+                .origin(address.port(), address.host())
+                .addInterceptor(new EdgeHeaders()));
+  }
+
+  /**
+   * Package-visible for the local navigation route: it must use the same host resolution as
+   * proxying.
+   */
+  String environment(HttpServerRequest request) {
+    return hostEnvironments.route(authority(request)).environment();
   }
 
   private void unknownApp(HttpServerRequest request, HostEnvironments.Route route) {

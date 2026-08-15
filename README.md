@@ -4,9 +4,45 @@
 request, and streams the request unchanged to whatever that name selects — an environment's gateway,
 or one of that environment's services directly.
 
-A small, stateless Quarkus 3 (Java 25) application that compiles to a **GraalVM native binary**. No
-database, no ORM, no REST layer. It holds no session of its own either: the browser gate reads
-idp's, caches what idp said, and forgets it.
+A small Quarkus 3 (Java 25) application that compiles to a **GraalVM native binary**. It holds no
+browser session of its own: the browser gate reads idp's, caches what idp said, and forgets it.
+
+## Deployment routes
+
+`qits-deployments` publishes every successful deployment as a durable `DeploymentActive` event.
+The edge consumes both the live stream and qits-events' catch-up log, then replaces that
+application's endpoint snapshot in its own PostgreSQL database. The canonical endpoint fields are
+`path`, `upstreamHost`, `upstreamPort`, and, on one primary route at most, `navigationLabel` and
+`navigationPosition`.
+
+For an environment vhost, the longest matching active prefix is proxied straight to that upstream;
+an unmatched path still goes to the environment gateway while the migration is in progress. A newer
+event replaces the complete snapshot, so removing a route removes it rather than leaving a stale
+endpoint live. An older event delivered late is ignored. The `/main-navigation` GET/HEAD document
+is derived from the same active snapshot (`Home` plus labelled routes), carries `Cache-Control:
+no-store`, and is never proxied.
+
+The deployed edge therefore needs two provisioned PostgreSQL resources: `edge` for this projection
+(`QITS_RESOURCE_EDGE_URL`, `_USERNAME`, `_PASSWORD`) and `eventstream` for the durable consumer's
+claim ledger (the variables named by the qits-eventstream library). `qits.eventstream.enabled` is
+left on in deployments; development and test profiles turn it off while Flyway still migrates both
+stores.
+
+### Startup is a rebuild, not a cache read
+
+On every production start the edge resets the `edge-active-endpoints` consumer and replays its
+`DeploymentActive` history from the epoch. It does this even when the eventstream claim ledger
+survived: a durable watermark without the edge projection would otherwise make a freshly empty
+database look caught up. Snapshot replacement is idempotent and last-writer-wins, so replaying over
+a surviving projection is safe and there is no projection truncate.
+
+Until qits-events explicitly marks the final catch-up page as its head, `/q/health/ready` is DOWN,
+`/main-navigation` returns `503 Retry-After: 1`, and every non-`/q` request returns the same
+retryable `503`. The edge therefore never presents a partial direct-routing or navigation view as
+authoritative. An unavailable event log or a failed event handler leaves it down and retries after
+`qits.edge.projection.catchup.retry`; a confirmed head enables admission. The ordinary generic
+eventstream startup sweep is disabled here because this named, readiness-owning rebuild is the
+startup path; scheduled sweeps remain the post-start safety net.
 
 ```
                           ┌────────────────────────────────────────┐
@@ -58,10 +94,10 @@ application. Nothing in a request ever contributes a character to an address: a 
 
 ## What it does not do — the non-goals, on purpose
 
-- **No path knowledge in the routing decision.** The app label picks a whole upstream and the auth
-  gate is per vhost — per vhost and *method*, where a deployment opened reads, but never per path;
-  no prefix matching, no rewriting. `/token` is the single path this process claims, and only on an
-  application vhost.
+- **No hand-maintained path table.** Direct prefixes are deployment facts consumed from the durable
+  event log, never an enum or an edge environment variable. The auth gate remains per vhost — per
+  vhost and *method*, never per path — and direct proxying preserves the request path unchanged.
+  `/token` remains the single path this process claims on an application vhost.
 - **No login page and no session of its own.** The edge *reads* a session — it introspects the
   `qits-session` cookie at idp and turns it into identity headers (see *Browser sessions* below) —
   but it issues none, stores none, and serves no page. Registration, login and logout are
@@ -92,7 +128,8 @@ application. Nothing in a request ever contributes a character to an address: a 
   `https`, so overwriting would replace a true value with a false one. Consequently **nothing may
   make a trust decision on these three**; they are diagnostics and link generation.
 - **Answers `/q/health/{live,ready}` itself**, never proxied, whatever the `Host` says. Readiness
-  reports the resolved environment → upstream map as health data.
+  reports the resolved environment → upstream map as health data and stays DOWN until the
+  deployment projection has reached qits-events' confirmed head.
 
 ### The one known gap: `Host` on a WebSocket handshake
 
@@ -118,6 +155,8 @@ a file.
 | `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — | **Required per app.** `{env}` is the only placeholder; a platform service names none |
 | `qits.edge.apps.<app>.port` | `QITS_EDGE_APPS_<APP>_PORT` | `8080` | The port that application listens on |
 | `qits.edge.apps.<app>.hosts.<env>` | `QITS_EDGE_APPS_<APP>_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
+| `qits.edge.projection.catchup.required` | `QITS_EDGE_PROJECTION_CATCHUP_REQUIRED` | `true` | Requires a complete deployment-history rebuild before the edge is ready; turn off only in an intentionally offline test/dev setup |
+| `qits.edge.projection.catchup.retry` | `QITS_EDGE_PROJECTION_CATCHUP_RETRY` | `PT1S` | Delay before retrying an incomplete, failed, or unavailable deployment-history read |
 | `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
 | `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Application vhosts require a valid idp token |
 | `qits.edge.auth.enforce-on-environments` | `QITS_EDGE_AUTH_ENFORCE_ON_ENVIRONMENTS` | `false` | Environment vhosts do not — **flipping it is a step of its own** |

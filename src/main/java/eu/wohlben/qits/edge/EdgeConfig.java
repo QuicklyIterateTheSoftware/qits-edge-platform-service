@@ -2,6 +2,7 @@ package eu.wohlben.qits.edge;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -110,6 +111,25 @@ public interface EdgeConfig {
    * </pre>
    */
   Map<String, App> apps();
+
+  /** The startup proof that turns a persisted deployment snapshot into an authoritative one. */
+  Projection projection();
+
+  interface Projection {
+
+    Catchup catchup();
+
+    interface Catchup {
+
+      /** False only in deliberately offline test/dev setups. */
+      @WithDefault("true")
+      boolean required();
+
+      /** Delay between unsuccessful reads of qits-events while readiness remains down. */
+      @WithDefault("PT1S")
+      Duration retry();
+    }
+  }
 
   /**
    * One application's upstream, in the same shape as the environment gateway's above: a host

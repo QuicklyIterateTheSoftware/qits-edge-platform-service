@@ -34,6 +34,10 @@
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <spotless-plugin.version>2.44.5</spotless-plugin.version>
         <google-java-format.version>1.28.0</google-java-format.version>
+        <qits.eventstream.version>2026.811.155429</qits.eventstream.version>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
     </properties>
 
     <dependencyManagement>
@@ -44,6 +48,19 @@
                 <version>${quarkus.platform.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -89,6 +106,26 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-opentelemetry</artifactId>
         </dependency>
+        <dependency>
+            <!-- Durable live delivery plus the catch-up log reader. The edge is rebuilt or moved
+                 independently of deployments, so its routing projection must recover missed events. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-eventstream</artifactId>
+            <version>${qits.eventstream.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10's PostgreSQL support lives outside flyway-core. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -98,6 +135,31 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -197,6 +259,13 @@
             </plugin>
         </plugins>
     </build>
+
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
 
     <profiles>
         <!-- GraalVM native build: `-Dnative` disables the jar and enables the native image. There is

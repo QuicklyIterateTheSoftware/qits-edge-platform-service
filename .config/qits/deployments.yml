@@ -22,6 +22,14 @@
 # edge would put preprod's code in front of prod. `pd_environment.platform` is what prevents it.
 deployment_target: platform
 
+# The edge is now a durable projection consumer. `edge` holds its active endpoint snapshots;
+# `eventstream` is qits-eventstream's claim ledger and catch-up watermark. They cannot share a
+# database or Flyway history: both start at V1 and both must survive an edge replacement. The names
+# become QITS_RESOURCE_EDGE_* and QITS_RESOURCE_EVENTSTREAM_* respectively, which the two shipped
+# datasource blocks read. Explicit database names keep this platform-wide process from colliding
+# with the per-environment edge test/projection stores or a future edge variant.
+resources: postgresql:edge:qits_platform_edge, postgresql:eventstream:qits_platform_edge_eventstream
+
 # The default would be /platform-edge/q/health/ready, derived from the name with the qits- prefix
 # dropped. The edge owns the root path space and has no segment, so that path would be proxied to an
 # environment gateway and 404 — the health gate would fail a perfectly healthy edge.

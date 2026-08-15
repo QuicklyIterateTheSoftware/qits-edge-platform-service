@@ -27,9 +27,14 @@ public class UpstreamsHealthCheck implements HealthCheck {
 
   @Inject EdgeRouter router;
 
+  @Inject DeploymentProjectionBootstrap projectionBootstrap;
+
   @Override
   public HealthCheckResponse call() {
-    HealthCheckResponseBuilder response = HealthCheckResponse.named("edge upstreams").up();
+    HealthCheckResponseBuilder response =
+        HealthCheckResponse.named("edge upstreams")
+            .status(projectionBootstrap.authoritative())
+            .withData("deployment-projection", projectionBootstrap.state());
     router
         .upstreams()
         .forEach((environment, upstream) -> response.withData(environment, upstream.toString()));
