@@ -169,6 +169,16 @@ class EdgeChallengeTest {
   }
 
   @Test
+  void gitOauthBasicCarriesAnAccessTokenAsItsPassword() {
+    assertEquals(
+        "header.payload.signature",
+        EdgeAuth.oauth2Token(encode("oauth2:header.payload.signature")));
+    assertNull(EdgeAuth.oauth2Token(encode("client:secret")));
+    assertNull(EdgeAuth.oauth2Token(encode("oauth2:")));
+    assertNull(EdgeAuth.oauth2Token("not-base64"));
+  }
+
+  @Test
   void aCachedCredentialIsHeldAsAHashAndNeverAsItself() {
     // The cache key is a caller's SECRET. A hash is what keeps it out of a map, a log line and a
     // heap dump, and the same credential has to keep finding its own entry.

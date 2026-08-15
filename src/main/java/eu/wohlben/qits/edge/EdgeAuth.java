@@ -238,16 +238,36 @@ public class EdgeAuth {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
     String audience = audienceFor(config.audiencePattern(), route.environment());
     if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
+      String credential = header.substring(BASIC.length()).trim();
+      String workstationToken = oauth2Token(credential);
+      if (workstationToken != null) {
+        return checkBearer(workstationToken, audience)
+            .map(
+                problem -> {
+                  if (problem == null) {
+                    // Git can only obtain Basic from its credential-helper protocol. Once that
+                    // token has passed this edge, forward it in the standard form so the target
+                    // service's OIDC mechanism validates it independently and builds the roles.
+                    request.headers().set(HttpHeaders.AUTHORIZATION, "Bearer " + workstationToken);
+                  }
+                  return problem;
+                });
+      }
       // A client id and secret, sent by something that cannot do docker's token dance — maven, npm,
       // git. Spending them at idp is the only way to know they are good.
-      return checkBasic(header.substring(BASIC.length()).trim(), audience);
+      return checkBasic(credential, audience);
     }
     if (header == null || !header.toLowerCase(Locale.ROOT).startsWith(BEARER)) {
       return Future.succeededFuture("no bearer token");
     }
+    return checkBearer(header.substring(BEARER.length()).trim(), audience);
+  }
+
+  /** Validate the JWT carried directly as Bearer, or as Git's {@code oauth2:<token>} Basic pair. */
+  private Future<String> checkBearer(String compact, String audience) {
     SignedJwt jwt;
     try {
-      jwt = SignedJwt.parse(header.substring(BEARER.length()).trim());
+      jwt = SignedJwt.parse(compact);
     } catch (IllegalArgumentException e) {
       return Future.succeededFuture(e.getMessage());
     }
@@ -259,6 +279,25 @@ public class EdgeAuth {
     }
     return keys.find(jwt.kid())
         .map(key -> jwt.signatureMatches(key) ? null : "the token's signature does not verify");
+  }
+
+  /**
+   * Git credential helpers speak HTTP Basic. The conventional {@code oauth2} username declares that
+   * the password is already an access token; it must be validated as such rather than spent at the
+   * IdP as a client secret.
+   */
+  static String oauth2Token(String credential) {
+    if (credential == null || credential.isBlank()) {
+      return null;
+    }
+    try {
+      String decoded = new String(Base64.getDecoder().decode(credential), StandardCharsets.UTF_8);
+      return decoded.startsWith("oauth2:") && decoded.length() > "oauth2:".length()
+          ? decoded.substring("oauth2:".length())
+          : null;
+    } catch (IllegalArgumentException invalidBase64) {
+      return null;
+    }
   }
 
   /**
