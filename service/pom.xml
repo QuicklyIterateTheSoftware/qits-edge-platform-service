@@ -120,6 +120,17 @@
             <artifactId>qits-platform-edge-acme</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- Direct on purpose: Quarkus discovers named JCE providers from application
+             dependencies while augmenting the native image. acme4j also brings this transitively,
+             but that alone did not register BC in the production executable. -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-security</artifactId>
+        </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-jdbc-postgresql</artifactId>
