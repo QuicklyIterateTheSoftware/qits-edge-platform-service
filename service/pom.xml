@@ -1,0 +1,311 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits-platform-edge-parent</artifactId>
+        <version>2026.814.184856</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <groupId>eu.wohlben</groupId>
+    <artifactId>qits-platform-edge</artifactId>
+    <version>2026.814.184856</version>
+    <packaging>quarkus</packaging>
+
+    <name>qits-platform-edge</name>
+    <description>The platform's L7 edge: it binds the host's only public port and hands every
+        request to the environment gateway its Host name names.
+    </description>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+        <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <!-- Keep in step with the platform's quarkus.platform.version (qits-gateway's is the one to
+             match; it is the closest sibling and the other half of every request that passes here). -->
+        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+
+        <compiler-plugin.version>3.15.0</compiler-plugin.version>
+        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <spotless-plugin.version>2.44.5</spotless-plugin.version>
+        <google-java-format.version>1.28.0</google-java-format.version>
+        <qits.eventstream.version>2026.815.121800</qits.eventstream.version>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- FIVE EXTENSIONS, AND THE SHORTNESS OF THE LIST IS THE POINT OF THIS SERVICE. Every
+         dependency here is native image size, build time and reflection surface, and this process
+         is the one thing that has to be up before anything on the platform is reachable. There is
+         no REST layer, no datasource, no ORM and no client: the edge reads an environment list from
+         configuration and streams bytes.
+
+         The fifth is the telemetry exporter, and it is the one addition that earns its size. The
+         edge is the outermost hop, so it is the only place that sees a request the environment
+         gateway never received — a 502 against an unreachable gateway, a host name that fell to the
+         default. Without it the platform's first hop is the one hop with no trace. -->
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The HTTP server and the Vert.x `Router` the catch-all route is registered on. Raw
+                 Vert.x routes only — a JAX-RS layer would buffer and re-encode what must pass
+                 through untouched. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx-http</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The reverse-proxy engine, the same one qits-gateway uses one hop further in: it
+                 streams request and response bodies without buffering them and forwards WebSocket
+                 upgrades by default. Version managed by the platform BOM. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-http-proxy</artifactId>
+        </dependency>
+        <dependency>
+            <!-- /q/health/{live,ready}, answered by this process and never proxied. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-health</artifactId>
+        </dependency>
+        <dependency>
+            <!-- OTLP export to qits-observability. The extension is what instruments the process;
+                 the endpoint and protocol in application.properties are what make it arrive, since
+                 the defaults are gRPC to localhost:4317 and the receiver speaks HTTP/protobuf. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-opentelemetry</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Durable live delivery plus the catch-up log reader. The edge is rebuilt or moved
+                 independently of deployments, so its routing projection must recover missed events. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-eventstream</artifactId>
+            <version>${qits.eventstream.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-platform-edge-acme</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10's PostgreSQL support lives outside flyway-core. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.rest-assured</groupId>
+            <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${compiler-plugin.version}</version>
+                <configuration>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${surefire-plugin.version}</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <maven.home>${maven.home}</maven.home>
+                    </systemPropertyVariables>
+                    <!-- The suite's WebSocket tests open a socket with a chosen `Host`, because
+                         Host IS what this service routes on. The JDK's HttpClient refuses to send
+                         one otherwise (`Host` is on its restricted list) and fails with an
+                         IllegalArgumentException about the header name — a message that says
+                         nothing about the edge. It is on argLine rather than in
+                         systemPropertyVariables because the JDK reads the list once, when
+                         java.net.http initialises, which can happen before a property set from
+                         inside the forked JVM would land. See EdgeClient.handshake. -->
+                    <argLine>-Djdk.httpclient.allowRestrictedHeaders=host</argLine>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/EdgeSessionGateTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <!-- The browser session gate, in a JVM of its own, and it needs one twice
+                             over.
+
+                             qits.edge.sessions.enabled is read at boot, so proving both of its
+                             states means two Quarkus starts. In ONE JVM the second start is a
+                             restart — after which a WebSocket upgrade through vertx-http-proxy
+                             silently degrades to a plain proxied GET and the socket tests of
+                             whichever class ran second fail with nothing logged anywhere. It is a
+                             property of the harness rather than of this code, and qits-gateway paid
+                             for finding it.
+
+                             A second surefire execution forks a second JVM, which is the whole
+                             mechanism: in it, this class's application is the first start, and both
+                             suites keep their socket tests. -->
+                        <id>session-gate-tests</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/EdgeSessionGateTest.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <!-- Same formatter as the rest of the platform (google-java-format, needs JDK 21+),
+                     applied on every build so formatting is never a review topic. -->
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless-plugin.version}</version>
+                <configuration>
+                    <java>
+                        <googleJavaFormat>
+                            <version>${google-java-format.version}</version>
+                        </googleJavaFormat>
+                    </java>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>spotless-apply</id>
+                        <phase>process-sources</phase>
+                        <goals>
+                            <goal>apply</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
+
+    <profiles>
+        <!-- GraalVM native build: `-Dnative` disables the jar and enables the native image. There is
+             no parent pom to inherit a native profile from, so it lives here.
+
+             The toolchain is `.sdkmanrc`'s 25.0.2-graalce: `sdk env` puts a native-image on
+             JAVA_HOME and the compile runs in-process, no container. That has to be declared rather
+             than assumed, because Quarkus does not fail when native-image is missing — it logs
+             "Cannot find the native-image ... Attempting to fall back to container build" and shells
+             docker with a Mandrel image. Green either way, which is how a repository ends up
+             building under docker without anyone deciding to.
+
+             docker/Dockerfile is the shipping form, not the build: it wraps this same binary in an
+             image, with its own Mandrel builder so a machine with no GraalVM can still produce one. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
+</project>

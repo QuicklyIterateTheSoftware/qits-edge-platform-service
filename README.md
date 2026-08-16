@@ -388,26 +388,23 @@ The SDK is **disabled under `%dev` and `%test`**: a clone-alone `./mvnw verify` 
 reach, and an exporter retrying against an unresolvable name turns the suite into a wall of export
 failures. Telemetry is real in a deployment.
 
-### TLS: the Let's Encrypt certificate slot
+### TLS: wildcard certificates through DNS-01
 
-Four build-time keys, and **inert until a deployment supplies a keystore** — this repository supplies
-none, so nothing is requested and nothing renews. The edge is no ACME client:
-`quarkus.tls.lets-encrypt.enabled` adds an HTTP-01 challenge route,
-`/.well-known/acme-challenge/:token`, to the main listener and the challenge-management endpoints to
-the management interface. The host-side `quarkus tls lets-encrypt` CLI runs the protocol against
-them, writes the PEMs where the TLS registry reads them, and the registry hot-reloads.
+The `acme/` module is the edge's ACME client. For a configured apex it orders one SAN certificate
+covering the apex, `*.<domain>`, and `*.<environment>.<domain>` for every configured environment.
+That covers platform names such as `idp.wohlben.eu` and project names such as
+`qits.dev.wohlben.eu` without issuing one certificate per hostname.
 
-Two consequences are worth knowing before touching any of it:
+The manager writes short-lived `_acme-challenge` TXT values through Hetzner's Cloud API, waits until
+both Cloudflare and Google public DNS-over-HTTPS resolvers observe them, and removes only the value
+it created. ACME account state and certificates persist on the TLS volume. Successful certificates
+are installed in immutable version directories and an atomic `current` symlink switch lets Quarkus'
+TLS registry reload them without restarting the edge.
 
-- **The challenge-management endpoint is unauthenticated**, which is the only reason the management
-  interface is on. On the main listener — the host's one published port — anyone on the internet
-  could complete their own ACME order for the platform's domain. Port 9000 is published to loopback,
-  or not at all.
-- **Enabling the management interface moves `/q/health` onto it by default**, and the bootstrap and
-  the deployer both poll `:8080/q/health/ready`. `quarkus.smallrye-health.management.enabled=false`
-  keeps health where they look. `LetsEncryptConfigTest` pins the four keys, proves the challenge
-  route beats the catch-all without reaching an upstream, and asserts health answers on the main port
-  and 404s on the management one.
+Set `QITS_EDGE_ACME_MODE=staging` until the whole DNS path works, then switch to `production`. A
+non-expiring production certificate is never replaced by staging. `QITS_DNS_HETZNER_TOKEN` is a
+secret and must be supplied by deployment configuration, never committed or logged. Replicas use a
+database lease so only one of them can place an order or renew at a time.
 
 ### Deployment
 

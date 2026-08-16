@@ -52,7 +52,7 @@ ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
 # information. A red suite must stop the pipeline, not the image.
 RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
     --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
-    ./mvnw -B -ntp -s .qits-maven-settings.xml package -Dnative -DskipTests \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml package -pl service -am -Dnative -DskipTests \
       -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
       -Dquarkus.native.native-image-xmx=4g
 
@@ -63,7 +63,7 @@ WORKDIR /work
 
 # `quarkus.package.output-name` names the binary `qits-platform-edge` (no -runner suffix), so the
 # process is identifiable in `ps` / `docker top`.
-COPY --from=build --chown=1001:root /src/target/qits-platform-edge /work/qits-platform-edge
+COPY --from=build --chown=1001:root /src/service/target/qits-platform-edge /work/qits-platform-edge
 RUN chmod +x /work/qits-platform-edge
 
 EXPOSE 8080
