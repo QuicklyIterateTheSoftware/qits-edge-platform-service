@@ -1,9 +1,9 @@
 package eu.wohlben.qits.edge;
 
 import eu.wohlben.qits.edge.acme.AcmeCertificateIssuer;
+import eu.wohlben.qits.edge.acme.AuthoritativeDnsPropagation;
 import eu.wohlben.qits.edge.acme.CertificateNames;
 import eu.wohlben.qits.edge.acme.CertificateRequest;
-import eu.wohlben.qits.edge.acme.DohDnsPropagation;
 import eu.wohlben.qits.edge.acme.HetznerDnsChallengeProvider;
 import eu.wohlben.qits.edge.acme.PemCertificateStore;
 import io.quarkus.runtime.StartupEvent;
@@ -106,7 +106,9 @@ public class EdgeCertificateManager {
       String email = acme.email().map(String::strip).orElse("hostmaster@" + domain);
       var issuer =
           new AcmeCertificateIssuer(
-              new HetznerDnsChallengeProvider(token, domain), new DohDnsPropagation(), store);
+              new HetznerDnsChallengeProvider(token, domain),
+              new AuthoritativeDnsPropagation(),
+              store);
       issuer.issue(
           new CertificateRequest(
               directory,
