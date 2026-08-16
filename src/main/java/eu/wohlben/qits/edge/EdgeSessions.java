@@ -15,6 +15,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -26,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.jboss.logging.Logger;
 
 /**
@@ -97,6 +99,11 @@ public class EdgeSessions {
   /** {@link SessionsConfig#anonymousPrefixes()} with blanks dropped, read once at startup. */
   private List<String> anonymousPrefixes;
 
+  /** The configured, canonical browser origin and the only authorities a login may return to. */
+  private URI canonicalOrigin;
+
+  private Set<String> browserHosts;
+
   /** Cookie fingerprint to what idp said about it. Bounded and least-recently-used. */
   private Map<String, Cached> sessions;
 
@@ -131,6 +138,15 @@ public class EdgeSessions {
                             .getBytes(StandardCharsets.UTF_8))
             : null;
     anonymousPrefixes = prefixes(config.anonymousPrefixes());
+    canonicalOrigin = parseOrigin(config.canonicalOrigin());
+    browserHosts = browserHosts(config.browserHosts());
+    String canonicalAuthority = authority(canonicalOrigin.getAuthority());
+    if (browserHosts.isEmpty()
+        || canonicalAuthority == null
+        || !browserHosts.contains(canonicalAuthority)) {
+      throw new IllegalStateException(
+          "qits.edge.sessions.browser-hosts must include qits.edge.sessions.canonical-origin");
+    }
     int capacity = config.cacheSize();
     sessions =
         Collections.synchronizedMap(
@@ -158,14 +174,23 @@ public class EdgeSessions {
     }
     if (config.enabled()) {
       LOG.infof(
-          "browser sessions are gated here: cookie %s, login %s, anonymous %s",
-          config.cookieName(), config.loginPath(), anonymousPrefixes);
+          "browser sessions are gated here: cookie %s, login %s%s, browser hosts %s, anonymous %s",
+          config.cookieName(),
+          canonicalOrigin,
+          config.loginPath(),
+          browserHosts,
+          anonymousPrefixes);
     }
   }
 
   /** Whether this process gates browsers at all. Everything else here is dead while it is false. */
   public boolean enabled() {
     return config.enabled();
+  }
+
+  /** The one browser credential machine vhosts must remove before proxying. */
+  public String cookieName() {
+    return config.cookieName();
   }
 
   /** The session cookie this request carries, or null when it carries none. */
@@ -299,7 +324,9 @@ public class EdgeSessions {
    * SPA can send the user there itself.
    */
   public void refuse(HttpServerRequest request) {
-    String location = loginLocation(request.uri());
+    String location =
+        loginLocation(
+            request.authority() == null ? null : request.authority().toString(), request.uri());
     if (isNavigation(
         request.method(), request.getHeader(FETCH_MODE), request.getHeader(HttpHeaders.ACCEPT))) {
       request
@@ -343,11 +370,63 @@ public class EdgeSessions {
         && accept.toLowerCase(Locale.ROOT).contains("text/html");
   }
 
-  /** The login page with the request's own path to come back to. */
-  String loginLocation(String uri) {
-    return config.loginPath()
-        + "?redirect="
+  /** The canonical login page with a configured host and the request path to come back to. */
+  String loginLocation(String requestedAuthority, String uri) {
+    String host = authority(requestedAuthority);
+    if (host == null || !browserHosts.contains(host)) {
+      host = authority(canonicalOrigin.getAuthority());
+    }
+    return canonicalOrigin
+        + config.loginPath()
+        + "?return_host="
+        + URLEncoder.encode(host, StandardCharsets.UTF_8)
+        + "&return_path="
         + URLEncoder.encode(redirectTarget(uri), StandardCharsets.UTF_8);
+  }
+
+  private static URI parseOrigin(String configured) {
+    URI origin = URI.create(configured.strip());
+    if (!("http".equals(origin.getScheme()) || "https".equals(origin.getScheme()))
+        || origin.getHost() == null
+        || origin.getRawQuery() != null
+        || origin.getRawFragment() != null
+        || !"".equals(origin.getPath())) {
+      throw new IllegalStateException(
+          "qits.edge.sessions.canonical-origin must be an http(s) origin with no path, query, or fragment");
+    }
+    return origin;
+  }
+
+  static Set<String> browserHosts(List<String> configured) {
+    java.util.LinkedHashSet<String> hosts = new java.util.LinkedHashSet<>();
+    for (String value : configured) {
+      String authority = authority(value);
+      if (authority != null) {
+        hosts.add(authority);
+      }
+    }
+    return Set.copyOf(hosts);
+  }
+
+  /** A lower-case host plus optional port, never a URL, path, user-info, or wildcard. */
+  static String authority(String raw) {
+    if (raw == null || raw.isBlank() || raw.indexOf('/') >= 0 || raw.indexOf('\\') >= 0) {
+      return null;
+    }
+    try {
+      URI parsed = URI.create("https://" + raw.strip());
+      if (parsed.getHost() == null
+          || parsed.getUserInfo() != null
+          || parsed.getPath().length() != 0
+          || parsed.getRawQuery() != null
+          || parsed.getRawFragment() != null) {
+        return null;
+      }
+      String host = parsed.getHost().toLowerCase(Locale.ROOT);
+      return parsed.getPort() < 0 ? host : host + ":" + parsed.getPort();
+    } catch (IllegalArgumentException invalid) {
+      return null;
+    }
   }
 
   /**

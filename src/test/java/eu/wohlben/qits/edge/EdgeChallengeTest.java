@@ -279,6 +279,8 @@ class EdgeChallengeTest {
     // The cookie and the path are a contract with qits-platform-idp and its SPA, so they are pinned
     // here rather than left to a deployment to keep in step.
     assertEquals("qits-session", sessionDefault("cookieName"));
+    assertEquals("http://localhost:8080", sessionDefault("canonicalOrigin"));
+    assertEquals("localhost:8080", sessionDefault("browserHosts"));
     assertEquals("/idp/login", sessionDefault("loginPath"));
     assertEquals("/idp/", sessionDefault("anonymousPrefixes"));
     assertEquals("30000", sessionDefault("cacheTtlMs"));
@@ -308,6 +310,17 @@ class EdgeChallengeTest {
     assertNull(EdgeSessions.cookieValue(null, "qits-session"));
     // Cookie names are case-sensitive, so this is a different cookie and not this one.
     assertNull(EdgeSessions.cookieValue("QITS-SESSION=abc", "qits-session"));
+  }
+
+  @Test
+  void browserReturnHostsAreAnExplicitAuthorityAllowList() {
+    assertEquals(
+        Set.of("wohlben.eu", "prod.wohlben.eu"),
+        EdgeSessions.browserHosts(List.of("wohlben.eu", "PROD.wohlben.eu")));
+    assertNull(EdgeSessions.authority("https://evil.example"));
+    assertNull(EdgeSessions.authority("evil.example/path"));
+    assertNull(EdgeSessions.authority("user@evil.example"));
+    assertNull(EdgeSessions.authority("evil.example?not-an-authority"));
   }
 
   @Test

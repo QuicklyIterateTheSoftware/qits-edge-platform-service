@@ -170,7 +170,9 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on the environment vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
+| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The sole WebAuthn/login origin; domain bootstrap sets the apex HTTPS origin |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent |
+| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Exact browser return authorities; machine vhosts must not appear |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
@@ -303,13 +305,12 @@ outstanding with nothing to end it — no status, no body, until the inbound con
 timeout closes it an hour later. A docker client has no timeout of its own on a realm call, so what
 that looks like from the outside is a `docker push` that hangs rather than fails.
 
-## Browser sessions — the other half, dark behind a flag
+## Browser sessions — canonical at the apex
 
 Machine credentials are the section above. A **person** carries neither a token nor a client secret,
 so the environment vhost — the one name a browser ever types — gates a `qits-session` cookie
-instead. `qits.edge.sessions.enabled` is **off**: the gate lands before idp can issue a session and
-before the environment gateway reads the headers, so it ships inert and is flipped as a step of its
-own (see `user-authentication-plan.md` in the home repository for the order and why it is one).
+instead. The bootstrap enables `qits.edge.sessions.enabled` only after it has seeded the edge's
+introspection credential and the IdP's browser SSO settings.
 
 With the flag on, a request to `$env.$domain` is decided like this:
 
@@ -322,14 +323,17 @@ With the flag on, a request to `$env.$domain` is decided like this:
 4. a path under `/idp/` is proxied anonymously, because the login page has to be reachable by
    somebody who cannot log in yet;
 5. anything else is refused: a **navigation** (`Sec-Fetch-Mode: navigate`, or a `GET` accepting
-   `text/html`) gets `302` to `/idp/login?redirect=<path>`, and everything else gets `401`.
+   `text/html`) gets `302` to the canonical apex `/idp/login`, carrying its configured return host
+   and path; everything else gets `401`.
 
-Application vhosts are untouched by every line of it — nothing browses a registry.
+Application vhosts never accept a browser session as authentication. A parent-domain cookie is
+removed before registry, mirror, and git-host traffic is proxied; unrelated cookies and all machine
+credentials pass through unchanged.
 
-**The redirect target can only ever be a path on this host.** It is where a browser is sent *after*
-authenticating, so anything naming another origin would turn the platform's own login into a
-redirector for somebody else's; `//host`, `/\host`, an absolute URL and a value holding a control
-character all collapse to `/`.
+**The return target is two allow-lists, not a reflected URL.** The edge accepts only a configured
+browser authority and a single-slash path; the IdP validates the same authority once more before
+the SPA navigates. `//host`, `/\host`, an absolute URL, a control character, or an unlisted host
+lands at the apex front door.
 
 **A dead cookie still reaches `/idp/`.** The prefix answers every caller with no usable credential,
 not only the ones carrying none — otherwise a browser holding a revoked session would be redirected

@@ -51,7 +51,10 @@ class EdgeSessionGateTest {
   public static class SessionsOn implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      return Map.of("qits.edge.sessions.enabled", "true");
+      return Map.of(
+          "qits.edge.sessions.enabled", "true",
+          "qits.edge.sessions.canonical-origin", "https://example.com",
+          "qits.edge.sessions.browser-hosts", "example.com,dev.example.com,prod.example.com");
     }
   }
 
@@ -114,7 +117,8 @@ class EdgeSessionGateTest {
     // was trying to go. Asserted character by character: a login that returns somewhere else is a
     // bug nobody files, they just re-navigate.
     assertEquals(
-        "/idp/login?redirect=%2Fprojects%2F7%3Ftab%3Druns", answer.headers().get("location"));
+        "https://example.com/idp/login?return_host=dev.example.com&return_path=%2Fprojects%2F7%3Ftab%3Druns",
+        answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached a gateway");
   }
 
@@ -129,7 +133,9 @@ class EdgeSessionGateTest {
                 "/",
                 Map.of("Accept", "text/html,application/xhtml+xml,*/*;q=0.8"));
     assertEquals(302, answer.status());
-    assertEquals("/idp/login?redirect=%2F", answer.headers().get("location"));
+    assertEquals(
+        "https://example.com/idp/login?return_host=dev.example.com&return_path=%2F",
+        answer.headers().get("location"));
   }
 
   @Test
@@ -173,7 +179,9 @@ class EdgeSessionGateTest {
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate"));
     assertEquals(302, answer.status());
-    assertEquals("/idp/login?redirect=%2F", answer.headers().get("location"));
+    assertEquals(
+        "https://example.com/idp/login?return_host=dev.example.com&return_path=%2F",
+        answer.headers().get("location"));
   }
 
   // --- a session that works ---------------------------------------------------------------------

@@ -742,6 +742,22 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void aMachineVhostNeverReceivesTheBrowserSessionCookieButKeepsOtherCookies() {
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                Map.of(
+                    "Authorization",
+                    token("dev").get("Authorization"),
+                    "Cookie",
+                    "theme=dark; qits-session=" + StubGateways.SESSION + "; locale=en"));
+    assertEquals("registry-dev", answer.line("upstream"));
+    assertEquals("theme=dark; locale=en", answer.upstreamHeader("Cookie"));
+  }
+
+  @Test
   void anAppThatWasNotNamedStillRefusesAnAnonymousRead() {
     // Per app label: `registry` is not on the list, so its reads are gated exactly as before.
     assertEquals(401, client().get("registry.dev.example.com", "/v2/").status());

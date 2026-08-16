@@ -35,13 +35,25 @@ public interface SessionsConfig {
   @WithDefault("qits-session")
   String cookieName();
 
+  /** The canonical origin where WebAuthn is allowed to run, with no trailing path. */
+  @WithDefault("http://localhost:8080")
+  String canonicalOrigin();
+
   /**
-   * Where a browser with no session is sent. A path on this same host, never an absolute URL: the
-   * login page is served by idp through this very edge, so a name here would be a second place the
-   * deployment's own address is written.
+   * The path below {@link #canonicalOrigin()} that serves login. The origin is deliberately not
+   * inferred from a request Host: a passkey is bound to one WebAuthn origin, and a host header is
+   * caller input.
    */
   @WithDefault("/idp/login")
   String loginPath();
+
+  /**
+   * Browser-facing authorities that may receive a person after login. Machine vhosts are absent.
+   * The bootstrap supplies the apex plus its environment host in domain mode, and localhost:port
+   * locally. This is an allow-list, not a parent-domain suffix check.
+   */
+  @WithDefault("localhost:8080")
+  List<String> browserHosts();
 
   /**
    * The path prefixes served without any credential at all. {@code /idp/} wholesale, and one prefix

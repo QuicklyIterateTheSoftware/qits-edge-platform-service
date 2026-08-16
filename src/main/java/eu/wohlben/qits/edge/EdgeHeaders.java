@@ -42,7 +42,9 @@ import java.util.List;
  * qits-net without passing this process at all.
  *
  * <p><b>Nothing else is touched.</b> No other header is stripped, no path is rewritten, no body is
- * read. {@code Authorization}, {@code Cookie} and every custom header pass through as they arrived.
+ * read. {@code Authorization} and every custom header pass through as they arrived. The one
+ * exception is the named browser-session cookie on a machine vhost; {@link #stripCookie} removes
+ * only that pair and preserves the rest.
  *
  * <p>{@code ProxyInterceptor} has no single abstract method, so this is a class rather than a
  * lambda. Nothing about it is environment-specific, so one instance is shared by every proxy.
@@ -121,6 +123,36 @@ final class EdgeHeaders implements ProxyInterceptor {
     headers.set(USER, session.username());
     headers.set(USER_ID, session.userId());
     headers.set(ROLES, session.roles());
+  }
+
+  /**
+   * Remove one named cookie while preserving every other pair as the browser sent it.
+   *
+   * <p>A parent-domain cookie is necessarily offered to sibling hosts. Registry, mirror, and git
+   * host do not consume a person session, so forwarding it would turn a browser credential into a
+   * service-visible bearer. Rebuilding only the Cookie header preserves unrelated application
+   * cookies and keeps the edge's header policy narrow.
+   */
+  static void stripCookie(MultiMap headers, String name) {
+    String raw = headers.get("Cookie");
+    if (raw == null || name == null || name.isBlank()) {
+      return;
+    }
+    java.util.ArrayList<String> kept = new java.util.ArrayList<>();
+    for (String pair : raw.split(";")) {
+      int equals = pair.indexOf('=');
+      if (equals > 0 && pair.substring(0, equals).strip().equals(name)) {
+        continue;
+      }
+      if (!pair.isBlank()) {
+        kept.add(pair.strip());
+      }
+    }
+    if (kept.isEmpty()) {
+      headers.remove("Cookie");
+    } else {
+      headers.set("Cookie", String.join("; ", kept));
+    }
   }
 
   @Override

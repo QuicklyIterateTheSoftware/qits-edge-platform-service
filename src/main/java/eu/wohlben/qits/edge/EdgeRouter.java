@@ -315,6 +315,12 @@ public class EdgeRouter {
    */
   private void proxy(
       HttpServerRequest request, HostEnvironments.Route route, EdgeSessions.Session session) {
+    if (route.toApp()) {
+      // A parent-domain browser session reaches every sibling name by browser design. These vhosts
+      // are machine planes, so remove only that one bearer before the service sees it; unrelated
+      // application cookies remain intact.
+      EdgeHeaders.stripCookie(request.headers(), sessions.cookieName());
+    }
     if (sessions.enabled() && !route.toApp()) {
       // Strip, then assert — see EdgeHeaders.applyIdentity, where both halves live in one method on
       // purpose. On the ordinary path the proxy copies these headers upstream; on an upgrade it
