@@ -59,15 +59,28 @@ public final class AcmeCertificateIssuer {
         String name = Dns01Challenge.toRRName(authorization.getIdentifier());
         String value = challenge.getDigest();
         dns.present(name, value);
-        presented.add(new PresentedChallenge(name, value));
-        propagation.await(name, value, request.challengeTimeout());
-        challenge.trigger();
+        presented.add(new PresentedChallenge(name, value, challenge));
+      }
+      // The apex and its wildcard authorize through the same RRset with different values. Present
+      // the complete set before asking the CA to validate either one, otherwise an eager validator
+      // can observe the RRset in the brief interval between the two writes.
+      for (PresentedChallenge challenge : presented) {
+        propagation.await(challenge.name(), challenge.value(), request.challengeTimeout());
+      }
+      for (PresentedChallenge challenge : presented) {
+        challenge.challenge().trigger();
       }
       for (Authorization authorization : order.getAuthorizations()) {
         if (authorization.getStatus() != Status.VALID
             && authorization.waitForCompletion(AUTHORIZATION_TIMEOUT) != Status.VALID) {
+          String problem =
+              authorization
+                  .findChallenge(Dns01Challenge.class)
+                  .flatMap(Dns01Challenge::getError)
+                  .map(Object::toString)
+                  .orElse("no ACME problem detail");
           throw new IllegalStateException(
-              "ACME authorization failed for " + authorization.getIdentifier());
+              "ACME authorization failed for " + authorization.getIdentifier() + ": " + problem);
         }
       }
       if (order.waitUntilReady(ORDER_TIMEOUT) != Status.READY) {
@@ -108,5 +121,5 @@ public final class AcmeCertificateIssuer {
     return key;
   }
 
-  private record PresentedChallenge(String name, String value) {}
+  private record PresentedChallenge(String name, String value, Dns01Challenge challenge) {}
 }

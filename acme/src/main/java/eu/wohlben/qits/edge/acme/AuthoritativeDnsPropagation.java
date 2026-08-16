@@ -28,7 +28,7 @@ public final class AuthoritativeDnsPropagation implements DnsPropagation {
           visible++;
         }
       }
-      if (visible >= 2) {
+      if (visible == NAMESERVERS.size()) {
         return;
       }
       Thread.sleep(Duration.ofSeconds(5));
