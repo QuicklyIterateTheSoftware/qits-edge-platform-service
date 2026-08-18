@@ -71,7 +71,7 @@ steps:
       # (qits-eventstream and its integrations), and the pom's default spells the LOCAL platform's
       # registry, which no step container on another platform can reach.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-edge:$version"
-      docker build \
+      docker build --network host \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
