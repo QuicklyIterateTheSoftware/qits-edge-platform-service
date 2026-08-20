@@ -138,7 +138,8 @@ public class EdgeRouter {
         key,
         HttpProxy.reverseProxy(client)
             .origin(upstream.port(), upstream.host())
-            .addInterceptor(new EdgeHeaders()));
+            .addInterceptor(new EdgeHeaders())
+            .addInterceptor(new EdgeCacheControl()));
   }
 
   /** Where an unmatched Host name goes. */
@@ -354,7 +355,8 @@ public class EdgeRouter {
         address ->
             HttpProxy.reverseProxy(client)
                 .origin(address.port(), address.host())
-                .addInterceptor(new EdgeHeaders()));
+                .addInterceptor(new EdgeHeaders())
+                .addInterceptor(new EdgeCacheControl()));
   }
 
   /**
