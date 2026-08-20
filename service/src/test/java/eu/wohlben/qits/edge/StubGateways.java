@@ -371,6 +371,21 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   }
 
   private void answer(String environment, HttpServerRequest request) {
+    if (request.path().contains("/spa/")) {
+      // The shape a Quinoa-served SPA has: every static resource carries the Quarkus default
+      // whether or not its name is content-hashed, and a handler that made a decision of its own
+      // carries that decision instead. Which of those the edge may correct is EdgeCacheControl's
+      // whole subject, so all three spellings are served here rather than only the interesting one.
+      request
+          .response()
+          .putHeader("Content-Type", "text/plain; charset=utf-8")
+          .putHeader("X-Upstream", environment)
+          .putHeader(
+              "Cache-Control",
+              request.path().endsWith("/private") ? "no-store" : "public, immutable, max-age=86400")
+          .end("upstream=" + environment + "\n");
+      return;
+    }
     if (request.path().equals("/stream")) {
       // Two chunks with a measurable gap. A proxy that buffered the response would deliver both at
       // once, and the client's timing is what catches that — a body assertion alone would not.

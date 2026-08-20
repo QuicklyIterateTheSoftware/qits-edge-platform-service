@@ -164,6 +164,47 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void theImmutableDefaultLeavesTheEdgeOnlyOnAHashedName() {
+    activateArtifacts();
+
+    // The SPA document: the mutable pointer naming the hashed bundles, and so the one file whose
+    // staleness decides which version of an application a returning browser runs. qits-gateway
+    // rewrote this and the edge did not when it replaced it, which is how a green, deployed release
+    // stayed invisible for a day.
+    assertEquals(
+        "no-cache",
+        client().get("dev.example.com", "/artifacts/spa/").headers().get("cache-control"));
+    // A content-hashed name is the one place immutable is correct — a new build names a new file —
+    // so this one keeps the day it was given.
+    assertEquals(
+        "public, immutable, max-age=86400",
+        client()
+            .get("dev.example.com", "/artifacts/spa/main-4RS6EA47.js")
+            .headers()
+            .get("cache-control"));
+    // Unhashed and not the document either: a favicon replaced in place would otherwise outlive its
+    // own build by a day.
+    assertEquals(
+        "no-cache",
+        client()
+            .get("dev.example.com", "/artifacts/spa/favicon.ico")
+            .headers()
+            .get("cache-control"));
+  }
+
+  @Test
+  void aCacheHeaderTheUpstreamChoseIsNotOverruled() {
+    activateArtifacts();
+
+    // Only the untouched Quarkus default is known to be nobody's decision, and it is the only value
+    // the edge may correct. no-store is somebody's decision, and the blanket rewrite this test
+    // forbids would WEAKEN it.
+    assertEquals(
+        "no-store",
+        client().get("dev.example.com", "/artifacts/spa/private").headers().get("cache-control"));
+  }
+
+  @Test
   void startupRebuildsAnEmptyProjectionFromHistoricalDeploymentsBeforeItBecomesReady()
       throws Exception {
     // A lost edge database is a real recovery path, not an empty development fixture. The
