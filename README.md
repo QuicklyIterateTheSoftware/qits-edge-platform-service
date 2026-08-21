@@ -127,6 +127,15 @@ application. Nothing in a request ever contributes a character to an address: a 
   outermost hop: a TLS terminator in front of it is the only thing that can tell the truth about
   `https`, so overwriting would replace a true value with a false one. Consequently **nothing may
   make a trust decision on these three**; they are diagnostics and link generation.
+- **Corrects the SPA cache header.** Every service serves its SPA with the Quarkus static default,
+  `Cache-Control: public, immutable, max-age=86400`. That is right only where the name changes with
+  the content, so `EdgeCacheControl` rewrites it to `no-cache` on every path whose filename is not
+  content-hashed — above all each `index.html`, the mutable pointer naming the hashed bundles and so
+  the file that decides which version of an application a returning browser runs. **Only that exact
+  default is touched**: a header a handler chose is a decision, and a blanket rewrite would weaken
+  this process' own `no-store` routes. qits-gateway did this and the edge did not when it replaced
+  it, which is how a green, correctly deployed release could stay invisible for a day and then come
+  right on its own — a cache reading as flakiness.
 - **Answers `/q/health/{live,ready}` itself**, never proxied, whatever the `Host` says. Readiness
   reports the resolved environment → upstream map as health data and stays DOWN until the
   deployment projection has reached qits-events' confirmed head.
