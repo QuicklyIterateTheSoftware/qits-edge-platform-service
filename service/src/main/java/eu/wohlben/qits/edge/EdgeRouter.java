@@ -206,7 +206,7 @@ public class EdgeRouter {
     }
 
     HostEnvironments.Route named = hostEnvironments.route(authority(request));
-    Target target = target(named);
+    Target target = target(named, authority(request));
     if (target == null) {
       // NOT a fall-through to the gateway. The name is app-shaped, so it was aimed at a service —
       // and no configuration and no deployment claims it. Answering here is the whole point: a
@@ -266,16 +266,46 @@ public class EdgeRouter {
    *
    * @return null when the name is app-shaped and nobody claims it, which is the 404
    */
-  private Target target(HostEnvironments.Route named) {
+  private Target target(HostEnvironments.Route named, String host) {
     if (named.unknownApp() == null) {
-      return new Target(
-          named, named.toApp() ? routes.serviceHost(named.environment(), named.app()) : null);
+      if (named.toApp()) {
+        return new Target(named, routes.serviceHost(named.environment(), named.app()));
+      }
+      // $app.$domain, for a name the configuration does not know. The environment label is optional
+      // for the DEFAULT environment — the apex is its door — so a first label a deployment
+      // published there reads as that service. An unknown label is untouched by this and still goes
+      // to the default environment, which is what keeps a mistyped or decommissioned name harmless.
+      String candidate = canonicalApex(host) ? null : hostEnvironments.defaultEnvironmentApp(host);
+      String environment = hostEnvironments.defaultEnvironment();
+      EdgeRoutes.ServiceHost published =
+          candidate == null ? null : routes.serviceHost(environment, candidate);
+      return published == null
+          ? new Target(named, null)
+          : new Target(new HostEnvironments.Route(environment, candidate, null), published);
     }
     EdgeRoutes.ServiceHost published = routes.serviceHost(named.environment(), named.unknownApp());
     return published == null
         ? null
         : new Target(
             new HostEnvironments.Route(named.environment(), named.unknownApp(), null), published);
+  }
+
+  /**
+   * Whether this name IS the configured door, in which case it names no application.
+   *
+   * <p>{@code example.com} and {@code ci.localhost} are the same shape and no name tells them
+   * apart, so the apex would otherwise offer its own first label as an application. It is the one
+   * name a deployment always states, so it is also the one the edge can rule out.
+   */
+  private boolean canonicalApex(String host) {
+    String canonical = sessions.canonicalAuthority();
+    if (canonical == null || host == null) {
+      return false;
+    }
+    int colon = canonical.lastIndexOf(':');
+    String name =
+        colon > 0 && canonical.indexOf(':') == colon ? canonical.substring(0, colon) : canonical;
+    return name.equalsIgnoreCase(host.strip());
   }
 
   /**

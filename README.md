@@ -84,6 +84,7 @@ A `Host` name selects an environment, and optionally an application inside it:
 | `prod.example.com`          | the `prod` gateway — `$env.$domain`                 |
 | `registry.prod.example.com` | `prod`'s `registry` upstream — `$app.$env.$domain`  |
 | `registry.dev.example.com`  | `dev`'s `registry` upstream — same entry, other tier |
+| `registry.example.com`      | the **default** environment's `registry` — `$app.$domain`, see below |
 | `example.com`               | the **default** environment's gateway               |
 | `staging.example.com`       | the **default** (`staging` names no environment)    |
 | `localhost`, `127.0.0.1`, `[::1]` | the **default**                               |
@@ -96,6 +97,16 @@ be one label, two or three, and the edge does not have to know. An environment n
 wins over one at position 0, so `staging.prod.example.com` is *application `staging` in environment
 `prod`* — an application may be called anything, whereas a domain whose first label happens to be an
 environment name is a coincidence nobody arranges.
+
+**The environment label is optional for the default environment.** That environment's door is the
+apex — it is where a browser lands and where the login page lives — so `ci.example.com` is its ci
+service, and `ci.dev.example.com` stays the long spelling of the same place. Only a **known**
+application label reads this way: configured in `qits.edge.apps`, or published by a deployment in
+the default environment. The apex itself is never one, and an unknown first label is not either.
+
+Precedence is therefore three readings and then the fallback, and an environment name still wins at
+either position, so no tier can be hidden by an application that shares its spelling:
+`$env.$domain`, `$app.$env.$domain`, `$app.$domain`, the default environment.
 
 An unmatched name is **not an error**. Every one of them goes to the default environment, so a
 mistyped URL reaches the platform's own page rather than a connection error.
@@ -197,8 +208,11 @@ breaks nothing:
   this process' own `no-store` routes. qits-gateway did this and the edge did not when it replaced
   it, which is how a green, correctly deployed release could stay invisible for a day and then come
   right on its own — a cache reading as flakiness.
-- **Serves `/main-navigation` on every vhost**, from the same snapshots. The document carries the
-  environment, its origin, every slot of the closed vocabulary (empty ones included, so a shell
+- **Serves `/main-navigation` on every vhost**, from the same snapshots, and writes every origin in
+  the SHORT form for the default environment — `https://example.com` and `https://ci.example.com`,
+  whichever spelling the request itself used. Other environments keep their label, and a one-label
+  apex (`dev.localhost:8080`) keeps its environment because `localhost` alone names them all. The
+  document carries the environment, its origin, every slot of the closed vocabulary (empty ones included, so a shell
   iterates the document rather than a copy of the vocabulary), and one entry per placement with the
   application, the label, the host, that host's origin, the application's primary route `path` and
   the position. `host` is null until that application is flipped, and `path` is present either way —

@@ -176,6 +176,56 @@ class HostEnvironmentsTest {
   }
 
   @Test
+  void anApplicationLabelOnTheApexReachesItInTheDefaultEnvironment() {
+    // The environment label is OPTIONAL for the default environment, whose door is the apex: a
+    // browser lands on example.com, so its registry is registry.example.com — and the long
+    // spelling registry.prod.example.com stays a name for the same place.
+    assertEquals(
+        new HostEnvironments.Route("prod", "registry", null), APPS.route("registry.example.com"));
+    assertEquals(
+        new HostEnvironments.Route("prod", "registry", null),
+        APPS.route("registry.prod.example.com"));
+    assertEquals(
+        new HostEnvironments.Route("prod", "githost", null),
+        APPS.route("GITHOST.example.co.uk:8080."));
+  }
+
+  @Test
+  void anEnvironmentNameStillWinsOverAnApplicationOne() {
+    // Precedence is unchanged: an environment at either position is read first, so no tier can be
+    // hidden by an application whose name looks like one. `staging` is neither here.
+    assertEquals(new HostEnvironments.Route("dev", null, null), APPS.route("dev.example.com"));
+    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("staging.example.com"));
+  }
+
+  @Test
+  void theShortFormIsOfferedForALabelThisConfigurationDoesNotKnow() {
+    // A deployment publishes application names too, and the router joins those on — so an
+    // unconfigured first label is OFFERED rather than routed here, and every name that is already
+    // routed, is not of that shape, or could not be a label offers nothing.
+    assertEquals("ci", APPS.defaultEnvironmentApp("ci.example.com"));
+    assertEquals("ci", APPS.defaultEnvironmentApp("CI.example.co.uk:8080."));
+    assertNull(APPS.defaultEnvironmentApp("registry.example.com"), "already routed");
+    assertNull(APPS.defaultEnvironmentApp("dev.example.com"), "an environment");
+    assertNull(APPS.defaultEnvironmentApp("ci.dev.example.com"), "app-shaped already");
+    // The apex offers its own first label — `example.com` and `ci.localhost` are the same shape and
+    // nothing in a name tells them apart. Nothing is published under it, so the router's lookup is
+    // what answers, and it also refuses the apex outright.
+    assertEquals("example", APPS.defaultEnvironmentApp("example.com"));
+    assertNull(APPS.defaultEnvironmentApp("127.0.0.1"), "an address carries no name");
+    assertNull(APPS.defaultEnvironmentApp("localhost"), "one label is not $app.$domain");
+    assertNull(APPS.defaultEnvironmentApp(null));
+  }
+
+  @Test
+  void anUnknownLabelOnTheApexIsStillTheDefaultEnvironment() {
+    // NOT a 404: the app rule's refusal is for a name in front of a KNOWN environment. A mistyped
+    // or decommissioned name on the apex reaches the platform's own page, as it always has.
+    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("ci.example.com"));
+    assertNull(APPS.route("ci.example.com").unknownApp());
+  }
+
+  @Test
   void aNameThatIsNotAppShapedIsUntouchedByTheAppRule() {
     // `example` is not an environment, so `staging.example.com` names no app position at all and
     // stays what it has always been: the default gateway's.
