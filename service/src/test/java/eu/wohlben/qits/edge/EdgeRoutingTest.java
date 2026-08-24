@@ -196,27 +196,15 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void mainNavigationKeepsTheFlatListForOneRelease() {
+  void mainNavigationIsSlotsAndNothingElse() {
+    // No flat list and no synthesized Home. Every shell reads the tree, and the environment's own
+    // door is qits-projects' `system` entry — a deployment fact like every other entry here.
     activateArtifacts();
     activateCi();
 
     JsonObject document =
         new JsonObject(client().get("dev.example.com", "/main-navigation").body());
-    assertEquals(
-        List.of("Home", "CI", "Artifacts"),
-        document.getJsonArray("links").stream()
-            .map(value -> ((JsonObject) value).getString("label"))
-            .toList());
-    // Absolute now, and it has to be: the same document is served on every vhost, so `/artifacts/`
-    // would mean a different place on each of them.
-    assertEquals(
-        List.of(
-            "http://dev.example.com/",
-            "http://ci.dev.example.com/",
-            "http://registry.dev.example.com/"),
-        document.getJsonArray("links").stream()
-            .map(value -> ((JsonObject) value).getString("href"))
-            .toList());
+    assertEquals(List.of("environment", "origin", "slots"), List.copyOf(document.fieldNames()));
   }
 
   @Test
@@ -239,10 +227,8 @@ class EdgeRoutingTest {
     assertEquals("Workspaces", entry.getString("label"));
     assertNull(entry.getString("host"));
     assertEquals("http://dev.example.com", entry.getString("origin"));
+    // The path is what a shell renders it under while it has no name of its own.
     assertEquals("/workspaces", entry.getString("path"));
-    assertEquals(
-        "http://dev.example.com/workspaces/",
-        document.getJsonArray("links").getJsonObject(1).getString("href"));
   }
 
   @Test

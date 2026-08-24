@@ -212,14 +212,14 @@ breaks nothing:
   the SHORT form for the default environment — `https://example.com` and `https://ci.example.com`,
   whichever spelling the request itself used. Other environments keep their label, and a one-label
   apex (`dev.localhost:8080`) keeps its environment because `localhost` alone names them all. The
-  document carries the environment, its origin, every slot of the closed vocabulary (empty ones included, so a shell
-  iterates the document rather than a copy of the vocabulary), and one entry per placement with the
-  application, the label, the host, that host's origin, the application's primary route `path` and
-  the position. `host` is null until that application is flipped, and `path` is present either way —
-  it is what a shell renders an unflipped application under, so nothing leaves the sidebar during a
-  rollout. `links` is the flat list
-  this replaced, kept for one release with an absolute href per entry — the same document is served
-  on every vhost, so a relative `/ci/` would mean a different place on each of them.
+  document is `environment`, `origin` and `slots`, and nothing else: every slot of the closed
+  vocabulary (empty ones included, so a shell iterates the document rather than a copy of the
+  vocabulary), and one entry per placement with the application, the label, the host, that host's
+  origin, the application's primary route `path` and the position. `host` is null until that
+  application is flipped, and `path` is present either way — it is what a shell renders an unflipped
+  application under, so nothing leaves the sidebar during a rollout. There is no flat list and no
+  synthesized `Home`: the environment's own door is qits-projects' `system` entry, a deployment fact
+  like every other entry here.
 - **Answers `/q/health/{live,ready}` itself**, never proxied, whatever the `Host` says. Readiness
   reports the resolved environment → upstream map as health data and stays DOWN until the
   deployment projection has reached qits-events' confirmed head.
