@@ -111,10 +111,25 @@ and the auth attributes that go with them. The deployment projection is the othe
 publishes the name it answers to, and that name then serves its SPA at `/` and every wire route it
 owns. The two are the same kind of vhost, so everything below treats them alike.
 
-On such a name, a **path another application declared is still routed to that application**:
-`/projects/api`, `/git`, `/v2` work from every host, which is what keeps a platform of a dozen SPAs
-same-origin with no CORS anywhere. The one route that does not travel is a bare `/` — that is the
-catch-all of whoever declared it, and on a service's own name the catch-all is that service.
+On such a name, **another application's PRIMARY route is still routed to that application**:
+`/projects/api`, `/workspaces/container`, `/ci/api` work from every host, which is what keeps a
+platform of a dozen SPAs same-origin with no CORS anywhere. The primary route is the segment an
+application is *known* by, so it means the same thing on everybody's name.
+
+**Its other routes do not travel.** `/v2`, `/git`, `/bootstrap-git` are wire protocols that several
+services legitimately answer — qits-artifacts and the pull-through mirror both speak `/v2` — and
+only one of them can own the path in a projection whose paths are unique per environment. Routing
+it everywhere would send `mirror.dev/v2/` at the registry and break every pull through the mirror.
+So on a service's own name a secondary route falls through to that service, exactly like a path
+nobody declared: `mirror.dev/v2/…` reaches the mirror, `registry.dev/v2/` reaches artifacts because
+that is its own host, `githost.dev/git/…` reaches the git host, and `ci.dev/git/…` reaches ci and
+404s there — a clone URL names the environment origin, not a service's.
+
+A bare `/` never travels either, whoever declared it: that is the catch-all of one application, and
+on a service's own name the catch-all is that service.
+
+**The environment vhost is unchanged** — every route of every application still routes by path
+there, which is what every published clone URL, registry address and API path relies on.
 
 Nothing in a request ever contributes a character to an address: a `Host` selects an *index into a
 fixed list* or a *row of the projection*, which is the whole SSRF guard.

@@ -277,9 +277,10 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void anotherApplicationsPrefixIsPathRoutedOnAServiceHost() {
+  void anotherApplicationsPrimaryRouteIsPathRoutedOnAServiceHost() {
     // What makes the whole platform same-origin from any host: an SPA on ci.dev.example.com reads
-    // /projects/api and /v2 without CORS, because a declared prefix is routed on every name.
+    // /artifacts/api without CORS, because the segment an application is KNOWN by means the same
+    // thing on every name.
     activateCi();
     activateArtifacts();
     assertEquals(
@@ -288,6 +289,26 @@ class EdgeRoutingTest {
     assertEquals(
         "/artifacts/api/files",
         client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("uri"));
+  }
+
+  @Test
+  void anotherApplicationsSecondaryRouteStaysWithTheHostsOwnService() {
+    // /v2 is a wire protocol several services legitimately answer — the registry and the
+    // pull-through mirror both do — and only one of them can own that path in a projection whose
+    // paths are unique per environment. Routing it everywhere would send mirror.dev/v2/ at the
+    // registry and break every `docker pull` through the mirror. So a secondary route falls through
+    // to the service whose name this is, exactly like a path nobody declared.
+    activateCi();
+    activateArtifacts();
+    assertEquals(
+        "mirror-dev", client().get("ci.dev.example.com", "/v2/", token("dev")).line("upstream"));
+    assertEquals("/v2/", client().get("ci.dev.example.com", "/v2/", token("dev")).line("uri"));
+    // On its owner's own name it is that service's, and on the environment vhost every route still
+    // routes by path.
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
+    assertEquals("registry-dev", client().get("dev.example.com", "/v2/").line("upstream"));
   }
 
   @Test

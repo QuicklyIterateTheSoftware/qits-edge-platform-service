@@ -148,10 +148,11 @@ public class EdgeRoutes {
       Map<String, List<EdgeEndpoint>> endpoints,
       Map<String, Map<String, ServiceHost>> hostsByName,
       Map<String, Map<String, ServiceHost>> hostsByApplication,
+      Map<String, Map<String, String>> primaryPaths,
       Map<String, List<NavigationPlacement>> navigation) {
 
     static View empty() {
-      return new View(Map.of(), Map.of(), Map.of(), Map.of());
+      return new View(Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
   }
 
@@ -177,6 +178,18 @@ public class EdgeRoutes {
     return application == null
         ? null
         : view.hostsByApplication().getOrDefault(environment, Map.of()).get(application);
+  }
+
+  /**
+   * This application's first-declared route in this environment, or null when it publishes none.
+   *
+   * <p>The primary route is the one an application is KNOWN by: the segment its SPA is served
+   * under, and so the only one of its routes that means the same thing on somebody else's name.
+   */
+  public String primaryPath(String environment, String application) {
+    return application == null
+        ? null
+        : view.primaryPaths().getOrDefault(environment, Map.of()).get(application);
   }
 
   /** Every placement in this environment, sorted by slot, then position, then label. */
@@ -469,10 +482,16 @@ public class EdgeRoutes {
 
     Map<String, Map<String, ServiceHost>> byName = new LinkedHashMap<>();
     Map<String, Map<String, ServiceHost>> byApplication = new LinkedHashMap<>();
+    Map<String, Map<String, String>> primaryPaths = new LinkedHashMap<>();
     applications.forEach(
         (environment, reads) ->
             reads.forEach(
                 (application, read) -> {
+                  if (read.primary != null) {
+                    primaryPaths
+                        .computeIfAbsent(environment, ignored -> new LinkedHashMap<>())
+                        .put(application, read.primary.path());
+                  }
                   if (read.host == null || read.primary == null) {
                     return;
                   }
@@ -520,12 +539,20 @@ public class EdgeRoutes {
         immutable(routes),
         immutableMaps(byName),
         immutableMaps(byApplication),
+        immutablePaths(primaryPaths),
         immutable(navigation));
   }
 
   private static <T> Map<String, List<T>> immutable(Map<String, List<T>> values) {
     Map<String, List<T>> copy = new LinkedHashMap<>();
     values.forEach((key, list) -> copy.put(key, List.copyOf(list)));
+    return Map.copyOf(copy);
+  }
+
+  private static Map<String, Map<String, String>> immutablePaths(
+      Map<String, Map<String, String>> values) {
+    Map<String, Map<String, String>> copy = new LinkedHashMap<>();
+    values.forEach((key, map) -> copy.put(key, Map.copyOf(map)));
     return Map.copyOf(copy);
   }
 

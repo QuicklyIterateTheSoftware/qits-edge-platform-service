@@ -558,14 +558,8 @@ public class EdgeRouter {
     }
     EdgeRoutes.ServiceHost host = target.host();
     if (host != null) {
-      // A published host serves its own service at every path that service owns, and every OTHER
-      // application's declared prefix as well — which is what keeps /projects/api, /git and /v2
-      // same-origin from any of them. The one route that may not travel is a bare `/`: it is the
-      // catch-all of whichever application declared it, and on this name the catch-all is the
-      // service the name belongs to.
       EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
-      if (endpoint != null
-          && (!endpoint.path().equals("/") || endpoint.application().equals(host.application()))) {
+      if (endpoint != null && travels(target, endpoint, host)) {
         endpointProxy(endpoint.upstream()).handle(request);
         return;
       }
@@ -586,6 +580,35 @@ public class EdgeRouter {
       return;
     }
     unknownPath(request, target.environment());
+  }
+
+  /**
+   * Whether another application's route means the same thing on this name.
+   *
+   * <p><b>Its PRIMARY route does</b> — {@code /projects}, {@code /workspaces}, {@code /ci} are what
+   * each of those applications is known by, so an SPA on any host reads {@code /projects/api}
+   * same-origin and no page needs CORS.
+   *
+   * <p><b>Its other routes do not.</b> {@code /v2}, {@code /git}, {@code /bootstrap-git} are wire
+   * protocols whose names several services legitimately answer: qits-artifacts and the pull-through
+   * mirror both speak {@code /v2}, and only one of them can own that path in a projection whose
+   * paths are unique per environment. Routing it everywhere would send {@code mirror.dev/v2/} at
+   * the registry and break the mirror. So on a service's own name a secondary route falls through
+   * to that service, exactly like a path nobody declared — and it keeps working on the environment
+   * vhost, where paths are the whole routing rule.
+   *
+   * <p>A bare {@code /} never travels either, whether or not it is somebody's primary route: it is
+   * the catch-all of whichever application declared it, and on this name the catch-all is the
+   * service the name belongs to.
+   */
+  private boolean travels(Target target, EdgeEndpoint endpoint, EdgeRoutes.ServiceHost host) {
+    if (endpoint.application().equals(host.application())) {
+      return true;
+    }
+    if (endpoint.path().equals("/")) {
+      return false;
+    }
+    return endpoint.path().equals(routes.primaryPath(target.environment(), endpoint.application()));
   }
 
   private HttpProxy endpointProxy(Upstream upstream) {
