@@ -403,6 +403,42 @@ class EdgeRoutingTest {
     assertEquals("mirror-dev", client().get("dev.example.com", "/ci/runs/7").line("upstream"));
   }
 
+  // --- the default environment, whose door is the apex -------------------------------------------
+
+  @Test
+  void aServiceOfTheDefaultEnvironmentIsReachedWithNoEnvironmentLabel() {
+    // `prod` is this suite's default environment, so example.com is its door and ci.example.com is
+    // its ci service. The long spelling stays a name for the same place.
+    activateCi("prod");
+    assertEquals(
+        "mirror-prod", client().get("ci.example.com", "/", token("prod")).line("upstream"));
+    assertEquals(
+        "mirror-prod", client().get("ci.prod.example.com", "/", token("prod")).line("upstream"));
+    // And a label nobody published is still the default environment's own answer, never a 404.
+    assertEquals("prod", client().get("nosuchapp.example.com", "/anything").line("upstream"));
+  }
+
+  @Test
+  void theDefaultEnvironmentsNavigationIsWrittenInTheShortForm() {
+    activateCi("prod");
+    // Both spellings of the environment's own name. A request on the APEX itself resolves the
+    // authority from the canonical origin instead, which in this suite is localhost — that arm is
+    // EnvironmentAuthorityTest's, where the canonical origin and the host names agree.
+    for (String requested : List.of("prod.example.com", "ci.prod.example.com")) {
+      JsonObject document = new JsonObject(client().get(requested, "/main-navigation").body());
+      assertEquals("prod", document.getString("environment"), requested);
+      assertEquals("http://example.com", document.getString("origin"), requested);
+      assertEquals(
+          "http://ci.example.com",
+          document
+              .getJsonObject("slots")
+              .getJsonArray("services.details")
+              .getJsonObject(0)
+              .getString("origin"),
+          requested);
+    }
+  }
+
   @Test
   void theEnvironmentsOwnNameIsADoorOnceTheProjectsHostIsKnown() {
     activateProjects();
@@ -606,16 +642,22 @@ class EdgeRoutingTest {
 
   /** A second flipped application, on a stub that names itself differently. */
   private void activateCi() {
+    activateCi("dev");
+  }
+
+  private void activateCi(String environment) {
     deployments.onFrame(
         frame(
             new JsonObject()
                 .put("applicationName", "qits-ci")
-                .put("environmentName", "dev")
+                .put("environmentName", environment)
                 .put("browserHost", "ci")
                 .put(
                     "endpoints",
                     new io.vertx.core.json.JsonArray()
-                        .add(endpoint("/ci", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                        .add(
+                            endpoint(
+                                "/ci", upstream("qits.edge.apps.mirror.hosts." + environment))))
                 .put(
                     "navigation",
                     new io.vertx.core.json.JsonArray()

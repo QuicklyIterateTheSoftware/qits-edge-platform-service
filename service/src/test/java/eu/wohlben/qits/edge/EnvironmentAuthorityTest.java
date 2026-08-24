@@ -32,8 +32,26 @@ class EnvironmentAuthorityTest {
   @Test
   void theTieBreakIsTheSameAsTheRoutersOwn() {
     // `dev.prod.example.com` reads as application `dev` in environment `prod`, exactly as
-    // HostEnvironments reads it, so its origins are prod's.
-    assertEquals("http://prod.example.com", of("dev.prod.example.com").origin());
+    // HostEnvironments reads it, so its origins are prod's — and prod is the default here, so
+    // prod's origin is the apex.
+    assertEquals("http://example.com", of("dev.prod.example.com").origin());
+  }
+
+  @Test
+  void theDefaultEnvironmentsAuthorityIsTheApexItself() {
+    // Its door IS the apex: that is where a browser lands and where the login page lives, so its
+    // services live one label in front of it and carry no environment label at all.
+    assertEquals("http://example.com", of("prod.example.com").origin());
+    assertEquals("http://ci.example.com", of("prod.example.com").hostOrigin("ci"));
+    // Both spellings are the same place, and the short one is what gets written.
+    assertEquals("http://example.com", of("ci.prod.example.com").origin());
+    assertEquals("http://ci.example.com", of("ci.prod.example.com").hostOrigin("ci"));
+  }
+
+  @Test
+  void everyOtherEnvironmentKeepsItsLabel() {
+    assertEquals("http://dev.example.com", of("dev.example.com").origin());
+    assertEquals("http://ci.dev.example.com", of("ci.dev.example.com").hostOrigin("ci"));
   }
 
   @Test
@@ -52,21 +70,24 @@ class EnvironmentAuthorityTest {
   void theApexAnAddressAndAnUnknownNameFallBackToTheCanonicalOrigin() {
     // None of them says which environment it is, so the answer is the configured one with the
     // default environment in front — the same origin the login page lives at.
-    assertEquals("http://prod.example.com", of("example.com").origin());
-    assertEquals("http://prod.example.com", of("staging.example.com").origin());
-    assertEquals("http://prod.example.com", of("127.0.0.1").origin());
-    assertEquals("http://prod.example.com", of("[::1]:8080").origin());
-    assertEquals("http://prod.example.com", of(null).origin());
+    assertEquals("http://example.com", of("example.com").origin());
+    assertEquals("http://example.com", of("staging.example.com").origin());
+    assertEquals("http://example.com", of("127.0.0.1").origin());
+    assertEquals("http://example.com", of("[::1]:8080").origin());
+    assertEquals("http://example.com", of(null).origin());
   }
 
   @Test
-  void theCanonicalOriginKeepsItsOwnPortAndIsNotPrefixedTwice() {
+  void theCanonicalOriginKeepsItsOwnPortAndIsReadEitherWayItIsSpelled() {
+    // A single-label apex keeps the environment in front of it, as above.
     assertEquals(
         "http://prod.localhost:8080",
         EnvironmentAuthority.of(null, null, "http", ENVIRONMENTS, "prod", "localhost:8080")
             .origin());
+    // And a canonical origin that already carries the default environment's label loses it, so a
+    // deployment cannot get `prod.prod.example.com` by spelling its own origin either way.
     assertEquals(
-        "http://prod.example.com",
+        "http://example.com",
         EnvironmentAuthority.of(
                 "example.com", null, "http", ENVIRONMENTS, "prod", "prod.example.com")
             .origin());
@@ -96,5 +117,10 @@ class EnvironmentAuthorityTest {
 
   private static EnvironmentAuthority of(String host) {
     return EnvironmentAuthority.of(host, null, "http", ENVIRONMENTS, "prod", "example.com");
+  }
+
+  /** A developer's platform: one environment, and it is the default, on a single-label apex. */
+  private static EnvironmentAuthority local(String host) {
+    return EnvironmentAuthority.of(host, null, "http", List.of("dev"), "dev", "dev.localhost:8080");
   }
 }

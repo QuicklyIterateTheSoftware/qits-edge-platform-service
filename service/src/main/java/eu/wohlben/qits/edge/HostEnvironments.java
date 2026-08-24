@@ -13,7 +13,14 @@ import java.util.Set;
  * <pre>
  *   $env.$domain           prod.example.com          -> prod's deployment endpoints
  *   $app.$env.$domain      registry.prod.example.com -> prod's registry, direct
+ *   $app.$domain           registry.example.com      -> the DEFAULT environment's registry
  * </pre>
+ *
+ * <p><b>The environment label is optional for the default environment</b>, because the apex IS that
+ * environment's door: {@code example.com} is where a browser lands, so {@code ci.example.com} is
+ * where its ci service is, and {@code ci.prod.example.com} keeps working as the long spelling of
+ * the same place. Only a KNOWN application label reads this way — an unknown first label is a
+ * mistyped or decommissioned name and still goes to the default, exactly as it always has.
  *
  * <p>Everything else — the apex domain, an unknown environment name, an IP address, {@code
  * localhost}, a missing Host header — resolves to the <b>default environment</b>.
@@ -198,7 +205,38 @@ public final class HostEnvironments {
     if (environments.contains(labels[0])) {
       return Route.environment(labels[0]);
     }
+    if (labels.length > 1 && apps.contains(labels[0])) {
+      // $app.$domain: the environment label is optional for the DEFAULT environment, whose door is
+      // the apex. Last of the three readings on purpose — an environment name still wins at either
+      // position, so no tier can be hidden by an application that shares its spelling.
+      return new Route(defaultEnvironment, labels[0], null);
+    }
     return Route.environment(defaultEnvironment);
+  }
+
+  /**
+   * The label a {@code $app.$domain} name offers as an application in the default environment, for
+   * a caller that knows more application names than this configuration does.
+   *
+   * <p>{@link #route} answers for the CONFIGURED applications alone, because that is all a static
+   * object can know. A deployment publishes names too, and the router joins them on — so this
+   * returns the label worth asking about and null for every name that is already routed, is not of
+   * that shape, or could not be a label at all.
+   */
+  public String defaultEnvironmentApp(String host) {
+    String name = normalise(host);
+    if (name.isEmpty() || isAddressLiteral(name)) {
+      return null;
+    }
+    String[] labels = name.split("\\.", -1);
+    if (labels.length < 2
+        || environments.contains(labels[0])
+        || environments.contains(labels[1])
+        || apps.contains(labels[0])
+        || !isLabel(labels[0])) {
+      return null;
+    }
+    return labels[0];
   }
 
   /** Lower case, no surrounding space, no trailing root dot, no port suffix, no IPv6 brackets. */
