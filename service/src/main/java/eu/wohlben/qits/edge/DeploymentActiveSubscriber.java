@@ -30,6 +30,7 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
       String applicationName,
       String environmentName,
       String browserHost,
+      String apiDocsPath,
       List<EndpointPayload> endpoints,
       List<NavigationPayload> navigation) {}
 
@@ -47,8 +48,12 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
       String navigationLabel,
       Integer navigationPosition) {}
 
-  /** One application-level navigation placement — see {@link EdgeRoutes#SLOTS}. */
-  record NavigationPayload(String slot, String label, Integer position) {}
+  /**
+   * One application-level navigation placement — see {@link EdgeRoutes#SLOTS}. {@code subpath} is
+   * absent on every frame written before it existed, and null keeps meaning what those frames
+   * meant: the application's root under the scope the shell composes.
+   */
+  record NavigationPayload(String slot, String label, Integer position, String subpath) {}
 
   @Inject EdgeRoutes routes;
   @Inject EdgeConfig config;
@@ -99,7 +104,10 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
         }
         EdgeRoutes.Snapshot snapshot =
             new EdgeRoutes.Snapshot(
-                endpoints, browserHost(active, environment, endpoints), navigation(active));
+                endpoints,
+                browserHost(active, environment, endpoints),
+                active.apiDocsPath(),
+                navigation(active));
         boolean replaced =
             routes.replace(
                 environment, active.applicationName(), frame.id(), frame.occurredAt(), snapshot);
@@ -194,7 +202,8 @@ public class DeploymentActiveSubscriber implements QitsDurableEventListener {
             new EdgeRoutes.NavigationEntry(
                 placement.slot(),
                 placement.label(),
-                placement.position() == null ? 1 : placement.position()));
+                placement.position() == null ? 1 : placement.position(),
+                placement.subpath()));
       }
       return entries;
     }

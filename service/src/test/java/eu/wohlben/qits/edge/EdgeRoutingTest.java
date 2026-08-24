@@ -196,7 +196,7 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void mainNavigationIsSlotsAndNothingElse() {
+  void mainNavigationIsSlotsApplicationsAndNothingElse() {
     // No flat list and no synthesized Home. Every shell reads the tree, and the environment's own
     // door is qits-projects' `system` entry — a deployment fact like every other entry here.
     activateArtifacts();
@@ -204,7 +204,78 @@ class EdgeRoutingTest {
 
     JsonObject document =
         new JsonObject(client().get("dev.example.com", "/main-navigation").body());
-    assertEquals(List.of("environment", "origin", "slots"), List.copyOf(document.fieldNames()));
+    assertEquals(
+        List.of("environment", "origin", "slots", "applications"),
+        List.copyOf(document.fieldNames()));
+  }
+
+  @Test
+  void mainNavigationCarriesApiDocsPerApplicationAndSubpathsPerEntry() {
+    // Two additions, two shapes. `applications` is per-application metadata — one object per
+    // application that published an api-docs path, keyed by name, for the shell page that knows
+    // which repository it shows. `subpath` rides each entry and names the view it opens, relative
+    // to the scope the shell composes; entries declared before it existed read null.
+    activateCi();
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-projects")
+                .put("environmentName", "dev")
+                .put("browserHost", "projects")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/projects", upstream("qits.edge.apps.registry.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("system", "Overview", 1))
+                        .add(
+                            placement("services.details", "Api Docs", 6)
+                                .put("subpath", "api-docs")))));
+
+    JsonObject document =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body());
+    JsonObject applications = document.getJsonObject("applications");
+    assertEquals("/ci/q/swagger-ui", applications.getJsonObject("qits-ci").getString("apiDocs"));
+    assertNull(applications.getJsonObject("qits-projects"), "no api-docs, no entry");
+
+    JsonObject services =
+        document.getJsonObject("slots").getJsonArray("services.details").stream()
+            .map(JsonObject.class::cast)
+            .filter(entry -> "qits-projects".equals(entry.getString("app")))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("api-docs", services.getString("subpath"));
+    JsonObject ci =
+        document.getJsonObject("slots").getJsonArray("services.details").stream()
+            .map(JsonObject.class::cast)
+            .filter(entry -> "qits-ci".equals(entry.getString("app")))
+            .findFirst()
+            .orElseThrow();
+    assertNull(ci.getString("subpath"), "an entry without one opens the application's root");
+  }
+
+  @Test
+  void anApiDocsPathUnderNoneOfItsOwnRoutesIsSettledWithoutChangingRoutes() throws Exception {
+    // The spec parser refuses this shape at the source; the projection restates the rule so a
+    // hand-crafted frame stays poison rather than publishing a document nothing serves.
+    clearProjection();
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-ci")
+                .put("environmentName", "dev")
+                .put("apiDocsPath", "/docs/q/swagger-ui")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/ci", upstream("qits.edge.apps.mirror.hosts.dev"))))));
+
+    JsonObject document =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body());
+    assertTrue(document.getJsonObject("applications").isEmpty(), document.encode());
+    assertNull(routes.resolve("dev", "/ci/api"), "the poison frame published no routes either");
   }
 
   @Test
@@ -638,6 +709,7 @@ class EdgeRoutingTest {
                 .put("applicationName", "qits-ci")
                 .put("environmentName", environment)
                 .put("browserHost", "ci")
+                .put("apiDocsPath", "/ci/q/swagger-ui")
                 .put(
                     "endpoints",
                     new io.vertx.core.json.JsonArray()

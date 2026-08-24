@@ -58,6 +58,10 @@ public class EdgeRoutes {
 
   private static final int LABEL_LIMIT = 64;
 
+  private static final int SUBPATH_LIMIT = 255;
+
+  private static final int API_DOCS_LIMIT = 255;
+
   @Inject
   @DataSource("edge")
   AgroalDataSource dataSource;
@@ -70,9 +74,14 @@ public class EdgeRoutes {
 
   /**
    * One navigation placement an application published: where in the tree it asks to appear, under
-   * what name, and how high.
+   * what name, how high — and, optionally, which view of the application it opens.
+   *
+   * <p>{@code subpath} is a client-side route segment the shell appends after the scope it
+   * composes; null is every entry declared before the field existed, the application's root under
+   * that scope. Relative on purpose — the edge validates the shape and passes it through, because
+   * what it names is a view of the declaring application's SPA, not an edge route.
    */
-  public record NavigationEntry(String slot, String label, int position) {
+  public record NavigationEntry(String slot, String label, int position, String subpath) {
 
     public NavigationEntry {
       slot = slot == null ? null : slot.strip();
@@ -88,6 +97,22 @@ public class EdgeRoutes {
       if (position < 1) {
         throw new IllegalArgumentException("A navigation position starts at 1.");
       }
+      subpath = subpath == null || subpath.isBlank() ? null : subpath.strip();
+      if (subpath != null
+          && (subpath.length() > SUBPATH_LIMIT
+              || !subpath.matches("[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*"))) {
+        throw new IllegalArgumentException(
+            "A navigation subpath is a relative lowercase path of at most "
+                + SUBPATH_LIMIT
+                + " characters, got `"
+                + subpath
+                + "`.");
+      }
+    }
+
+    /** The placement every entry was before subpaths existed. */
+    public NavigationEntry(String slot, String label, int position) {
+      this(slot, label, position, null);
     }
   }
 
@@ -99,19 +124,31 @@ public class EdgeRoutes {
    *     SPA is served under, and the upstream its host resolves to
    * @param browserHost the DNS label of {@code <host>.<env>.<domain>}, or null while it publishes
    *     none
+   * @param apiDocsPath where the application's browsable API document lives, under one of its
+   *     routes, or null for a service that documents no HTTP surface
    * @param navigation the placements, at most one per slot
    */
   public record Snapshot(
-      List<EdgeEndpoint> endpoints, String browserHost, List<NavigationEntry> navigation) {
+      List<EdgeEndpoint> endpoints,
+      String browserHost,
+      String apiDocsPath,
+      List<NavigationEntry> navigation) {
 
     public Snapshot {
       endpoints = endpoints == null ? null : List.copyOf(endpoints);
+      apiDocsPath = apiDocsPath == null || apiDocsPath.isBlank() ? null : apiDocsPath.strip();
       navigation = navigation == null ? List.of() : List.copyOf(navigation);
+    }
+
+    /** The pre-api-docs shape, which every already-written caller and test still means. */
+    public Snapshot(
+        List<EdgeEndpoint> endpoints, String browserHost, List<NavigationEntry> navigation) {
+      this(endpoints, browserHost, null, navigation);
     }
 
     /** The routes alone, which is what an application that has not been flipped publishes. */
     public static Snapshot ofEndpoints(List<EdgeEndpoint> endpoints) {
-      return new Snapshot(endpoints, null, List.of());
+      return new Snapshot(endpoints, null, null, List.of());
     }
   }
 
@@ -131,6 +168,8 @@ public class EdgeRoutes {
    *
    * @param host the application's public name, or null when it publishes none — a legacy frame
    * @param primaryPath its primary route, which is where a hostless entry still lives
+   * @param subpath the view this entry opens, relative to the scope the shell composes, or null for
+   *     the application's root
    */
   public record NavigationPlacement(
       String application,
@@ -138,7 +177,8 @@ public class EdgeRoutes {
       String label,
       int position,
       String host,
-      String primaryPath) {}
+      String primaryPath,
+      String subpath) {}
 
   /**
    * The serving copy, replaced whole. One object rather than four fields because a request reads
@@ -149,10 +189,11 @@ public class EdgeRoutes {
       Map<String, Map<String, ServiceHost>> hostsByName,
       Map<String, Map<String, ServiceHost>> hostsByApplication,
       Map<String, Map<String, String>> primaryPaths,
+      Map<String, Map<String, String>> apiDocsPaths,
       Map<String, List<NavigationPlacement>> navigation) {
 
     static View empty() {
-      return new View(Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+      return new View(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
   }
 
@@ -195,6 +236,15 @@ public class EdgeRoutes {
   /** Every placement in this environment, sorted by slot, then position, then label. */
   public List<NavigationPlacement> navigation(String environment) {
     return view.navigation().getOrDefault(environment, List.of());
+  }
+
+  /**
+   * Every application's api-docs path in this environment, by application name. Only applications
+   * that published one appear; the paths are what {@code /main-navigation} serves as the {@code
+   * applications} object.
+   */
+  public Map<String, String> apiDocs(String environment) {
+    return view.apiDocsPaths().getOrDefault(environment, Map.of());
   }
 
   /**
@@ -251,12 +301,13 @@ public class EdgeRoutes {
       }
       try (PreparedStatement insert =
           connection.prepareStatement(
-              "insert into edge_deployment_snapshot (environment_name, application_name, event_id, occurred_at, browser_host) values (?, ?, ?, ?, ?)")) {
+              "insert into edge_deployment_snapshot (environment_name, application_name, event_id, occurred_at, browser_host, api_docs_path) values (?, ?, ?, ?, ?, ?)")) {
         insert.setString(1, environment);
         insert.setString(2, application);
         insert.setString(3, eventId);
         insert.setTimestamp(4, java.sql.Timestamp.from(occurredAt));
         insert.setString(5, snapshot.browserHost());
+        insert.setString(6, snapshot.apiDocsPath());
         insert.executeUpdate();
       }
       int ordinal = 0;
@@ -276,12 +327,13 @@ public class EdgeRoutes {
       for (NavigationEntry entry : snapshot.navigation()) {
         try (PreparedStatement insert =
             connection.prepareStatement(
-                "insert into edge_navigation_entry (environment_name, application_name, slot, label, \"position\") values (?, ?, ?, ?, ?)")) {
+                "insert into edge_navigation_entry (environment_name, application_name, slot, label, \"position\", subpath) values (?, ?, ?, ?, ?, ?)")) {
           insert.setString(1, environment);
           insert.setString(2, application);
           insert.setString(3, entry.slot());
           insert.setString(4, entry.label());
           insert.setInt(5, entry.position());
+          insert.setString(6, entry.subpath());
           insert.executeUpdate();
         }
       }
@@ -321,6 +373,28 @@ public class EdgeRoutes {
         // nothing for its own name to reach.
         throw new IllegalArgumentException(
             "`" + application + "` published a host and no route to serve it from.");
+      }
+    }
+    if (snapshot.apiDocsPath() != null) {
+      // The same rule the spec parser enforces, restated where a hand-crafted frame could skip it:
+      // a document is reachable only under one of the routes this snapshot itself declares.
+      String path = snapshot.apiDocsPath();
+      if (path.length() > API_DOCS_LIMIT
+          || !path.startsWith("/")
+          || snapshot.endpoints().stream()
+              .noneMatch(
+                  endpoint ->
+                      path.equals(endpoint.path())
+                          || path.startsWith(
+                              endpoint.path().endsWith("/")
+                                  ? endpoint.path()
+                                  : endpoint.path() + "/"))) {
+        throw new IllegalArgumentException(
+            "`"
+                + application
+                + "` published the api-docs path `"
+                + path
+                + "`, which sits under none of its own routes.");
       }
     }
     Set<String> slots = new LinkedHashSet<>();
@@ -437,6 +511,7 @@ public class EdgeRoutes {
   private static final class Read {
 
     private String host;
+    private String apiDocsPath;
     private EdgeEndpoint primary;
     private int primaryOrdinal = Integer.MAX_VALUE;
   }
@@ -446,14 +521,15 @@ public class EdgeRoutes {
     Map<String, Map<String, Read>> applications = new LinkedHashMap<>();
     try (PreparedStatement query =
             connection.prepareStatement(
-                "select environment_name, application_name, browser_host from edge_deployment_snapshot");
+                "select environment_name, application_name, browser_host, api_docs_path from edge_deployment_snapshot");
         ResultSet result = query.executeQuery()) {
       while (result.next()) {
-        applications
+        Read read =
+            applications
                 .computeIfAbsent(result.getString(1), ignored -> new LinkedHashMap<>())
-                .computeIfAbsent(result.getString(2), ignored -> new Read())
-                .host =
-            result.getString(3);
+                .computeIfAbsent(result.getString(2), ignored -> new Read());
+        read.host = result.getString(3);
+        read.apiDocsPath = result.getString(4);
       }
     }
     try (PreparedStatement query =
@@ -483,6 +559,7 @@ public class EdgeRoutes {
     Map<String, Map<String, ServiceHost>> byName = new LinkedHashMap<>();
     Map<String, Map<String, ServiceHost>> byApplication = new LinkedHashMap<>();
     Map<String, Map<String, String>> primaryPaths = new LinkedHashMap<>();
+    Map<String, Map<String, String>> apiDocsPaths = new LinkedHashMap<>();
     applications.forEach(
         (environment, reads) ->
             reads.forEach(
@@ -491,6 +568,11 @@ public class EdgeRoutes {
                     primaryPaths
                         .computeIfAbsent(environment, ignored -> new LinkedHashMap<>())
                         .put(application, read.primary.path());
+                  }
+                  if (read.apiDocsPath != null) {
+                    apiDocsPaths
+                        .computeIfAbsent(environment, ignored -> new LinkedHashMap<>())
+                        .put(application, read.apiDocsPath);
                   }
                   if (read.host == null || read.primary == null) {
                     return;
@@ -509,7 +591,7 @@ public class EdgeRoutes {
     Map<String, List<NavigationPlacement>> navigation = new LinkedHashMap<>();
     try (PreparedStatement query =
             connection.prepareStatement(
-                "select environment_name, application_name, slot, label, \"position\" from edge_navigation_entry");
+                "select environment_name, application_name, slot, label, \"position\", subpath from edge_navigation_entry");
         ResultSet result = query.executeQuery()) {
       while (result.next()) {
         String environment = result.getString(1);
@@ -525,7 +607,8 @@ public class EdgeRoutes {
                     result.getString(4),
                     result.getInt(5),
                     read.host,
-                    read.primary == null ? null : read.primary.path()));
+                    read.primary == null ? null : read.primary.path(),
+                    result.getString(6)));
       }
     }
     Comparator<NavigationPlacement> order =
@@ -540,6 +623,7 @@ public class EdgeRoutes {
         immutableMaps(byName),
         immutableMaps(byApplication),
         immutablePaths(primaryPaths),
+        immutablePaths(apiDocsPaths),
         immutable(navigation));
   }
 

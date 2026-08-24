@@ -20,9 +20,16 @@ import java.util.List;
  * the closed vocabulary is present, empty ones included, so a shell iterates the document rather
  * than a copy of the vocabulary.
  *
- * <p>The document is {@code environment}, {@code origin} and {@code slots}, and nothing else. There
- * is no flat list and no synthesized {@code Home}: the environment's own door is qits-projects'
- * {@code system} entry, which is a deployment fact like every other entry here.
+ * <p>The document is {@code environment}, {@code origin}, {@code slots} and {@code applications},
+ * and nothing else. There is no flat list and no synthesized {@code Home}: the environment's own
+ * door is qits-projects' {@code system} entry, which is a deployment fact like every other entry
+ * here.
+ *
+ * <p>{@code applications} is per-application metadata rather than a placement: one object per
+ * application that published an api-docs path, keyed by application name. A shell page that knows
+ * which repository it shows looks the path up here and composes it against this document's {@code
+ * origin} — the environment vhost serves every application's routes, and {@code /<seg>/q/…} never
+ * moves off it.
  */
 @ApplicationScoped
 public class NavigationRoute {
@@ -75,10 +82,20 @@ public class NavigationRoute {
                 // renders a not-yet-flipped application under, so an application stays in the
                 // sidebar through the whole rollout window rather than appearing when it flips.
                 .put("path", placement.primaryPath())
-                .put("position", placement.position()));
+                .put("position", placement.position())
+                // The view this entry opens, relative to the scope the shell composes. Null is
+                // every entry declared before subpaths existed: the application's root.
+                .put("subpath", placement.subpath()));
       }
       slots.put(slot, entries);
     }
+
+    JsonObject applications = new JsonObject();
+    routes
+        .apiDocs(environment)
+        .forEach(
+            (application, apiDocsPath) ->
+                applications.put(application, new JsonObject().put("apiDocs", apiDocsPath)));
 
     context
         .response()
@@ -89,6 +106,7 @@ public class NavigationRoute {
                 .put("environment", environment)
                 .put("origin", authority.origin())
                 .put("slots", slots)
+                .put("applications", applications)
                 .encode());
   }
 }
