@@ -20,15 +20,14 @@ import java.util.List;
  * the closed vocabulary is present, empty ones included, so a shell iterates the document rather
  * than a copy of the vocabulary.
  *
- * <p><b>{@code links} is the shape this replaced</b> and stays for one release: the flat list every
- * SPA renders today, with an absolute href per entry. It goes when the last of them reads {@code
- * slots}.
+ * <p>The document is {@code environment}, {@code origin} and {@code slots}, and nothing else. There
+ * is no flat list and no synthesized {@code Home}: the environment's own door is qits-projects'
+ * {@code system} entry, which is a deployment fact like every other entry here.
  */
 @ApplicationScoped
 public class NavigationRoute {
 
   static final String PATH = "/main-navigation";
-  static final String HOME_LABEL = "Home";
 
   @Inject EdgeRoutes routes;
   @Inject EdgeRouter edgeRouter;
@@ -56,29 +55,27 @@ public class NavigationRoute {
     List<EdgeRoutes.NavigationPlacement> placements = routes.navigation(environment);
 
     JsonObject slots = new JsonObject();
-    JsonArray links = new JsonArray();
-    links.add(new JsonObject().put("label", HOME_LABEL).put("href", authority.origin() + "/"));
     for (String slot : EdgeRoutes.SLOTS) {
       JsonArray entries = new JsonArray();
       for (EdgeRoutes.NavigationPlacement placement : placements) {
         if (!placement.slot().equals(slot)) {
           continue;
         }
-        String origin =
-            placement.host() == null ? authority.origin() : authority.hostOrigin(placement.host());
         entries.add(
             new JsonObject()
                 .put("app", placement.application())
                 .put("label", placement.label())
                 .put("host", placement.host())
-                .put("origin", origin)
+                .put(
+                    "origin",
+                    placement.host() == null
+                        ? authority.origin()
+                        : authority.hostOrigin(placement.host()))
                 // The application's primary route, on a HOSTED entry as well: it is what the shell
                 // renders a not-yet-flipped application under, so an application stays in the
                 // sidebar through the whole rollout window rather than appearing when it flips.
                 .put("path", placement.primaryPath())
                 .put("position", placement.position()));
-        links.add(
-            new JsonObject().put("label", placement.label()).put("href", href(placement, origin)));
       }
       slots.put(slot, entries);
     }
@@ -92,20 +89,6 @@ public class NavigationRoute {
                 .put("environment", environment)
                 .put("origin", authority.origin())
                 .put("slots", slots)
-                .put("links", links)
                 .encode());
-  }
-
-  /**
-   * The legacy href: a flipped application's own name, and the path an unflipped one is still
-   * served under. Absolute either way, because a document served on every vhost cannot say {@code
-   * /ci/} and mean the environment's.
-   */
-  private static String href(EdgeRoutes.NavigationPlacement placement, String origin) {
-    if (placement.host() != null) {
-      return origin + "/";
-    }
-    String path = placement.primaryPath() == null ? "/" : placement.primaryPath();
-    return origin + (path.equals("/") ? "/" : path + "/");
   }
 }
