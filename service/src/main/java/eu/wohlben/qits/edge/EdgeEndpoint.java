@@ -2,27 +2,20 @@ package eu.wohlben.qits.edge;
 
 import java.util.Objects;
 
-/** One direct path route in the active deployment projection. */
-public record EdgeEndpoint(
-    String environment,
-    String application,
-    String path,
-    Upstream upstream,
-    String navigationLabel,
-    Integer navigationPosition) {
+/**
+ * One direct path route in the active deployment projection.
+ *
+ * <p>Navigation is no longer one of these. A placement belongs to an APPLICATION — see {@link
+ * EdgeRoutes.NavigationEntry} — because an application may appear in several slots of the tree and
+ * appears in none of them because of a path.
+ */
+public record EdgeEndpoint(String environment, String application, String path, Upstream upstream) {
 
   public EdgeEndpoint {
     environment = required(environment, "environment");
     application = required(application, "application");
     path = path(path);
     upstream = Objects.requireNonNull(upstream, "upstream");
-    if ((navigationLabel == null) != (navigationPosition == null)) {
-      throw new IllegalArgumentException(
-          "A navigation endpoint needs both navigationLabel and navigationPosition.");
-    }
-    if (navigationLabel != null && navigationLabel.isBlank()) {
-      throw new IllegalArgumentException("A navigation label is blank.");
-    }
   }
 
   /** True for this prefix itself and its path children, never for a merely similar prefix. */

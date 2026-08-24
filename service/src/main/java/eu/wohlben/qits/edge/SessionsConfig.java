@@ -48,9 +48,16 @@ public interface SessionsConfig {
   String loginPath();
 
   /**
-   * Browser-facing authorities that may receive a person after login. Machine vhosts are absent.
-   * The bootstrap supplies the apex plus its environment host in domain mode, and localhost:port
-   * locally. This is an allow-list, not a parent-domain suffix check.
+   * Browser-facing authorities that may receive a person after login. The bootstrap supplies the
+   * apex plus its environment host in domain mode, and localhost:port locally. This is an
+   * allow-list, not a parent-domain suffix check.
+   *
+   * <p><b>An entry may be {@code *.<authority>}</b>, which matches exactly ONE extra label in front
+   * of that authority and nothing else — {@code *.dev.example.com} covers {@code
+   * ci.dev.example.com} and refuses {@code a.b.dev.example.com}. Every service of an environment is
+   * its own browser host now, so listing them here would be a second copy of the deployment's app
+   * list; the wildcard is one line that follows it. The port is part of the authority on both
+   * sides, so a name reached on another port matches nothing.
    */
   @WithDefault("localhost:8080")
   List<String> browserHosts();

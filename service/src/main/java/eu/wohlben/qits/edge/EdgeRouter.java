@@ -28,25 +28,23 @@ import org.jboss.logging.Logger;
  * table beyond the deployment projection and application list, rewrites no path, reads no body, and
  * serves nothing of its own but {@code /q}.
  *
- * <p><b>Three things it does do.</b> The first two are host-shaped rather than path-shaped: an
- * {@code $app.$env.$domain} name reaches a configured service directly instead of that
- * environment's gateway, and such a name is authenticated here — see {@link EdgeAuth}. The app
- * label picks a whole upstream, and the machine gate is per vhost.
- *
- * <p>The third is {@link EdgeSessions}' browser gate on the environment vhost, and it is the one
- * thing here that reads a path — the anonymous {@code /idp/} prefix and nothing else. It ships OFF
- * ({@code qits.edge.sessions.enabled}); while it is off, every line below behaves as it did before
- * it existed.
+ * <p><b>A name reaches a service two ways now.</b> {@code qits.edge.apps} is the configured one and
+ * is a deployment fact — the machine vhosts, and the auth attributes that go with them. The
+ * projection is the other: a deployment publishes the public name its service answers to, and
+ * {@code <app>.<env>.<domain>} then serves that service's SPA at {@code /} and every wire route it
+ * owns. They are the same kind of vhost, so a request to either is gated per request rather than
+ * per plane: a machine credential, then a browser session, then the reads the deployment opened.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
  * or response body and forwards a WebSocket upgrade by default, so the platform's interactive
  * terminals, its SSE channels, its {@code git clone}s and its OCI layer pushes all pass through
  * unchanged. A JAX-RS layer would buffer and re-encode all four.
  *
- * <p><b>Security posture.</b> The upstream host and port come from configuration only. A Host name
- * selects an <i>index into a fixed list</i> and never contributes a character to an address, so
- * there is no name a client can send that reaches a host the deployment did not name. An unmatched
- * name is not an error — it is the default environment.
+ * <p><b>Security posture.</b> The upstream host and port come from configuration or from the
+ * deployment projection only. A Host name selects an <i>index into a fixed list</i> and never
+ * contributes a character to an address, so there is no name a client can send that reaches a host
+ * neither the deployment nor a deployed service named. An unmatched name is not an error — it is
+ * the default environment.
  */
 @ApplicationScoped
 public class EdgeRouter {
@@ -93,6 +91,29 @@ public class EdgeRouter {
   private HttpClient client;
 
   /**
+   * Where one Host name goes, once the projection has had its say.
+   *
+   * <p>Router-local on purpose: {@link HostEnvironments} answers from configuration alone and stays
+   * static and framework-free, so what a deployment published is joined on here rather than there.
+   *
+   * @param route the configured answer. For a name only the projection knows, its {@code app} is
+   *     that label — which is what gives the request an app vhost's gate and audience.
+   * @param host the published service behind the name, or null for a configured-only vhost and for
+   *     the environment vhost
+   */
+  private record Target(HostEnvironments.Route route, EdgeRoutes.ServiceHost host) {
+
+    /** Whether this name reaches ONE service rather than the environment's whole path space. */
+    boolean service() {
+      return route.toApp() || host != null;
+    }
+
+    String environment() {
+      return route.environment();
+    }
+  }
+
+  /**
    * The proxy client's options, built here rather than inline so the values below can be asserted
    * without booting the application — see {@code EdgeProxyClientOptionsTest}.
    *
@@ -127,7 +148,7 @@ public class EdgeRouter {
       // request — the same SSRF guard as the gateways: a Host name selects an index, never a
       // character of an address.
       for (String app : hostEnvironments.apps()) {
-        registerApp(app + "." + environment, resolveApp(app, environment));
+        registerApp(app + "." + environment, appUpstream(config.apps().get(app), environment));
       }
     }
     router.route().order(ROUTE_ORDER).handler(this::handle);
@@ -147,8 +168,12 @@ public class EdgeRouter {
     return hostEnvironments.defaultEnvironment();
   }
 
-  private Upstream resolveApp(String app, String environment) {
-    EdgeConfig.App spec = config.apps().get(app);
+  /**
+   * One configured application's upstream in one environment. Package-private and static because
+   * {@code DeploymentActiveSubscriber} asks the same question of the same entry: a published host
+   * that is also a configured vhost is the same service exactly when these two agree.
+   */
+  static Upstream appUpstream(EdgeConfig.App spec, String environment) {
     String override = spec.hosts().get(environment);
     String address =
         override != null && !override.isBlank()
@@ -180,32 +205,42 @@ public class EdgeRouter {
       return;
     }
 
-    HostEnvironments.Route route = hostEnvironments.route(authority(request));
-    if (route.unknownApp() != null) {
+    HostEnvironments.Route named = hostEnvironments.route(authority(request));
+    Target target = target(named);
+    if (target == null) {
       // NOT a fall-through to the gateway. The name is app-shaped, so it was aimed at a service —
-      // and the gateway is the hop that does not authenticate these. Answering here is the whole
-      // point: a mistyped registry vhost must fail, not quietly reach an unauthenticated route.
-      unknownApp(request, route);
+      // and no configuration and no deployment claims it. Answering here is the whole point: a
+      // mistyped registry vhost must fail, not quietly reach an unauthenticated route.
+      unknownApp(request, named);
       return;
     }
 
-    if (route.toApp() && EdgeAuth.isTokenRequest(request)) {
+    if (named.toApp() && EdgeAuth.isTokenRequest(request)) {
       // The docker Bearer flow's own endpoint, advertised in the challenge below. It carries the
       // credential that BUYS a token, so it is the one path on an app vhost that cannot require
-      // one.
+      // one. Configured vhosts only: it is the challenge's realm that names it, and only a
+      // configured entry carries the auth attributes that challenge is built from.
       auth.token(request);
       return;
     }
 
-    if (!route.toApp() && sessions.enabled()) {
-      // The environment vhost is the one a browser types, so it is the one with a browser's gate on
-      // it. Application vhosts keep the machine gate below and nothing else — no session, no
-      // stripping, no redirect: nothing browses a registry.
-      gate(request, route);
+    if (!target.service() && redirected(request, target.environment())) {
       return;
     }
 
-    Future<String> checked = auth.check(route, request);
+    if (target.service()) {
+      serviceGate(request, target);
+      return;
+    }
+
+    if (sessions.enabled()) {
+      // The environment vhost is the one a browser types with no application in mind, so it is the
+      // one whose gate has no machine plane behind it at all.
+      gate(request, target);
+      return;
+    }
+
+    Future<String> checked = auth.check(target.route(), request);
     if (!checked.isComplete()) {
       // The check crossed an event-loop boundary — a JWKS fetch. Hold the inbound body until there
       // is somewhere to send it; vertx-http-proxy pauses and resumes the request itself, so handing
@@ -213,7 +248,7 @@ public class EdgeRouter {
       request.pause();
     }
     checked
-        .onSuccess(rejection -> dispatch(request, route, rejection))
+        .onSuccess(rejection -> dispatch(request, target, rejection))
         .onFailure(
             failure -> {
               LOG.errorf(failure, "could not check the credential on %s", authority(request));
@@ -221,6 +256,194 @@ public class EdgeRouter {
               // provider becoming an outage of the auth gate, which is the wrong way round.
               auth.challenge(request, "the credential could not be checked");
             });
+  }
+
+  /**
+   * Configuration and the projection, joined. A configured label keeps its entry — that is where
+   * the audience, the anonymous reads and the token endpoint are written — and gains the published
+   * service when its deployment has been flipped. A label only the projection knows is given the
+   * same shape, so everything below treats the two alike.
+   *
+   * @return null when the name is app-shaped and nobody claims it, which is the 404
+   */
+  private Target target(HostEnvironments.Route named) {
+    if (named.unknownApp() == null) {
+      return new Target(
+          named, named.toApp() ? routes.serviceHost(named.environment(), named.app()) : null);
+    }
+    EdgeRoutes.ServiceHost published = routes.serviceHost(named.environment(), named.unknownApp());
+    return published == null
+        ? null
+        : new Target(
+            new HostEnvironments.Route(named.environment(), named.unknownApp(), null), published);
+  }
+
+  /**
+   * The two conveniences on the environment vhost, and both are keyed on projection data alone.
+   *
+   * <p>A person who typed or bookmarked {@code dev.example.com/ci/runs/7} is sent to {@code
+   * ci.dev.example.com/runs/7}, so that a flipped service has ONE address rather than two — the SPA
+   * behind it now builds every link against {@code /}. Only a navigation is moved: a fetch or a
+   * socket to the old path keeps working, which is what makes the flip safe to make one service at
+   * a time. An API and a management path are never moved: {@code /ci/api} is where the SPA's own
+   * XHRs go, and moving one would cost it its origin.
+   *
+   * <p>And the environment's own name is a door rather than a page: it goes to qits-projects' host
+   * once the projection knows one. Until then this answers nothing and the request takes the path
+   * it always took.
+   *
+   * @return true when the request has been answered here
+   */
+  private boolean redirected(HttpServerRequest request, String environment) {
+    if (request.method() != HttpMethod.GET) {
+      return false;
+    }
+    if (request.path().equals("/")) {
+      EdgeRoutes.ServiceHost projects = routes.projectsHost(environment);
+      if (projects == null) {
+        return false;
+      }
+      redirect(request, authorityOf(request).hostOrigin(projects.host()) + "/");
+      return true;
+    }
+    if (!EdgeSessions.isNavigation(
+        request.method(),
+        request.getHeader(EdgeSessions.FETCH_MODE),
+        request.getHeader(HttpHeaders.ACCEPT))) {
+      return false;
+    }
+    EdgeEndpoint endpoint = routes.resolve(environment, request.path());
+    if (endpoint == null) {
+      return false;
+    }
+    EdgeRoutes.ServiceHost host = routes.applicationHost(environment, endpoint.application());
+    if (host == null || !host.primaryPath().equals(endpoint.path())) {
+      // Either the application has not been flipped, or this is one of its other root routes —
+      // /v2, /git, /bootstrap-git. A wire route is nobody's bookmark and keeps its path.
+      return false;
+    }
+    String rest = request.uri().substring(endpoint.path().length());
+    if (below(rest, "/api") || below(rest, "/q")) {
+      return false;
+    }
+    redirect(
+        request,
+        authorityOf(request).hostOrigin(host.host())
+            + (rest.isEmpty() || rest.startsWith("?") ? "/" + rest : rest));
+    return true;
+  }
+
+  /** Whether what is left of a path after its segment is that segment's own {@code prefix}. */
+  private static boolean below(String rest, String prefix) {
+    return rest.equals(prefix) || rest.startsWith(prefix + "/") || rest.startsWith(prefix + "?");
+  }
+
+  private static void redirect(HttpServerRequest request, String location) {
+    request
+        .response()
+        .setStatusCode(302)
+        .putHeader(HttpHeaders.LOCATION, location)
+        // A cached redirect would outlive the projection it was derived from.
+        .putHeader(HttpHeaders.CACHE_CONTROL, "no-store")
+        .end();
+  }
+
+  /**
+   * The environment origin this request's own name belongs to — see {@link EnvironmentAuthority}.
+   * Package-visible for the navigation document, which has to write the same origins.
+   */
+  EnvironmentAuthority authorityOf(HttpServerRequest request) {
+    return EnvironmentAuthority.of(
+        authorityWithPort(request),
+        request.getHeader(EdgeHeaders.PROTO),
+        request.scheme(),
+        hostEnvironments.environments(),
+        hostEnvironments.defaultEnvironment(),
+        sessions.canonicalAuthority());
+  }
+
+  /**
+   * A service vhost's gate, in the order the plan sets out: a browser session, then everything the
+   * machine plane already did.
+   *
+   * <p><b>A cookie is only looked for when nothing else identifies the caller.</b> A machine
+   * credential is a machine saying who it is and has no session, and a vhost whose reads the
+   * deployment opened must keep serving a client that holds neither — which is what keeps {@code
+   * docker pull} and {@code npm install} working on exactly the names they work on today.
+   */
+  private void serviceGate(HttpServerRequest request, Target target) {
+    String cookie =
+        sessions.enabled() && !EdgeAuth.carriesCredential(request)
+            ? sessions.cookie(request)
+            : null;
+    if (cookie == null) {
+      machine(request, target);
+      return;
+    }
+    Future<EdgeSessions.Session> introspected = sessions.introspect(cookie);
+    if (!introspected.isComplete()) {
+      // The answer comes from idp, over a socket. Hold the inbound body until there is somewhere to
+      // send it.
+      request.pause();
+    }
+    introspected
+        .onSuccess(
+            session -> {
+              if (session == null) {
+                machine(request, target);
+                return;
+              }
+              proxy(request, target, session);
+            })
+        .onFailure(
+            failure -> {
+              LOG.errorf(failure, "could not introspect a session for %s", authority(request));
+              machine(request, target);
+            });
+  }
+
+  /**
+   * The machine half of a service vhost, which is the gate exactly as it stood: the deployment's
+   * own exemptions first, then the credential, then the refusal. With the session gate off this is
+   * the whole of a service vhost's decision, and it is unchanged.
+   */
+  private void machine(HttpServerRequest request, Target target) {
+    if (auth.open(target.route(), request)) {
+      proxy(request, target, null);
+      return;
+    }
+    if (!EdgeAuth.carriesCredential(request)) {
+      refuseService(request);
+      return;
+    }
+    Future<String> checked = auth.checkCredential(target.route(), request);
+    if (!checked.isComplete()) {
+      request.pause();
+    }
+    checked
+        .onSuccess(rejection -> dispatch(request, target, rejection))
+        .onFailure(
+            failure -> {
+              LOG.errorf(failure, "could not check the credential on %s", authority(request));
+              auth.challenge(request, "the credential could not be checked");
+            });
+  }
+
+  /**
+   * What a service vhost answers a caller it knows nothing about: the login page for something that
+   * can render one, and the {@code WWW-Authenticate} challenge for everything else — {@code docker}
+   * on {@code /v2/} above all, which acts on the realm and would give up without it.
+   */
+  private void refuseService(HttpServerRequest request) {
+    if (sessions.enabled()
+        && EdgeSessions.isNavigation(
+            request.method(),
+            request.getHeader(EdgeSessions.FETCH_MODE),
+            request.getHeader(HttpHeaders.ACCEPT))) {
+      sessions.refuse(request);
+      return;
+    }
+    auth.challenge(request, "no bearer token");
   }
 
   /**
@@ -232,18 +455,18 @@ public class EdgeRouter {
    * <p>Reached only while {@link EdgeSessions#enabled()}, so with the flag off not one line of it
    * runs and the request takes exactly the path it took before this existed.
    */
-  private void gate(HttpServerRequest request, HostEnvironments.Route route) {
+  private void gate(HttpServerRequest request, Target target) {
     if (EdgeAuth.carriesCredential(request)) {
       // CI dialing through the gateway, a curl with the workstation pair, a git push: the session
       // gate is a third acceptable credential, never a replacement for these. Checked in full even
       // though this vhost's own switch may not demand one — an unchecked Authorization header would
       // otherwise be a way past the whole gate.
-      Future<String> checked = auth.checkCredential(route, request);
+      Future<String> checked = auth.checkCredential(target.route(), request);
       if (!checked.isComplete()) {
         request.pause();
       }
       checked
-          .onSuccess(rejection -> dispatch(request, route, rejection))
+          .onSuccess(rejection -> dispatch(request, target, rejection))
           .onFailure(
               failure -> {
                 LOG.errorf(failure, "could not check the credential on %s", authority(request));
@@ -254,7 +477,7 @@ public class EdgeRouter {
 
     String cookie = sessions.cookie(request);
     if (cookie == null) {
-      unauthenticated(request, route);
+      unauthenticated(request, target);
       return;
     }
     Future<EdgeSessions.Session> introspected = sessions.introspect(cookie);
@@ -266,15 +489,15 @@ public class EdgeRouter {
         .onSuccess(
             session -> {
               if (session == null) {
-                unauthenticated(request, route);
+                unauthenticated(request, target);
                 return;
               }
-              proxy(request, route, session);
+              proxy(request, target, session);
             })
         .onFailure(
             failure -> {
               LOG.errorf(failure, "could not introspect a session for %s", authority(request));
-              unauthenticated(request, route);
+              unauthenticated(request, target);
             });
   }
 
@@ -288,9 +511,9 @@ public class EdgeRouter {
    * forever. The prefix is what a caller with no usable credential is entitled to, so it answers
    * every one of them.
    */
-  private void unauthenticated(HttpServerRequest request, HostEnvironments.Route route) {
+  private void unauthenticated(HttpServerRequest request, Target target) {
     if (sessions.anonymous(request.path())) {
-      proxy(request, route, null);
+      proxy(request, target, null);
       return;
     }
     sessions.refuse(request);
@@ -300,13 +523,13 @@ public class EdgeRouter {
    * Proxy, or answer the challenge. Split out of {@link #handle} because it is what runs after the
    * credential check, which may have crossed an event-loop boundary to refresh a signing key.
    */
-  private void dispatch(HttpServerRequest request, HostEnvironments.Route route, String rejection) {
+  private void dispatch(HttpServerRequest request, Target target, String rejection) {
     if (rejection != null) {
       auth.challenge(request, rejection);
       return;
     }
     // No session, so no identity: a machine's own is in the token it carried.
-    proxy(request, route, null);
+    proxy(request, target, null);
   }
 
   /**
@@ -314,15 +537,14 @@ public class EdgeRouter {
    * what makes the header work here rather than in three places: a request that reaches an upstream
    * has passed through this method, so what it does is done always.
    */
-  private void proxy(
-      HttpServerRequest request, HostEnvironments.Route route, EdgeSessions.Session session) {
-    if (route.toApp()) {
-      // A parent-domain browser session reaches every sibling name by browser design. These vhosts
-      // are machine planes, so remove only that one bearer before the service sees it; unrelated
-      // application cookies remain intact.
+  private void proxy(HttpServerRequest request, Target target, EdgeSessions.Session session) {
+    if (target.service() && session == null) {
+      // A parent-domain browser session reaches every sibling name by browser design. This request
+      // is not using one — it is a machine's, or a read the deployment opened — so the cookie is
+      // removed before the service sees it; unrelated application cookies remain intact.
       EdgeHeaders.stripCookie(request.headers(), sessions.cookieName());
     }
-    if (sessions.enabled() && !route.toApp()) {
+    if (sessions.enabled() && (!target.service() || session != null)) {
       // Strip, then assert — see EdgeHeaders.applyIdentity, where both halves live in one method on
       // purpose. On the ordinary path the proxy copies these headers upstream; on an upgrade it
       // forwards this same map, so one call covers a path the interceptor chain never sees.
@@ -334,19 +556,59 @@ public class EdgeRouter {
     if (isWebSocketUpgrade(request)) {
       EdgeHeaders.applyForwarded(request.headers(), request);
     }
+    EdgeRoutes.ServiceHost host = target.host();
+    if (host != null) {
+      EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
+      if (endpoint != null && travels(target, endpoint, host)) {
+        endpointProxy(endpoint.upstream()).handle(request);
+        return;
+      }
+      endpointProxy(host.upstream()).handle(request);
+      return;
+    }
+    if (target.route().toApp()) {
+      // Configured, and its deployment has published no host of its own: the whole name is one
+      // service exactly as it was before the projection carried any.
+      appProxies.get(target.route().app() + "." + target.environment()).handle(request);
+      return;
+    }
     // Deployment events own environment-vhost path routing. Admission above has already proved the
     // startup replay reached qits-events' head, so no compatibility fallback may invent a route.
-    EdgeEndpoint endpoint =
-        route.toApp() ? null : routes.resolve(route.environment(), request.path());
+    EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
     if (endpoint != null) {
       endpointProxy(endpoint.upstream()).handle(request);
       return;
     }
-    if (route.toApp()) {
-      appProxies.get(route.app() + "." + route.environment()).handle(request);
-      return;
+    unknownPath(request, target.environment());
+  }
+
+  /**
+   * Whether another application's route means the same thing on this name.
+   *
+   * <p><b>Its PRIMARY route does</b> — {@code /projects}, {@code /workspaces}, {@code /ci} are what
+   * each of those applications is known by, so an SPA on any host reads {@code /projects/api}
+   * same-origin and no page needs CORS.
+   *
+   * <p><b>Its other routes do not.</b> {@code /v2}, {@code /git}, {@code /bootstrap-git} are wire
+   * protocols whose names several services legitimately answer: qits-artifacts and the pull-through
+   * mirror both speak {@code /v2}, and only one of them can own that path in a projection whose
+   * paths are unique per environment. Routing it everywhere would send {@code mirror.dev/v2/} at
+   * the registry and break the mirror. So on a service's own name a secondary route falls through
+   * to that service, exactly like a path nobody declared — and it keeps working on the environment
+   * vhost, where paths are the whole routing rule.
+   *
+   * <p>A bare {@code /} never travels either, whether or not it is somebody's primary route: it is
+   * the catch-all of whichever application declared it, and on this name the catch-all is the
+   * service the name belongs to.
+   */
+  private boolean travels(Target target, EdgeEndpoint endpoint, EdgeRoutes.ServiceHost host) {
+    if (endpoint.application().equals(host.application())) {
+      return true;
     }
-    unknownPath(request, route.environment());
+    if (endpoint.path().equals("/")) {
+      return false;
+    }
+    return endpoint.path().equals(routes.primaryPath(target.environment(), endpoint.application()));
   }
 
   private HttpProxy endpointProxy(Upstream upstream) {
@@ -404,6 +666,19 @@ public class EdgeRouter {
   private static String authority(HttpServerRequest request) {
     HostAndPort authority = request.authority();
     return authority != null ? authority.host() : request.getHeader(HttpHeaders.HOST);
+  }
+
+  /**
+   * The same name with its port, which is what an ORIGIN is built from: a developer's whole
+   * platform is one port, so {@code http://ci.dev.localhost:8080} needs the number the request
+   * carried.
+   */
+  private static String authorityWithPort(HttpServerRequest request) {
+    HostAndPort authority = request.authority();
+    if (authority == null) {
+      return request.getHeader(HttpHeaders.HOST);
+    }
+    return authority.port() < 0 ? authority.host() : authority.host() + ":" + authority.port();
   }
 
   /**

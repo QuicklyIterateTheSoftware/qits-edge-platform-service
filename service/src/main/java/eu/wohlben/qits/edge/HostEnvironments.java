@@ -243,8 +243,13 @@ public final class HostEnvironments {
     return true;
   }
 
-  /** The DNS label charset: letters, digits and hyphens, never leading or trailing. */
-  private static boolean isLabel(String name) {
+  /**
+   * The DNS label charset: letters, digits and hyphens, never leading or trailing.
+   *
+   * <p>Public because a projected service host is the same kind of name as a configured one — see
+   * {@code DeploymentActiveSubscriber} — and one spelling of the rule is the point.
+   */
+  public static boolean isLabel(String name) {
     if (name.isEmpty() || name.length() > 63 || name.startsWith("-") || name.endsWith("-")) {
       return false;
     }

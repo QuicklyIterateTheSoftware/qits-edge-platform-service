@@ -238,11 +238,24 @@ public class EdgeAuth {
    *     become an open door.
    */
   public Future<String> check(HostEnvironments.Route route, HttpServerRequest request) {
-    boolean enforce = route.toApp() ? config.enforceOnApps() : config.enforceOnEnvironments();
-    if (!enforce || anonymousRead(route, request.method(), anonymousReadApps)) {
+    if (open(route, request)) {
       return Future.succeededFuture(null);
     }
     return checkCredential(route, request);
+  }
+
+  /**
+   * Whether this vhost admits this request with no credential at all: the enforcement switch its
+   * kind of vhost carries, and the reads {@link AuthConfig#anonymousReadApps()} opened on its app
+   * label.
+   *
+   * <p>Asked on its own by {@link EdgeRouter}'s service-vhost gate, which has to know the ANSWER
+   * rather than a future: a name whose reads are open must keep serving a client holding no
+   * credential, a stale one, or a browser session this vhost never introspects.
+   */
+  public boolean open(HostEnvironments.Route route, HttpServerRequest request) {
+    boolean enforce = route.toApp() ? config.enforceOnApps() : config.enforceOnEnvironments();
+    return !enforce || anonymousRead(route, request.method(), anonymousReadApps);
   }
 
   /**
