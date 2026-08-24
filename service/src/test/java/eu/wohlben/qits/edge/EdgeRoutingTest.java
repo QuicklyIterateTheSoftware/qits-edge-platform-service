@@ -82,14 +82,13 @@ class EdgeRoutingTest {
           "test-environment",
           "test-" + environment,
           Instant.EPOCH,
-          List.of(
-              new EdgeEndpoint(
-                  environment,
-                  "test-environment",
-                  "/",
-                  upstream("qits.test.environment-upstreams." + environment),
-                  null,
-                  null)));
+          EdgeRoutes.Snapshot.ofEndpoints(
+              List.of(
+                  new EdgeEndpoint(
+                      environment,
+                      "test-environment",
+                      "/",
+                      upstream("qits.test.environment-upstreams." + environment)))));
     }
   }
 
@@ -143,24 +142,252 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void mainNavigationComesFromTheActiveEndpointSnapshot() {
+  void mainNavigationCarriesEverySlotAndOneOriginPerService() {
     activateArtifacts();
+    activateCi();
 
     EdgeClient.Answer navigation = client().get("dev.example.com", "/main-navigation");
     assertEquals(200, navigation.status());
     assertEquals("no-store", navigation.headers().get("cache-control"));
+    JsonObject document = new JsonObject(navigation.body());
+    assertEquals("dev", document.getString("environment"));
+    assertEquals("http://dev.example.com", document.getString("origin"));
+
+    JsonObject slots = document.getJsonObject("slots");
+    // Every key, empty ones included: a shell iterates the document rather than a second copy of
+    // the vocabulary.
     assertEquals(
-        List.of("Home", "Artifacts"),
-        new JsonObject(navigation.body())
-            .getJsonArray("links").stream()
-                .map(value -> ((JsonObject) value).getString("label"))
-                .toList());
+        List.of(
+            "system",
+            "platform",
+            "project.detail",
+            "services.details",
+            "daemons.details",
+            "libs.details",
+            "frontends.details",
+            "cli.details",
+            "images.details"),
+        List.copyOf(slots.fieldNames()));
+    assertTrue(slots.getJsonArray("platform").isEmpty(), slots.encode());
+
+    // Position, then label. CI is 2 and Artifacts is 3, so the deployment's order is the one shown.
     assertEquals(
-        List.of("/", "/artifacts/"),
-        new JsonObject(navigation.body())
-            .getJsonArray("links").stream()
-                .map(value -> ((JsonObject) value).getString("href"))
-                .toList());
+        List.of("CI", "Artifacts"),
+        slots.getJsonArray("services.details").stream()
+            .map(value -> ((JsonObject) value).getString("label"))
+            .toList());
+    assertEquals(
+        List.of("http://ci.dev.example.com", "http://registry.dev.example.com"),
+        slots.getJsonArray("services.details").stream()
+            .map(value -> ((JsonObject) value).getString("origin"))
+            .toList());
+    assertEquals(
+        List.of("qits-ci", "qits-artifacts"),
+        slots.getJsonArray("services.details").stream()
+            .map(value -> ((JsonObject) value).getString("app"))
+            .toList());
+    // The primary route travels with a hosted entry too: it is what a shell renders an application
+    // under until that application is flipped, so nothing leaves the sidebar mid-rollout.
+    assertEquals(
+        List.of("/ci", "/artifacts"),
+        slots.getJsonArray("services.details").stream()
+            .map(value -> ((JsonObject) value).getString("path"))
+            .toList());
+  }
+
+  @Test
+  void mainNavigationKeepsTheFlatListForOneRelease() {
+    activateArtifacts();
+    activateCi();
+
+    JsonObject document =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body());
+    assertEquals(
+        List.of("Home", "CI", "Artifacts"),
+        document.getJsonArray("links").stream()
+            .map(value -> ((JsonObject) value).getString("label"))
+            .toList());
+    // Absolute now, and it has to be: the same document is served on every vhost, so `/artifacts/`
+    // would mean a different place on each of them.
+    assertEquals(
+        List.of(
+            "http://dev.example.com/",
+            "http://ci.dev.example.com/",
+            "http://registry.dev.example.com/"),
+        document.getJsonArray("links").stream()
+            .map(value -> ((JsonObject) value).getString("href"))
+            .toList());
+  }
+
+  @Test
+  void anOldFramesOneLabelBecomesASystemEntryWithNoHost() {
+    // Every frame ever published is replayed on every start, so the shape before hosts existed has
+    // to keep meaning what it meant: one global entry, served under its path on the environment's
+    // own name, because an old frame named no host and the edge may not invent one.
+    deployments.onFrame(
+        deployment(
+            "qits-workspaces",
+            "dev",
+            "legacy-workspaces",
+            upstream("qits.edge.apps.mirror.hosts.dev"),
+            "/workspaces",
+            "Workspaces"));
+
+    JsonObject document =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body());
+    JsonObject entry = document.getJsonObject("slots").getJsonArray("system").getJsonObject(0);
+    assertEquals("Workspaces", entry.getString("label"));
+    assertNull(entry.getString("host"));
+    assertEquals("http://dev.example.com", entry.getString("origin"));
+    assertEquals("/workspaces", entry.getString("path"));
+    assertEquals(
+        "http://dev.example.com/workspaces/",
+        document.getJsonArray("links").getJsonObject(1).getString("href"));
+  }
+
+  @Test
+  void navigationIsServedOnAServiceHostToo() {
+    // Every shell renders the same tree, so the document is on every vhost — and it names the
+    // environment's origins even when the request itself carried an application's name.
+    activateCi();
+    JsonObject document =
+        new JsonObject(client().get("ci.dev.example.com", "/main-navigation").body());
+    assertEquals("dev", document.getString("environment"));
+    assertEquals("http://dev.example.com", document.getString("origin"));
+    assertEquals(
+        "http://ci.dev.example.com",
+        document
+            .getJsonObject("slots")
+            .getJsonArray("services.details")
+            .getJsonObject(0)
+            .getString("origin"));
+  }
+
+  // --- a service's own name ---------------------------------------------------------------------
+
+  @Test
+  void aPublishedHostServesItsOwnServiceAtTheRoot() {
+    activateCi();
+    // `/` belongs to test-environment in this environment, and it does NOT travel: on a service's
+    // own name the catch-all is that service.
+    assertEquals(
+        "mirror-dev", client().get("ci.dev.example.com", "/", token("dev")).line("upstream"));
+    assertEquals(
+        "/deep/link", client().get("ci.dev.example.com", "/deep/link", token("dev")).line("uri"));
+  }
+
+  @Test
+  void anotherApplicationsPrefixIsPathRoutedOnAServiceHost() {
+    // What makes the whole platform same-origin from any host: an SPA on ci.dev.example.com reads
+    // /projects/api and /v2 without CORS, because a declared prefix is routed on every name.
+    activateCi();
+    activateArtifacts();
+    assertEquals(
+        "registry-dev",
+        client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("upstream"));
+    assertEquals(
+        "/artifacts/api/files",
+        client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("uri"));
+  }
+
+  @Test
+  void aHostASecondApplicationClaimsIsRefusedAndTheFirstKeepsIt() {
+    activateCi();
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-impostor")
+                .put("environmentName", "dev")
+                .put("browserHost", "ci")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(
+                            endpoint(
+                                "/impostor", upstream("qits.test.environment-upstreams.dev"))))));
+
+    assertEquals("qits-ci", routes.serviceHost("dev", "ci").application());
+    assertEquals(
+        "mirror-dev", client().get("ci.dev.example.com", "/", token("dev")).line("upstream"));
+  }
+
+  @Test
+  void aHostThatIsAnEnvironmentNameIsRefused() {
+    // HostEnvironments reads the first label as an application, so `dev.dev.example.com` would be
+    // routable and `dev.example.com` would not.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-confused")
+                .put("environmentName", "dev")
+                .put("browserHost", "prod")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(
+                            endpoint(
+                                "/confused", upstream("qits.test.environment-upstreams.dev"))))));
+
+    assertNull(routes.serviceHost("dev", "prod"));
+    // The whole frame is poison, so its routes are not activated either: `/confused` still falls to
+    // whoever owns the environment's catch-all.
+    assertEquals("test-environment", routes.resolve("dev", "/confused").application());
+  }
+
+  @Test
+  void aPublishedHostThatContradictsAConfiguredVhostIsRefused() {
+    // `registry` is a configured application vhost with its own audience and anonymous reads. A
+    // deployment publishing that name for a DIFFERENT upstream would silently take those over.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-impostor")
+                .put("environmentName", "dev")
+                .put("browserHost", "registry")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(
+                            endpoint(
+                                "/impostor", upstream("qits.test.environment-upstreams.dev"))))));
+
+    assertNull(routes.serviceHost("dev", "registry"));
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
+  }
+
+  // --- the environment vhost's two redirects ----------------------------------------------------
+
+  @Test
+  void aBookmarkedSegmentOnTheEnvironmentVhostMovesToTheServicesOwnName() {
+    activateCi();
+    EdgeClient.Answer answer =
+        client().get("dev.example.com", "/ci/runs/7?tab=log", Map.of("Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals("http://ci.dev.example.com/runs/7?tab=log", answer.headers().get("location"));
+    assertEquals("no-store", answer.headers().get("cache-control"));
+  }
+
+  @Test
+  void onlyANavigationMovesAndNeverAnApiCall() {
+    // The SPA's own XHRs still go to /ci/api on whatever name they were loaded from; moving one
+    // would cost it its origin. A fetch is not moved either, only a document.
+    activateCi();
+    assertEquals(
+        "mirror-dev",
+        client()
+            .get("dev.example.com", "/ci/api/runs", Map.of("Accept", "text/html"))
+            .line("upstream"));
+    assertEquals("mirror-dev", client().get("dev.example.com", "/ci/runs/7").line("upstream"));
+  }
+
+  @Test
+  void theEnvironmentsOwnNameIsADoorOnceTheProjectsHostIsKnown() {
+    activateProjects();
+    EdgeClient.Answer answer = client().get("dev.example.com", "/");
+    assertEquals(302, answer.status());
+    assertEquals("http://projects.dev.example.com/", answer.headers().get("location"));
   }
 
   @Test
@@ -258,16 +485,22 @@ class EdgeRoutingTest {
     assertNotNull(routes.resolve("dev", "/history-artifacts/api/files"));
     assertNotNull(routes.resolve("dev", "/history-workspaces/42"));
     assertEquals(
-        List.of("Home", "Artifacts", "Workspaces"),
-        routes.navigation("dev").stream().map(NavigationRoute.Link::label).toList());
+        List.of("Artifacts", "Workspaces"),
+        routes.navigation("dev").stream().map(EdgeRoutes.NavigationPlacement::label).toList());
+    assertEquals(
+        List.of("system", "system"),
+        routes.navigation("dev").stream().map(EdgeRoutes.NavigationPlacement::slot).toList());
   }
 
   private void clearProjection() throws java.sql.SQLException {
     try (java.sql.Connection connection = edgeDataSource.getConnection();
+        java.sql.PreparedStatement navigation =
+            connection.prepareStatement("delete from edge_navigation_entry");
         java.sql.PreparedStatement endpoints =
             connection.prepareStatement("delete from edge_endpoint");
         java.sql.PreparedStatement snapshots =
             connection.prepareStatement("delete from edge_deployment_snapshot")) {
+      navigation.executeUpdate();
       endpoints.executeUpdate();
       snapshots.executeUpdate();
     }
@@ -326,38 +559,84 @@ class EdgeRoutingTest {
     assertEquals("dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
   }
 
+  /**
+   * qits-artifacts as it is published after the flip: a primary route, a wire route, the public
+   * name {@code registry} — which is also its CONFIGURED vhost, so the two have to agree — and one
+   * placement.
+   */
   private void activateArtifacts() {
-    String configured =
-        ConfigProvider.getConfig().getValue("qits.edge.apps.registry.hosts.dev", String.class);
-    Upstream upstream = Upstream.parse(configured, 8080);
-    String payload =
-        new JsonObject()
-            .put("applicationName", "qits-artifacts")
-            .put("environmentName", "dev")
-            .put(
-                "endpoints",
-                new io.vertx.core.json.JsonArray()
-                    .add(
-                        new JsonObject()
-                            .put("path", "/artifacts")
-                            .put("upstreamHost", upstream.host())
-                            .put("upstreamPort", upstream.port())
-                            .put("navigationLabel", "Artifacts")
-                            .put("navigationPosition", 3))
-                    .add(
-                        new JsonObject()
-                            .put("path", "/v2")
-                            .put("upstreamHost", upstream.host())
-                            .put("upstreamPort", upstream.port())))
-            .encode();
+    Upstream upstream = upstream("qits.edge.apps.registry.hosts.dev");
     deployments.onFrame(
-        new eu.wohlben.qits.eventstream.control.EventFrame(
-            java.util.UUID.randomUUID().toString(),
-            "DeploymentActive",
-            Instant.now(),
-            payload,
-            null,
-            null));
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-artifacts")
+                .put("environmentName", "dev")
+                .put("browserHost", "registry")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/artifacts", upstream))
+                        .add(endpoint("/v2", upstream)))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("services.details", "Artifacts", 3)))));
+  }
+
+  /** A second flipped application, on a stub that names itself differently. */
+  private void activateCi() {
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-ci")
+                .put("environmentName", "dev")
+                .put("browserHost", "ci")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/ci", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("services.details", "CI", 2)))));
+  }
+
+  /** The landing service: what makes the environment's own name a door rather than a page. */
+  private void activateProjects() {
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-projects")
+                .put("environmentName", "dev")
+                .put("browserHost", "projects")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/projects", upstream("qits.edge.apps.registry.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray().add(placement("system", "Overview", 1)))));
+  }
+
+  private static JsonObject endpoint(String path, Upstream upstream) {
+    return new JsonObject()
+        .put("path", path)
+        .put("upstreamHost", upstream.host())
+        .put("upstreamPort", upstream.port());
+  }
+
+  private static JsonObject placement(String slot, String label, int position) {
+    return new JsonObject().put("slot", slot).put("label", label).put("position", position);
+  }
+
+  private static eu.wohlben.qits.eventstream.control.EventFrame frame(JsonObject payload) {
+    return new eu.wohlben.qits.eventstream.control.EventFrame(
+        java.util.UUID.randomUUID().toString(),
+        "DeploymentActive",
+        Instant.now(),
+        payload.encode(),
+        null,
+        null);
   }
 
   @Test

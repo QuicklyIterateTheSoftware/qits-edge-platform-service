@@ -54,7 +54,11 @@ class EdgeSessionGateTest {
       return Map.of(
           "qits.edge.sessions.enabled", "true",
           "qits.edge.sessions.canonical-origin", "https://example.com",
-          "qits.edge.sessions.browser-hosts", "example.com,dev.example.com,prod.example.com");
+          // The wildcard is the whole reason a service's own name can hold a session: every
+          // application of an environment is a browser host now, and listing them here would be a
+          // second copy of the deployment's app list.
+          "qits.edge.sessions.browser-hosts",
+              "example.com,dev.example.com,prod.example.com,*.dev.example.com");
     }
   }
 
@@ -77,14 +81,23 @@ class EdgeSessionGateTest {
         "session-test-environment",
         "session-test-dev",
         java.time.Instant.EPOCH,
-        List.of(
-            new EdgeEndpoint(
-                "dev",
-                "session-test-environment",
-                "/",
-                Upstream.parse(address, 8080),
-                null,
-                null)));
+        EdgeRoutes.Snapshot.ofEndpoints(
+            List.of(
+                new EdgeEndpoint(
+                    "dev", "session-test-environment", "/", Upstream.parse(address, 8080)))));
+    // A flipped service, on a stub that names itself differently: `ci.dev.example.com` is a browser
+    // host through the wildcard above, and nothing about it is configured in qits.edge.apps.
+    String ci =
+        ConfigProvider.getConfig().getValue("qits.edge.apps.mirror.hosts.dev", String.class);
+    routes.replace(
+        "dev",
+        "session-test-ci",
+        "session-test-ci",
+        java.time.Instant.EPOCH,
+        new EdgeRoutes.Snapshot(
+            List.of(new EdgeEndpoint("dev", "session-test-ci", "/ci", Upstream.parse(ci, 8080))),
+            "ci",
+            List.of(new EdgeRoutes.NavigationEntry("services.details", "CI", 2))));
   }
 
   @AfterEach
@@ -345,6 +358,50 @@ class EdgeSessionGateTest {
             .status());
   }
 
+  // --- a service's own name, which is a browser host now ----------------------------------------
+
+  @Test
+  void aNavigationOnAServiceHostIsSentToTheLoginPage() {
+    // The name a person types for one service. It is not a configured vhost and it is not the
+    // environment's, and it gates a browser exactly like the environment's does.
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "ci.dev.example.com",
+                "/runs/7",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "https://example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fruns%2F7",
+        answer.headers().get("location"));
+    assertNull(answer.line("upstream"), "it must not have reached the service");
+  }
+
+  @Test
+  void aSessionReachesAServiceHostWithItsIdentityAndKeepsItsCookie() {
+    // The cookie is the credential here, so it stays: the service behind the name is an ordinary
+    // qits service and the browser will make the next request with it too. The three identity
+    // headers are what it reads.
+    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/runs/7", session());
+    assertEquals("mirror-dev", answer.line("upstream"), "its own upstream, not the environment's");
+    assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
+    assertEquals(StubGateways.SESSION_USER_ID, answer.upstreamHeader("X-Qits-User-Id"));
+    assertEquals("qits-platform:admin,qits:admin", answer.upstreamHeader("X-Qits-Roles"));
+    assertTrue(
+        answer.upstreamHeader("Cookie").contains("qits-session="), answer.upstreamHeader("Cookie"));
+  }
+
+  @Test
+  void aMachineCredentialStillOpensAServiceHost() {
+    // CI dialing a service by its own name. A machine's identity is in its token, so nothing is
+    // asserted for it.
+    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/api/runs", token("dev"));
+    assertEquals("mirror-dev", answer.line("upstream"));
+    assertNull(answer.upstreamHeader("X-Qits-User"));
+  }
+
   // --- the application vhosts, untouched
   // ----------------------------------------------------------
 
@@ -369,6 +426,17 @@ class EdgeSessionGateTest {
   @Test
   void anAnonymousReadOnAnExemptedAppVhostStillPasses() {
     assertEquals("mirror-dev", client().get("mirror.dev.example.com", "/v2/").line("upstream"));
+  }
+
+  @Test
+  void aMachineVhostStillStripsTheBrowserCookieAndKeepsTheOthers() {
+    // The parent-domain session reaches every sibling name by browser design. A request that
+    // identifies itself with a token is not using it, so the registry never sees it.
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("Cookie", "theme=dark; qits-session=" + StubGateways.SESSION + "; locale=en");
+    EdgeClient.Answer answer = client().get("registry.dev.example.com", "/v2/", headers);
+    assertEquals("registry-dev", answer.line("upstream"));
+    assertEquals("theme=dark; locale=en", answer.upstreamHeader("Cookie"));
   }
 
   // --- the cache ------------------------------------------------------------------------------

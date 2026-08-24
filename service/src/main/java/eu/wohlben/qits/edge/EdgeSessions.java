@@ -104,6 +104,9 @@ public class EdgeSessions {
 
   private Set<String> browserHosts;
 
+  /** The {@code *.<authority>} entries, each stored as the authority behind the wildcard. */
+  private List<String> wildcardBrowserHosts;
+
   /** Cookie fingerprint to what idp said about it. Bounded and least-recently-used. */
   private Map<String, Cached> sessions;
 
@@ -140,10 +143,11 @@ public class EdgeSessions {
     anonymousPrefixes = prefixes(config.anonymousPrefixes());
     canonicalOrigin = parseOrigin(config.canonicalOrigin());
     browserHosts = browserHosts(config.browserHosts());
+    wildcardBrowserHosts = wildcardBrowserHosts(config.browserHosts());
     String canonicalAuthority = authority(canonicalOrigin.getAuthority());
-    if (browserHosts.isEmpty()
+    if ((browserHosts.isEmpty() && wildcardBrowserHosts.isEmpty())
         || canonicalAuthority == null
-        || !browserHosts.contains(canonicalAuthority)) {
+        || !browserHost(canonicalAuthority, browserHosts, wildcardBrowserHosts)) {
       throw new IllegalStateException(
           "qits.edge.sessions.browser-hosts must include qits.edge.sessions.canonical-origin");
     }
@@ -174,11 +178,12 @@ public class EdgeSessions {
     }
     if (config.enabled()) {
       LOG.infof(
-          "browser sessions are gated here: cookie %s, login %s%s, browser hosts %s, anonymous %s",
+          "browser sessions are gated here: cookie %s, login %s%s, browser hosts %s %s, anonymous %s",
           config.cookieName(),
           canonicalOrigin,
           config.loginPath(),
           browserHosts,
+          wildcardBrowserHosts.stream().map(suffix -> "*." + suffix).toList(),
           anonymousPrefixes);
     }
   }
@@ -186,6 +191,15 @@ public class EdgeSessions {
   /** Whether this process gates browsers at all. Everything else here is dead while it is false. */
   public boolean enabled() {
     return config.enabled();
+  }
+
+  /**
+   * The configured canonical browser authority — {@code wohlben.eu}, {@code localhost:8080}. It is
+   * what an environment's names are built from when a request's own Host says which environment it
+   * is not; see {@link EnvironmentAuthority}.
+   */
+  public String canonicalAuthority() {
+    return authority(canonicalOrigin.getAuthority());
   }
 
   /** The one browser credential machine vhosts must remove before proxying. */
@@ -373,7 +387,7 @@ public class EdgeSessions {
   /** The canonical login page with a configured host and the request path to come back to. */
   String loginLocation(String requestedAuthority, String uri) {
     String host = authority(requestedAuthority);
-    if (host == null || !browserHosts.contains(host)) {
+    if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts)) {
       host = authority(canonicalOrigin.getAuthority());
     }
     return canonicalOrigin
@@ -397,15 +411,73 @@ public class EdgeSessions {
     return origin;
   }
 
+  /** The exact authorities, which is what most entries are. */
   static Set<String> browserHosts(List<String> configured) {
     java.util.LinkedHashSet<String> hosts = new java.util.LinkedHashSet<>();
     for (String value : configured) {
+      if (wildcard(value) != null) {
+        continue;
+      }
       String authority = authority(value);
       if (authority != null) {
         hosts.add(authority);
       }
     }
     return Set.copyOf(hosts);
+  }
+
+  /**
+   * The {@code *.<authority>} entries, each reduced to the authority behind the wildcard.
+   *
+   * <p>ONE extra label, never a suffix match. {@code *.dev.example.com} is what makes every service
+   * of one environment a browser host without listing them — the names are {@code
+   * <app>.dev.example.com} and the app list is the deployment's, not this file's. A suffix check
+   * would also accept {@code evil.co.dev.example.com}, which is a different site to a browser and a
+   * return target this process must not accept.
+   */
+  static List<String> wildcardBrowserHosts(List<String> configured) {
+    List<String> suffixes = new ArrayList<>();
+    for (String value : configured) {
+      String authority = wildcard(value);
+      if (authority != null) {
+        suffixes.add(authority);
+      }
+    }
+    return List.copyOf(suffixes);
+  }
+
+  /** The authority behind a {@code *.} entry, or null when this entry is not one. */
+  private static String wildcard(String configured) {
+    if (configured == null || !configured.strip().startsWith("*.")) {
+      return null;
+    }
+    return authority(configured.strip().substring(2));
+  }
+
+  /**
+   * Whether this authority may receive a person after login: an exact entry, or exactly one label
+   * in front of a wildcard entry's authority. The port is part of the authority on both sides, so a
+   * name on another port matches nothing.
+   *
+   * <p>Package-private and static so the matrix can be asserted without booting anything.
+   */
+  static boolean browserHost(String host, Set<String> exact, List<String> wildcards) {
+    if (host == null) {
+      return false;
+    }
+    if (exact.contains(host)) {
+      return true;
+    }
+    for (String suffix : wildcards) {
+      if (!host.endsWith("." + suffix)) {
+        continue;
+      }
+      String label = host.substring(0, host.length() - suffix.length() - 1);
+      if (!label.isEmpty() && label.indexOf('.') < 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** A lower-case host plus optional port, never a URL, path, user-info, or wildcard. */

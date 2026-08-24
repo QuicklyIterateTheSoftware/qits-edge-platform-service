@@ -8,7 +8,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
     targets = {
       EventFrame.class,
       DeploymentActiveSubscriber.DeploymentActivePayload.class,
-      DeploymentActiveSubscriber.EndpointPayload.class
+      DeploymentActiveSubscriber.EndpointPayload.class,
+      DeploymentActiveSubscriber.NavigationPayload.class
     },
     classNames = {"eu.wohlben.qits.eventstream.control.EventPage"})
 final class EventWireReflection {
