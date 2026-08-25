@@ -23,13 +23,12 @@ import java.util.List;
  * <p>The document is {@code environment}, {@code origin}, {@code slots} and {@code applications},
  * and nothing else. There is no flat list and no synthesized {@code Home}: the environment's own
  * door is qits-projects' {@code system} entry, which is a deployment fact like every other entry
- * here.
+ * here. {@code origin} is that door — it names the environment, and the door serves nothing else.
  *
  * <p>{@code applications} is per-application metadata rather than a placement: one object per
- * application that published an api-docs path, keyed by application name. A shell page that knows
- * which repository it shows looks the path up here and composes it against this document's {@code
- * origin} — the environment vhost serves every application's routes, and {@code /<seg>/q/…} never
- * moves off it.
+ * application that published an api-docs path, keyed by application name. The path is served on the
+ * application's OWN host, so a shell page that knows which repository it shows composes it against
+ * that entry's origin rather than against the door.
  */
 @ApplicationScoped
 public class NavigationRoute {

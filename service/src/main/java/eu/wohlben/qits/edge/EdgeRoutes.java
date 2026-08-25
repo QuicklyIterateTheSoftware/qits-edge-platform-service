@@ -156,8 +156,8 @@ public class EdgeRoutes {
    * A public name and the service behind it.
    *
    * @param upstream the primary route's upstream, which is the process that serves the name itself
-   * @param primaryPath that route's path — the segment the environment vhost still serves the same
-   *     application under
+   * @param primaryPath that route's path — the segment OTHER hosts route to this application under,
+   *     which is what keeps a shell's API reads same-origin. See {@code EdgeRouter.travels}.
    */
   public record ServiceHost(
       String application, String host, Upstream upstream, String primaryPath) {}
@@ -167,7 +167,8 @@ public class EdgeRoutes {
    * needs and the placement itself does not carry.
    *
    * @param host the application's public name, or null when it publishes none — a legacy frame
-   * @param primaryPath its primary route, which is where a hostless entry still lives
+   * @param primaryPath its primary route: the segment OTHER hosts route to this application under,
+   *     and what a shell renders an entry under while the application publishes no host of its own
    * @param subpath the view this entry opens, relative to the scope the shell composes, or null for
    *     the application's root
    */
@@ -252,7 +253,7 @@ public class EdgeRoutes {
    *
    * <p>Read from the projection rather than configured — the {@code system} placement qits-projects
    * publishes, and the conventional name as the fallback. Null until one of them is known, and the
-   * environment vhost then answers as it always did.
+   * door then has nowhere to send anybody and answers 404.
    */
   public ServiceHost projectsHost(String environment) {
     for (NavigationPlacement placement : navigation(environment)) {

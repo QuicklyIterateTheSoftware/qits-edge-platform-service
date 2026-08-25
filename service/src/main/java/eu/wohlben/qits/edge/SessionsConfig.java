@@ -9,22 +9,21 @@ import java.util.Optional;
  * The browser half of authentication, terminated at the edge — and the switch that keeps it dark.
  *
  * <p>{@link AuthConfig} gates MACHINES: a token or a client id and secret, per vhost. This group
- * gates PEOPLE, and only on the environment vhost, because that is the one name a browser ever
- * types. A valid {@code qits-session} cookie becomes the {@code X-Qits-User} / {@code
- * X-Qits-User-Id} / {@code X-Qits-Roles} headers every service already trusts; anything else is
- * sent to the login page or refused.
+ * gates PEOPLE, on the service hosts, because those are the names a browser types. A valid {@code
+ * qits-session} cookie becomes the {@code X-Qits-User} / {@code X-Qits-User-Id} / {@code
+ * X-Qits-Roles} headers every service already trusts; anything else is sent to the login page or
+ * refused.
  *
  * <p><b>{@link #enabled()} is off, and that is the whole rollout plan.</b> The gate lands before
- * the identity provider can issue a session and before the environment gateway can read the
- * headers, so it ships inert and is flipped as a step of its own — after idp and its pages are
- * live, and before the gateway's own {@code local} variant retires. With the flag off nothing in a
- * request's path changes, which is what makes the release safe to make at any time.
+ * the identity provider can issue a session, so it ships inert and is flipped as a step of its own,
+ * after idp and its pages are live. With the flag off nothing in a request's path changes, which is
+ * what makes the release safe to make at any time.
  */
 @ConfigMapping(prefix = "qits.edge.sessions")
 public interface SessionsConfig {
 
   /**
-   * Whether the environment vhost demands a credential from a browser. OFF: see the class javadoc —
+   * Whether a service vhost demands a credential from a browser. OFF: see the class javadoc —
    * turning it on before idp issues sessions would answer every browser with a redirect to a page
    * that cannot log anybody in.
    */
@@ -80,10 +79,9 @@ public interface SessionsConfig {
    * the protocol endpoints authenticate their own callers, and {@code /idp/api/*} guards itself. An
    * asset-path list would drift the first time the SPA renames a bundle.
    *
-   * <p>These are paths on the ENVIRONMENT vhost, and on the OWNING service's own host — {@code
-   * idp.<env>.<domain>}, where the login page now lives. Nowhere else: a prefix served on every
-   * name would open one service's routes on all of them, so every other host still refuses {@code
-   * /idp/}.
+   * <p>These are paths on the OWNING service's own host — {@code idp.<env>.<domain>}, where the
+   * login page lives. Nowhere else: a prefix served on every name would open one service's routes
+   * on all of them, so every other host still refuses {@code /idp/}.
    */
   @WithDefault("/idp/")
   List<String> anonymousPrefixes();

@@ -1,8 +1,8 @@
 # qits-platform-edge
 
 **The platform's L7 edge.** It binds the host's only public port, reads the `Host` name of every
-request, and streams the request unchanged to whatever that name selects — an environment's gateway,
-or one of that environment's services directly.
+request, and streams the request unchanged to the service that name selects. An environment's own
+name is a door: it answers `GET /` with a redirect to the projects host and serves nothing else.
 
 A small Quarkus 3 (Java 25) application that compiles to a **GraalVM native binary**. It holds no
 browser session of its own: the browser gate reads idp's, caches what idp said, and forgets it.
@@ -26,8 +26,7 @@ Every frame ever published is replayed on every start, so that shape still means
 `system` placement, and no host — the edge never invents a public name for a service that has not
 been flipped.
 
-For an environment vhost, the longest matching active prefix is proxied straight to that upstream. A
-newer event replaces the complete snapshot, so removing a route removes it rather than leaving a
+A newer event replaces the complete snapshot, so removing a route removes it rather than leaving a
 stale endpoint live. An older event delivered late is ignored. The `/main-navigation` GET/HEAD
 document is derived from the same snapshots, carries `Cache-Control: no-store`, and is never
 proxied.
@@ -81,14 +80,14 @@ A `Host` name selects an environment, and optionally an application inside it:
 
 | Host                        | Goes to                                             |
 | --------------------------- | --------------------------------------------------- |
-| `prod.example.com`          | the `prod` gateway — `$env.$domain`                 |
+| `prod.example.com`          | the `prod` **door** — `$env.$domain`, and it serves nothing |
 | `registry.prod.example.com` | `prod`'s `registry` upstream — `$app.$env.$domain`  |
 | `registry.dev.example.com`  | `dev`'s `registry` upstream — same entry, other tier |
 | `registry.example.com`      | the **default** environment's `registry` — `$app.$domain`, see below |
-| `example.com`               | the **default** environment's gateway               |
-| `staging.example.com`       | the **default** (`staging` names no environment)    |
-| `localhost`, `127.0.0.1`, `[::1]` | the **default**                               |
-| no `Host` at all            | the **default**                                     |
+| `example.com`               | the **default** environment's door                  |
+| `staging.example.com`       | the **default** door (`staging` names no environment) |
+| `localhost`, `127.0.0.1`, `[::1]` | the **default** door                          |
+| no `Host` at all            | the **default** door                                |
 | `ci.dev.example.com`, published by a deployment | `dev`'s ci service — its SPA at `/` and every route it owns |
 | `mirror.dev.example.com`, `mirror` unconfigured and unpublished | **404** — see below |
 
@@ -139,44 +138,43 @@ that is its own host, `githost.dev/git/…` reaches the git host, and `ci.dev/gi
 A bare `/` never travels either, whoever declared it: that is the catch-all of one application, and
 on a service's own name the catch-all is that service.
 
-**The environment vhost is unchanged** — every route of every application still routes by path
-there, which is what every published clone URL, registry address and API path relies on.
-
 Nothing in a request ever contributes a character to an address: a `Host` selects an *index into a
 fixed list* or a *row of the projection*, which is the whole SSRF guard.
 
-### Two redirects on the environment vhost
+### The environment vhost is a door, and a door serves nothing
 
-Both are keyed on projection data alone, and both exist so that flipping one service at a time
-breaks nothing:
+Every service is on its own name, so the environment's own name routes nothing: no `/<seg>`, no
+`/<seg>/api`, no `/v2`, no `/git`, no `/idp/`. A second address for something that already has one
+is a second origin, a second cookie scope and a second thing to keep in step.
 
-- a **navigation** (`Sec-Fetch-Mode: navigate`, or a `GET` accepting `text/html`) to `/<seg>/…` of an
-  application that has published a host is answered `302` to `<scheme>://<host>.<env authority>/…`,
-  with `/<seg>` removed. A bookmark keeps working and a flipped service ends up with one address
-  rather than two. **`/<seg>/api/…` and `/<seg>/q/…` never move** — that is where the SPA's own XHRs
-  and the health probes go, and moving one would cost it its origin. Neither does a fetch, a socket
-  or any other root route of the same service (`/v2`, `/git`): only a document is moved;
-- `GET /` goes to qits-projects' host once the projection names one — the `system` placement
-  qits-projects publishes, or a host called `projects`. Until then the request is answered exactly
-  as it was.
+What the door answers is:
+
+- `GET /` (and `HEAD /`) — `302` to qits-projects' host once the projection names one: the `system`
+  placement qits-projects publishes, or a host called `projects`. An anonymous visitor lands on the
+  login through the host that owns it. `404` while no such host is known;
+- `/q` and `/main-navigation` — the edge's own two surfaces;
+- everything else — `404` in plain text, naming `<app>.<authority>`, logged at INFO so anything
+  still dialling the door can be found.
+
+There is no gate on the door, because there is nothing behind it to gate: a session cookie and a
+machine token are both answered `404` like any other request.
 
 ## What it does not do — the non-goals, on purpose
 
 - **No hand-maintained path table.** Direct prefixes are deployment facts consumed from the durable
   event log, never an enum or an edge environment variable. The auth gate is per vhost and per
-  *credential*, never per path, and proxying preserves the request path unchanged — the two
-  redirects above answer rather than rewrite. `/token` remains the single path this process claims
-  on a configured application vhost.
+  *credential*, never per path, and proxying preserves the request path unchanged — the door's `GET
+  /` answers rather than rewrites. `/token` remains the single path this process claims on a
+  configured application vhost.
 - **No login page and no session of its own.** The edge *reads* a session — it introspects the
   `qits-session` cookie at idp and turns it into identity headers (see *Browser sessions* below) —
   but it issues none, stores none, and serves no page. Registration, login and logout are
-  qits-platform-idp's, reached through the anonymous `/idp/` prefix like any other path.
+  qits-platform-idp's, reached through the anonymous `/idp/` prefix on idp's own host.
 - **No header stripping or injection beyond `X-Forwarded-*` and `X-Qits-*`.** The reserved prefix is
   stripped, and the three identity headers are asserted, only while the session gate is on and only
-  where a session was actually used — the environment vhost, and a service vhost a browser reached
-  with its cookie. The environment gateway still does its own hygiene and has to: a
-  request can reach it from qits-net without passing this process. `Authorization`, `Cookie` and
-  every custom header pass through untouched.
+  where a session was actually used: a service vhost a browser reached with its cookie. A service
+  still does its own hygiene and has to — a request can reach it from qits-net without passing this
+  process. `Authorization`, `Cookie` and every custom header pass through untouched.
 - **No UI, no SPA, no landing page, no `/api`.** The paths this process answers are `/q`,
   `/main-navigation`, and, on a configured application vhost only, `/token`. It knows nothing about
   projects or repositories: a navigation slot says WHERE the shell hangs an entry, and the shell
@@ -212,7 +210,8 @@ breaks nothing:
   the SHORT form for the default environment — `https://example.com` and `https://ci.example.com`,
   whichever spelling the request itself used. Other environments keep their label, and a one-label
   apex (`dev.localhost:8080`) keeps its environment because `localhost` alone names them all. The
-  document is `environment`, `origin` and `slots`, and nothing else: every slot of the closed
+  document is `environment`, `origin` and `slots`, and nothing else. `origin` is the door, which
+  names the environment and serves nothing else: every slot of the closed
   vocabulary (empty ones included, so a shell iterates the document rather than a copy of the
   vocabulary), and one entry per placement with the application, the label, the host, that host's
   origin, the application's primary route `path` and the position. `host` is null until that
@@ -251,8 +250,7 @@ a file.
 | `qits.edge.projection.catchup.required` | `QITS_EDGE_PROJECTION_CATCHUP_REQUIRED` | `true` | Requires a complete deployment-history rebuild before the edge is ready; turn off only in an intentionally offline test/dev setup |
 | `qits.edge.projection.catchup.retry` | `QITS_EDGE_PROJECTION_CATCHUP_RETRY` | `PT1S` | Delay before retrying an incomplete, failed, or unavailable deployment-history read |
 | `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
-| `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Application vhosts require a valid idp token |
-| `qits.edge.auth.enforce-on-environments` | `QITS_EDGE_AUTH_ENFORCE_ON_ENVIRONMENTS` | `false` | Environment vhosts do not — **flipping it is a step of its own** |
+| `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Service vhosts require a valid idp token |
 | `qits.edge.auth.anonymous-read-apps` | `QITS_EDGE_AUTH_ANONYMOUS_READ_APPS` | — | App labels whose `GET` and `HEAD` are open; every other method on them still needs a token |
 | `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
@@ -261,12 +259,12 @@ a file.
 | `qits.edge.auth.basic-cache-size` | `QITS_EDGE_AUTH_BASIC_CACHE_SIZE` | `1024` | The most validated credentials held at once, least-recently-used |
 | `qits.edge.auth.idp-retry-window-ms` | `QITS_EDGE_AUTH_IDP_RETRY_WINDOW_MS` | `45000` | How long a redeploying idp is waited out before the edge answers an error |
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
-| `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on the environment vhost — **the rollout flag** |
+| `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on a service vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
 | `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The environment **door**: what the default environment's names are derived from, and the login origin's fallback |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
 | `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Browser return authorities. An entry may be `*.<authority>`, which matches exactly ONE extra label — `*.dev.example.com` covers every service's own name and refuses `a.b.dev.example.com` |
-| `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the environment vhost and on the owning service's own host, nowhere else |
+| `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
 | `qits.edge.sessions.stale-grace-ms` | `QITS_EDGE_SESSIONS_STALE_GRACE_MS` | `60000` | How long a cached session outlives an **unreachable** idp |
@@ -333,8 +331,7 @@ step.
 
 The list is empty by default, which is full enforcement. It is matched against the app label the
 `Host` name already resolved to — a configured entry or a published host — so it reaches service
-vhosts only. The environment vhost is untouched by any value here, and a label nothing claims is
-still a `404` rather than an open door.
+vhosts only, and a label nothing claims is still a `404` rather than an open door.
 
 ### The docker flow
 
@@ -399,27 +396,13 @@ outstanding with nothing to end it — no status, no body, until the inbound con
 timeout closes it an hour later. A docker client has no timeout of its own on a realm call, so what
 that looks like from the outside is a `docker push` that hangs rather than fails.
 
-## Browser sessions — canonical at the apex
+## Browser sessions — on every service's own name
 
 Machine credentials are the section above. A **person** carries neither a token nor a client secret,
-so the names a browser types — the environment vhost, and every service's own name since the hosts
-campaign — gate a `qits-session` cookie instead. The bootstrap enables `qits.edge.sessions.enabled` only after it has seeded the edge's
-introspection credential and the IdP's browser SSO settings.
-
-With the flag on, a request to `$env.$domain` is decided like this:
-
-1. every inbound `X-Qits-*` header is dropped — the reserved prefix is what a hop *asserts*, so
-   nothing a client sends under it may survive;
-2. an `Authorization: Bearer` or `Basic` takes the machine path above, checked in full, and is
-   proxied with **no** identity headers — a machine's identity is in its token;
-3. a `qits-session` cookie is introspected at idp and becomes `X-Qits-User`, `X-Qits-User-Id` and
-   `X-Qits-Roles` (comma-separated — a role never holds a comma, and one that did is dropped);
-4. a path under `/idp/` is proxied anonymously, because the login page has to be reachable by
-   somebody who cannot log in yet;
-5. anything else is refused: a **navigation** (`Sec-Fetch-Mode: navigate`, or a `GET` accepting
-   `text/html`) gets `302` to `/idp/login` **on the host of whichever deployment owns that route** —
-   `https://idp.example.com/idp/login` — carrying its configured return host and path; everything
-   else gets `401`.
+so every service's own name gates a `qits-session` cookie instead. The bootstrap enables
+`qits.edge.sessions.enabled` only after it has seeded the edge's introspection credential and the
+IdP's browser SSO settings. The environment vhost is the door and serves nothing, so it gates
+nothing.
 
 **The login page lives on idp's own name, not on the door.** The origin is read off the deployment
 projection per request: whoever owns `login-path` and publishes a host. `canonical-origin` cannot
@@ -432,14 +415,16 @@ default environment before falling back.
 
 `ci.dev.example.com` is one service and one name, and both a person and a machine type it. So the
 gate on a **service vhost** — a published host, or a configured application vhost, which are now the
-same thing — is decided per request rather than per plane:
+same thing — is decided per request rather than per plane. Every inbound `X-Qits-*` header is
+dropped first, whatever the outcome: the reserved prefix is what a hop *asserts*.
 
 1. a `Bearer` or `Basic` **machine credential** takes the machine path above, checked in full, and
    is proxied with no identity headers and with the browser cookie removed — a machine's identity is
    in its token;
-2. otherwise, with the session gate on, a `qits-session` **cookie** is introspected exactly as on
-   the environment vhost. The identity headers are asserted and **the cookie is kept**: the service
-   behind the name is an ordinary qits service and the browser's next request carries it too;
+2. otherwise, with the session gate on, a `qits-session` **cookie** is introspected at idp and
+   becomes `X-Qits-User`, `X-Qits-User-Id` and `X-Qits-Roles` (comma-separated — a role never holds
+   a comma). **The cookie is kept**: the service behind the name is an ordinary qits service and the
+   browser's next request carries it too;
 3. a caller holding neither still gets that app's **anonymous reads** (`anonymous-read-apps`), so
    `docker pull`, `npm install` and `git clone` work on exactly the names they work on today — and,
    on the name that **owns** them, the `anonymous-prefixes`, which is what serves `/idp/login` on
@@ -467,16 +452,11 @@ them would be a second copy of the deployment's application list; the wildcard i
 follows it. It is not a suffix check: `a.b.dev.example.com` is a different site to a browser and is
 refused.
 
-**A dead cookie still reaches `/idp/`**, on the environment vhost and on idp's own host alike. The
-prefix answers every caller with no usable credential, not only the ones carrying none — otherwise a
-browser holding a revoked session would be redirected to a login page it is refused at, forever.
-This is the one place the order differs from the plan's, and the reason is that loop. The refused
-cookie does not travel: the request is not using it.
-
-**A 401 here carries no `WWW-Authenticate`**, unlike an application vhost's. A `Basic` challenge
-pops the browser's own credential dialog on every background fetch a logged-out tab makes, and the
-credential a browser holds is a cookie. The JSON body names the login page instead, so an SPA can
-send the user there itself.
+**A dead cookie still reaches `/idp/`** on idp's own host. The prefix answers every caller with no
+usable credential, not only the ones carrying none — otherwise a browser holding a revoked session
+would be redirected to a login page it is refused at, forever. This is the one place the order
+differs from the plan's, and the reason is that loop. The refused cookie does not travel: the
+request is not using it.
 
 ### Introspection, and the cache in front of it
 
@@ -499,15 +479,6 @@ answers for that much longer while idp is **unreachable** — never when idp *an
 past the session's own `expiresAt`, so it widens no door that was open.
 
 **Revocation lags by `cache-ttl-ms`** (30 seconds by default). Stated so nobody files it as a bug.
-
-### The rollout switch
-
-Application vhosts enforce from their first request — nothing reached them before, so there is no
-"before" to stay compatible with. The **environment vhost does not**, and
-`qits.edge.auth.enforce-on-environments` is off: the platform's whole existing traffic comes through
-that path and authenticates one hop further in, at the environment gateway. Flipping it before that
-termination has moved out here would answer every browser, SPA and API client with a `401` it cannot
-act on. It moves when the gateway's auth moves, as a step of its own.
 
 ### Telemetry
 

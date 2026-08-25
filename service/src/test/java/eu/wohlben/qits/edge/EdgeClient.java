@@ -134,12 +134,12 @@ final class EdgeClient implements AutoCloseable {
    *
    * @return the milliseconds from request to first chunk, and the whole body
    */
-  Map.Entry<Long, String> stream(String host, String uri) {
+  Map.Entry<Long, String> stream(String host, String uri, Map<String, String> headers) {
     CompletableFuture<Long> firstChunk = new CompletableFuture<>();
     CompletableFuture<String> whole = new CompletableFuture<>();
     long start = System.nanoTime();
     client
-        .request(options(HttpMethod.GET, host, uri, Map.of()))
+        .request(options(HttpMethod.GET, host, uri, headers))
         .compose(request -> request.send())
         .onSuccess(
             response -> {

@@ -92,18 +92,55 @@ class EdgeRoutingTest {
     }
   }
 
-  // --- the routing decision ------------------------------------------------------------------
+  // --- the door, which serves nothing -----------------------------------------------------------
 
   @Test
-  void anUnclaimedEnvironmentPathIsAnAuthoritative404RatherThanGatewayTraffic() throws Exception {
-    clearProjection();
-    EdgeClient.Answer dev = client().get("dev.example.com", "/anything");
-    EdgeClient.Answer prod = client().get("prod.example.com", "/anything");
-    assertEquals(404, dev.status());
-    assertEquals(404, prod.status());
-    assertNull(dev.line("upstream"), "the legacy gateway must receive no traffic");
-    assertNull(prod.line("upstream"), "the legacy gateway must receive no traffic");
+  void theDoorServesNoPathAtAll() {
+    // The ruling: every service is on its own name, so the environment's own name routes nothing.
+    // These are the paths that worked here before — a wire protocol, a clone URL, an SPA's own XHR,
+    // a segment, the login page — and each of them is now a 404 that reaches no upstream.
+    activateArtifacts();
+    activateCi();
+    activateProjects();
+    for (String path :
+        List.of("/v2/", "/git/x", "/ci/api/runs", "/ci/", "/idp/login", "/anything")) {
+      EdgeClient.Answer answer = client().get("dev.example.com", path);
+      assertEquals(404, answer.status(), path);
+      assertNull(answer.line("upstream"), path + " must reach no upstream");
+      assertTrue(answer.body().contains("serves nothing"), answer.body());
+    }
   }
+
+  @Test
+  void neitherACookieNorAMachineBearerOpensTheDoor() {
+    // A credential is not a key to a name that routes nothing. Both are what a caller that has not
+    // moved to the service's own name would hold.
+    activateCi();
+    for (Map<String, String> credential :
+        List.of(Map.of("Cookie", "qits-session=" + StubGateways.SESSION), token("dev"))) {
+      EdgeClient.Answer answer = client().get("dev.example.com", "/ci/api/runs", credential);
+      assertEquals(404, answer.status(), credential.toString());
+      assertNull(answer.line("upstream"));
+    }
+  }
+
+  @Test
+  void aWebSocketUpgradeToTheDoorIsRefusedRatherThanProxied() {
+    // The terminals moved with everything else. An upgrade here must be answered, not forwarded.
+    activateCi();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "dev.example.com",
+                "/terminal",
+                null,
+                Map.of("Upgrade", "websocket", "Connection", "Upgrade"));
+    assertEquals(404, answer.status());
+    assertNull(answer.line("upstream"));
+  }
+
+  // --- the routing decision ------------------------------------------------------------------
 
   @Test
   void anApplicationSubdomainReachesThatEnvironmentsApplication() {
@@ -128,17 +165,19 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void aDeploymentActiveEndpointIsProxiedDirectlyAndNoFallbackRemains() throws Exception {
+  void aDeploymentActiveEndpointIsProxiedDirectlyAndItsPrefixHasABoundary() throws Exception {
     clearProjection();
     activateArtifacts();
+    activateCi();
 
     assertEquals(
-        "registry-dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
+        "registry-dev",
+        client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("upstream"));
     // The route's prefix boundary matters: /artifacts catches a child, never this merely similar
-    // word, which has no active endpoint and therefore has no legacy fallback.
-    EdgeClient.Answer absent = client().get("dev.example.com", "/artifacts-old");
-    assertEquals(404, absent.status());
-    assertNull(absent.line("upstream"));
+    // word — which nobody declared, so it falls to the service whose name this is.
+    assertEquals(
+        "mirror-dev",
+        client().get("ci.dev.example.com", "/artifacts-old", token("dev")).line("upstream"));
   }
 
   @Test
@@ -360,12 +399,10 @@ class EdgeRoutingTest {
     assertEquals(
         "mirror-dev", client().get("ci.dev.example.com", "/v2/", token("dev")).line("upstream"));
     assertEquals("/v2/", client().get("ci.dev.example.com", "/v2/", token("dev")).line("uri"));
-    // On its owner's own name it is that service's, and on the environment vhost every route still
-    // routes by path.
+    // On its owner's own name it is that service's, which is the only place it exists now.
     assertEquals(
         "registry-dev",
         client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
-    assertEquals("registry-dev", client().get("dev.example.com", "/v2/").line("upstream"));
   }
 
   @Test
@@ -435,31 +472,6 @@ class EdgeRoutingTest {
         client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
   }
 
-  // --- the environment vhost's two redirects ----------------------------------------------------
-
-  @Test
-  void aBookmarkedSegmentOnTheEnvironmentVhostMovesToTheServicesOwnName() {
-    activateCi();
-    EdgeClient.Answer answer =
-        client().get("dev.example.com", "/ci/runs/7?tab=log", Map.of("Accept", "text/html"));
-    assertEquals(302, answer.status());
-    assertEquals("http://ci.dev.example.com/runs/7?tab=log", answer.headers().get("location"));
-    assertEquals("no-store", answer.headers().get("cache-control"));
-  }
-
-  @Test
-  void onlyANavigationMovesAndNeverAnApiCall() {
-    // The SPA's own XHRs still go to /ci/api on whatever name they were loaded from; moving one
-    // would cost it its origin. A fetch is not moved either, only a document.
-    activateCi();
-    assertEquals(
-        "mirror-dev",
-        client()
-            .get("dev.example.com", "/ci/api/runs", Map.of("Accept", "text/html"))
-            .line("upstream"));
-    assertEquals("mirror-dev", client().get("dev.example.com", "/ci/runs/7").line("upstream"));
-  }
-
   // --- the default environment, whose door is the apex -------------------------------------------
 
   @Test
@@ -471,8 +483,12 @@ class EdgeRoutingTest {
         "mirror-prod", client().get("ci.example.com", "/", token("prod")).line("upstream"));
     assertEquals(
         "mirror-prod", client().get("ci.prod.example.com", "/", token("prod")).line("upstream"));
-    // And a label nobody published is still the default environment's own answer, never a 404.
-    assertEquals("prod", client().get("nosuchapp.example.com", "/anything").line("upstream"));
+    // And a label nobody published is still the default environment's DOOR rather than an
+    // app-shaped
+    // refusal — which now serves nothing, like the apex it resolves to.
+    EdgeClient.Answer unknown = client().get("nosuchapp.example.com", "/anything");
+    assertEquals(404, unknown.status());
+    assertTrue(unknown.body().contains("serves nothing"), unknown.body());
   }
 
   @Test
@@ -505,6 +521,12 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void theDoorHasNowhereToSendAnybodyUntilProjectsPublishesAHost() throws Exception {
+    clearProjection();
+    assertEquals(404, client().get("dev.example.com", "/").status());
+  }
+
+  @Test
   void theImmutableDefaultLeavesTheEdgeOnlyOnAHashedName() {
     activateArtifacts();
 
@@ -514,13 +536,16 @@ class EdgeRoutingTest {
     // stayed invisible for a day.
     assertEquals(
         "no-cache",
-        client().get("dev.example.com", "/artifacts/spa/").headers().get("cache-control"));
+        client()
+            .get("registry.dev.example.com", "/artifacts/spa/", token("dev"))
+            .headers()
+            .get("cache-control"));
     // A content-hashed name is the one place immutable is correct — a new build names a new file —
     // so this one keeps the day it was given.
     assertEquals(
         "public, immutable, max-age=86400",
         client()
-            .get("dev.example.com", "/artifacts/spa/main-4RS6EA47.js")
+            .get("registry.dev.example.com", "/artifacts/spa/main-4RS6EA47.js", token("dev"))
             .headers()
             .get("cache-control"));
     // Unhashed and not the document either: a favicon replaced in place would otherwise outlive its
@@ -528,7 +553,7 @@ class EdgeRoutingTest {
     assertEquals(
         "no-cache",
         client()
-            .get("dev.example.com", "/artifacts/spa/favicon.ico")
+            .get("registry.dev.example.com", "/artifacts/spa/favicon.ico", token("dev"))
             .headers()
             .get("cache-control"));
   }
@@ -542,7 +567,10 @@ class EdgeRoutingTest {
     // forbids would WEAKEN it.
     assertEquals(
         "no-store",
-        client().get("dev.example.com", "/artifacts/spa/private").headers().get("cache-control"));
+        client()
+            .get("registry.dev.example.com", "/artifacts/spa/private", token("dev"))
+            .headers()
+            .get("cache-control"));
   }
 
   @Test
@@ -657,6 +685,7 @@ class EdgeRoutingTest {
   @Test
   void anExplicitlyEmptySnapshotRemovesThePredecessorsRoutes() {
     activateArtifacts();
+    activateCi();
     deployments.onFrame(
         new eu.wohlben.qits.eventstream.control.EventFrame(
             java.util.UUID.randomUUID().toString(),
@@ -670,7 +699,10 @@ class EdgeRoutingTest {
             null,
             null));
 
-    assertEquals("dev", client().get("dev.example.com", "/artifacts/api/files").line("upstream"));
+    // /artifacts is nobody's route any more, so it stops travelling and falls to ci's own service.
+    assertEquals(
+        "mirror-dev",
+        client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("upstream"));
   }
 
   /**
@@ -762,26 +794,34 @@ class EdgeRoutingTest {
 
   @Test
   void theApexAndAnUnknownHostReachTheDefaultEnvironment() {
-    assertEquals("prod", client().get("example.com", "/anything").line("upstream"));
-    assertEquals("prod", client().get("staging.example.com", "/anything").line("upstream"));
-    assertEquals("prod", client().get("127.0.0.1", "/anything").line("upstream"));
+    // Nothing is served on any of them, so what the resolution answers is read off the one document
+    // the door still writes.
+    for (String host : List.of("example.com", "staging.example.com", "127.0.0.1")) {
+      assertEquals(
+          "prod",
+          new JsonObject(client().get(host, "/main-navigation").body()).getString("environment"),
+          host);
+    }
   }
 
-  // --- verbatim forwarding -------------------------------------------------------------------
+  // --- verbatim forwarding, on the name that serves it ------------------------------------------
 
   @Test
   void thePathAndQueryReachTheUpstreamUnchanged() {
-    // No path knowledge means no path rewriting: the environment gateway's route table is written
-    // against the paths a client typed, and a prefix stripped here would break every one of them.
+    // No path knowledge means no path rewriting: a service's own route table is written against the
+    // paths a client typed, and a prefix stripped here would break every one of them.
+    activateCi();
     assertEquals(
         "/deep/path/here?x=1&y=2",
-        client().get("dev.example.com", "/deep/path/here?x=1&y=2").line("uri"));
+        client().get("ci.dev.example.com", "/deep/path/here?x=1&y=2", token("dev")).line("uri"));
   }
 
   @Test
   void aPostBodyReachesTheUpstream() {
+    activateCi();
     EdgeClient.Answer answer =
-        client().send(HttpMethod.POST, "dev.example.com", "/api/thing", "hello edge", Map.of());
+        client()
+            .send(HttpMethod.POST, "ci.dev.example.com", "/api/thing", "hello edge", token("dev"));
     assertEquals("POST", answer.line("method"));
     assertEquals("hello edge", answer.line("body"));
     assertEquals("10", answer.line("body-bytes"));
@@ -789,62 +829,61 @@ class EdgeRoutingTest {
 
   @Test
   void everyMethodPassesThrough() {
+    activateCi();
     for (HttpMethod method :
         new HttpMethod[] {HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.PATCH}) {
       assertEquals(
           method.name(),
-          client().send(method, "dev.example.com", "/thing", "x", Map.of()).line("method"),
+          client().send(method, "ci.dev.example.com", "/thing", "x", token("dev")).line("method"),
           "the edge must not have an opinion about " + method);
     }
   }
 
   @Test
   void headersReachTheUpstreamUntouched() {
-    // The edge strips NOTHING. X-Qits-* hygiene is the environment gateway's job and is done there;
-    // doing it here as well would put one contract in two repositories.
+    // Beyond the browser cookie and the reserved prefix, the edge strips NOTHING: an unrelated
+    // cookie, a custom header and the credential itself all arrive as they were sent.
+    activateCi();
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("Cookie", "q_session=abc");
+    headers.put("X-Custom", "kept");
     EdgeClient.Answer answer =
-        client()
-            .send(
-                HttpMethod.GET,
-                "dev.example.com",
-                "/thing",
-                null,
-                Map.of(
-                    "Authorization", "Bearer secret",
-                    "Cookie", "q_session=abc",
-                    "X-Qits-User", "whoever",
-                    "X-Custom", "kept"));
+        client().send(HttpMethod.GET, "ci.dev.example.com", "/thing", null, headers);
 
-    assertEquals("Bearer secret", answer.upstreamHeader("Authorization"));
+    assertEquals(headers.get("Authorization"), answer.upstreamHeader("Authorization"));
     assertEquals("q_session=abc", answer.upstreamHeader("Cookie"));
-    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"));
     assertEquals("kept", answer.upstreamHeader("X-Custom"));
   }
 
   @Test
   void theOriginalHostReachesTheUpstream() {
-    // Load-bearing: every redirect, cookie domain and absolute URL the environment gateway builds
-    // comes from this header. Rewriting it to the upstream's own name would break all three at once
-    // and leave nothing in a log to say so.
-    String seen = client().get("dev.example.com", "/thing").upstreamHeader("Host");
+    // Load-bearing: every redirect, cookie domain and absolute URL a service builds comes from this
+    // header. Rewriting it to the upstream's own name would break all three at once and leave
+    // nothing in a log to say so.
+    activateCi();
+    String seen = client().get("ci.dev.example.com", "/thing", token("dev")).upstreamHeader("Host");
     assertTrue(
-        seen != null && seen.startsWith("dev.example.com"),
+        seen != null && seen.startsWith("ci.dev.example.com"),
         "the upstream must see the name the client asked for, but saw: " + seen);
   }
 
   @Test
   void aResponseHeaderReachesTheClientUnchanged() {
-    assertEquals("dev", client().get("dev.example.com", "/thing").headers().get("x-upstream"));
+    activateCi();
+    assertEquals(
+        "mirror-dev",
+        client().get("ci.dev.example.com", "/thing", token("dev")).headers().get("x-upstream"));
   }
 
   // --- the forwarded headers -----------------------------------------------------------------
 
   @Test
   void theEdgeDescribesTheOriginalClient() {
-    EdgeClient.Answer answer = client().get("dev.example.com", "/thing");
+    activateCi();
+    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/thing", token("dev"));
     assertEquals("127.0.0.1", answer.upstreamHeader("X-Forwarded-For"));
     assertEquals("http", answer.upstreamHeader("X-Forwarded-Proto"));
-    assertTrue(answer.upstreamHeader("X-Forwarded-Host").startsWith("dev.example.com"));
+    assertTrue(answer.upstreamHeader("X-Forwarded-Host").startsWith("ci.dev.example.com"));
   }
 
   @Test
@@ -852,17 +891,13 @@ class EdgeRoutingTest {
     // The edge is not always the outermost hop: a TLS terminator in front of it is the only thing
     // that can tell the truth about `https`, and overwriting would replace a true value with a
     // false one. Nothing downstream may make a trust decision on these three, and nothing does.
+    activateCi();
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("X-Forwarded-For", "203.0.113.7");
+    headers.put("X-Forwarded-Proto", "https");
+    headers.put("X-Forwarded-Host", "edge.example.com");
     EdgeClient.Answer answer =
-        client()
-            .send(
-                HttpMethod.GET,
-                "dev.example.com",
-                "/thing",
-                null,
-                Map.of(
-                    "X-Forwarded-For", "203.0.113.7",
-                    "X-Forwarded-Proto", "https",
-                    "X-Forwarded-Host", "edge.example.com"));
+        client().send(HttpMethod.GET, "ci.dev.example.com", "/thing", null, headers);
 
     assertEquals("203.0.113.7", answer.upstreamHeader("X-Forwarded-For"));
     assertEquals("https", answer.upstreamHeader("X-Forwarded-Proto"));
@@ -876,7 +911,9 @@ class EdgeRoutingTest {
     // The stub writes two chunks with a gap between them. A proxy that buffered would deliver both
     // at the end, so the FIRST chunk's arrival time is the assertion — the body alone would pass
     // either way. SSE channels and `git clone` are what this protects.
-    Map.Entry<Long, String> streamed = client().stream("dev.example.com", "/stream");
+    activateCi();
+    Map.Entry<Long, String> streamed =
+        client().stream("ci.dev.example.com", "/stream", token("dev"));
 
     assertEquals("chunk-1\nchunk-2\n", streamed.getValue());
     assertTrue(
@@ -891,30 +928,34 @@ class EdgeRoutingTest {
   // --- websockets ----------------------------------------------------------------------------
 
   @Test
-  void aWebSocketUpgradeReachesTheEnvironmentItsHostNames() {
+  void aWebSocketUpgradeReachesTheServiceItsHostNames() {
     // Every interactive terminal on the platform is one of these. Getting a frame back at all is
     // what proves the handshake survived the hop.
-    String seen = client().handshake("dev.example.com", "/terminal", Map.of());
-    assertTrue(seen.lines().anyMatch("upstream=dev"::equals), seen);
+    activateCi();
+    String seen = client().handshake("ci.dev.example.com", "/terminal", token("dev"));
+    assertTrue(seen.lines().anyMatch("upstream=mirror-dev"::equals), seen);
   }
 
   @Test
   void aWebSocketUpgradeCarriesTheForwardedHeaders() {
     // The upgrade never reaches the interceptor chain — vertx-http-proxy short-circuits before
     // installing it — so this is a second code path with its own way of losing the headers.
-    String seen = client().handshake("dev.example.com", "/terminal", Map.of());
+    activateCi();
+    String seen = client().handshake("ci.dev.example.com", "/terminal", token("dev"));
     assertTrue(seen.lines().anyMatch("x-forwarded-for=127.0.0.1"::equals), seen);
     assertTrue(seen.lines().anyMatch("x-forwarded-proto=http"::equals), seen);
-    assertTrue(seen.lines().anyMatch(l -> l.startsWith("x-forwarded-host=dev.example.com")), seen);
+    assertTrue(
+        seen.lines().anyMatch(l -> l.startsWith("x-forwarded-host=ci.dev.example.com")), seen);
   }
 
   @Test
   void aWebSocketUpgradeStillCarriesTheClientsOwnHeaders() {
-    // The edge strips nothing on an upgrade either. A terminal socket authenticates at the
-    // environment gateway by the session cookie the browser sent, so dropping it here would leave
-    // every terminal anonymous.
-    String seen =
-        client().handshake("dev.example.com", "/terminal", Map.of("Cookie", "q_session=abc"));
+    // The edge strips nothing but the browser cookie on an upgrade either: an unrelated cookie is a
+    // service's own and travels with the socket.
+    activateCi();
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("Cookie", "q_session=abc");
+    String seen = client().handshake("ci.dev.example.com", "/terminal", headers);
     assertTrue(seen.lines().anyMatch("cookie=q_session=abc"::equals), seen);
   }
 
@@ -943,18 +984,11 @@ class EdgeRoutingTest {
 
   @Test
   void aPathThatOnlyLooksLikeTheManagementRootIsProxied() {
-    // /q is the prefix, not a substring: /queue belongs to an environment gateway like any path.
-    EdgeClient.Answer answer = client().get("dev.example.com", "/queue/items");
-    assertEquals("dev", answer.line("upstream"));
+    // /q is the prefix, not a substring: /queue belongs to a service like any other path.
+    activateCi();
+    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/queue/items", token("dev"));
+    assertEquals("mirror-dev", answer.line("upstream"));
     assertEquals("/queue/items", answer.line("uri"));
-  }
-
-  @Test
-  void theEdgeItselfServesNothingElse() {
-    // No SPA, no landing page, no /api. Every path that is not /q is somebody else's, which is why
-    // an unconfigured environment shows up as a 502 rather than as a page.
-    assertNotNull(client().get("dev.example.com", "/").line("upstream"));
-    assertNull(client().get("dev.example.com", "/").line("body-bytes-not-a-key"));
   }
 
   // --- idp auth, terminated here ---------------------------------------------------------------
@@ -1092,28 +1126,22 @@ class EdgeRoutingTest {
         "registry-prod", client().get("registry.prod.example.com", "/v2/", whole).line("upstream"));
   }
 
-  @Test
-  void theEnvironmentVhostIsStillOpen() {
-    // The rollout switch: qits.edge.auth.enforce-on-environments is off, so the platform's whole
-    // existing traffic keeps authenticating one hop further in. Flipping it is a step of its own.
-    assertEquals("dev", client().get("dev.example.com", "/anything").line("upstream"));
-  }
-
   // --- the browser gate, dark
   // ---------------------------------------------------------------------
 
   @Test
-  void aSessionCookieChangesNothingWhileTheGateIsOff() throws Exception {
-    // qits.edge.sessions.enabled is off in this suite, which is the shipped default, and off has to
-    // mean the edge of before it existed: no introspection, no redirect, no stripping. The whole
-    // rest of this class is the other half of that claim — it is unchanged.
+  void aSessionCookieChangesNothingWhileTheGateIsOff() {
+    // qits.edge.sessions.enabled is off in this suite, which is the shipped default, and off means
+    // the edge of before the gate existed: no introspection and no identity written. `mirror` is
+    // the
+    // vhost whose reads are open, so the cookie meets the request that needs no credential at all.
     int before = StubGateways.introspections();
     EdgeClient.Answer answer =
         client()
             .send(
                 HttpMethod.GET,
-                "dev.example.com",
-                "/api/projects",
+                "mirror.dev.example.com",
+                "/v2/",
                 null,
                 Map.of(
                     "Cookie", "qits-session=" + StubGateways.SESSION,
@@ -1122,16 +1150,18 @@ class EdgeRoutingTest {
                     "Sec-Fetch-Mode", "navigate"));
 
     assertEquals(200, answer.status(), "a navigation is not redirected while the gate is off");
-    assertEquals("dev", answer.line("upstream"));
-    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"), "nothing is stripped either");
+    assertEquals("mirror-dev", answer.line("upstream"));
+    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"), "no identity is rewritten");
     assertEquals("qits:root", answer.upstreamHeader("X-Qits-Roles"));
     assertEquals(before, StubGateways.introspections(), "and idp was never asked");
   }
 
   @Test
   void aWebSocketUpgradeIsNotGatedEitherWhileTheGateIsOff() {
-    String seen =
-        client().handshake("dev.example.com", "/terminal", Map.of("X-Qits-User", "whoever"));
+    activateCi();
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("X-Qits-User", "whoever");
+    String seen = client().handshake("ci.dev.example.com", "/terminal", headers);
     assertTrue(seen.lines().anyMatch("x-qits-user=whoever"::equals), seen);
   }
 
