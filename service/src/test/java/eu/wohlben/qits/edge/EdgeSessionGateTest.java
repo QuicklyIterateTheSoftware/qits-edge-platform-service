@@ -253,8 +253,8 @@ class EdgeSessionGateTest {
   @Test
   void anXhrWithNoCredentialIsRefusedRatherThanRedirected() {
     // A 302 handed to fetch() is followed into the login page's HTML, which the caller cannot use —
-    // so the answer that means anything is a status. Only a navigation is moved; everything else
-    // gets the challenge, which is what `docker` on /v2/ acts on.
+    // so the answer that means anything is a status. A browser's fetch gets the JSON refusal that
+    // names the login page and NO Basic challenge, which would pop the browser's own dialog.
     EdgeClient.Answer answer =
         client()
             .get(
@@ -263,6 +263,18 @@ class EdgeSessionGateTest {
                 Map.of("Sec-Fetch-Mode", "cors", "Accept", "application/json"));
     assertEquals(401, answer.status());
     assertNull(answer.line("upstream"));
+    assertNull(answer.headers().get("www-authenticate"), "a browser is never challenged for Basic");
+    assertTrue(answer.body().contains("/idp/login"), answer.body());
+  }
+
+  @Test
+  void aMachineClientWithNoCredentialStillGetsTheChallenge() {
+    // No Sec-Fetch-Mode: curl, docker, git. The realm in the challenge is what docker acts on.
+    EdgeClient.Answer answer =
+        client().get("ci.dev.example.com", "/api/runs", Map.of("Accept", "application/json"));
+    assertEquals(401, answer.status());
+    assertNull(answer.line("upstream"));
+    assertTrue(answer.headers().containsKey("www-authenticate"), "a machine client is challenged");
   }
 
   @Test

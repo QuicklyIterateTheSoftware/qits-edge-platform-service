@@ -450,16 +450,21 @@ public class EdgeRouter {
   }
 
   /**
-   * What a service vhost answers a caller it knows nothing about: the login page for something that
-   * can render one, and the {@code WWW-Authenticate} challenge for everything else — {@code docker}
-   * on {@code /v2/} above all, which acts on the realm and would give up without it.
+   * What a service vhost answers a caller it knows nothing about: the login page for a navigation,
+   * a 401 naming the login page for any other request a BROWSER made, and the {@code
+   * WWW-Authenticate} challenge for everything else — {@code docker} on {@code /v2/} above all,
+   * which acts on the realm and would give up without it.
+   *
+   * <p>A browser is told apart by {@code Sec-Fetch-Mode}, which every current browser stamps and no
+   * machine client sends. A logged-out tab's background fetch must not meet a {@code Basic}
+   * challenge: the browser would answer it with its own credential dialog.
    */
   private void refuseService(HttpServerRequest request, Target target) {
+    String fetchMode = request.getHeader(EdgeSessions.FETCH_MODE);
     if (sessions.enabled()
-        && EdgeSessions.isNavigation(
-            request.method(),
-            request.getHeader(EdgeSessions.FETCH_MODE),
-            request.getHeader(HttpHeaders.ACCEPT))) {
+        && (fetchMode != null
+            || EdgeSessions.isNavigation(
+                request.method(), fetchMode, request.getHeader(HttpHeaders.ACCEPT)))) {
       sessions.refuse(request, loginOrigin(request, target.environment()));
       return;
     }
