@@ -25,7 +25,7 @@
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <spotless-plugin.version>2.44.5</spotless-plugin.version>
         <google-java-format.version>1.28.0</google-java-format.version>
-        <qits.eventstream.version>2026.818.45652</qits.eventstream.version>
+        <qits.eventstream.version>2026.825.74539</qits.eventstream.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
         <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
