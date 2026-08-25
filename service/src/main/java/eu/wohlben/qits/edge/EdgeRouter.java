@@ -400,6 +400,9 @@ public class EdgeRouter {
    * credential is a machine saying who it is and has no session, and a vhost whose reads the
    * deployment opened must keep serving a client that holds neither — which is what keeps {@code
    * docker pull} and {@code npm install} working on exactly the names they work on today.
+   *
+   * <p>A caller with no usable session then meets {@link #noSession}, which is where this name's
+   * own anonymous prefixes are served.
    */
   private void serviceGate(HttpServerRequest request, Target target) {
     String cookie =
@@ -407,7 +410,7 @@ public class EdgeRouter {
             ? sessions.cookie(request)
             : null;
     if (cookie == null) {
-      machine(request, target);
+      noSession(request, target);
       return;
     }
     Future<EdgeSessions.Session> introspected = sessions.introspect(cookie);
@@ -420,7 +423,7 @@ public class EdgeRouter {
         .onSuccess(
             session -> {
               if (session == null) {
-                machine(request, target);
+                noSession(request, target);
                 return;
               }
               proxy(request, target, session);
@@ -428,8 +431,38 @@ public class EdgeRouter {
         .onFailure(
             failure -> {
               LOG.errorf(failure, "could not introspect a session for %s", authority(request));
-              machine(request, target);
+              noSession(request, target);
             });
+  }
+
+  /**
+   * What a service vhost answers a caller with no usable session: the anonymous prefixes on the
+   * name that OWNS them, then the machine gate as it stood.
+   *
+   * <p><b>One host serves them, not every host.</b> {@code /idp/} is anonymous on {@code
+   * idp.<env>.<domain>}, because that is where the login page is now — and a login page nobody can
+   * reach without a session redirects to itself forever. Every other name still refuses the prefix,
+   * so this opens one service rather than a path on the whole environment.
+   *
+   * <p>Ordered ahead of the refusal for the same reason as {@link #unauthenticated}: a browser
+   * holding a session idp has since revoked must reach the login page too, not only one carrying no
+   * cookie at all.
+   */
+  private void noSession(HttpServerRequest request, Target target) {
+    if (sessions.enabled()
+        && !EdgeAuth.carriesCredential(request)
+        && sessions.anonymous(request.path())
+        && target.host() != null) {
+      EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
+      if (endpoint != null && endpoint.application().equals(target.host().application())) {
+        // Nobody vouched for this caller, so no identity may arrive upstream — the same strip the
+        // environment vhost's anonymous path always did.
+        EdgeHeaders.applyIdentity(request.headers(), null);
+        proxy(request, target, null);
+        return;
+      }
+    }
+    machine(request, target);
   }
 
   /**
@@ -443,7 +476,7 @@ public class EdgeRouter {
       return;
     }
     if (!EdgeAuth.carriesCredential(request)) {
-      refuseService(request);
+      refuseService(request, target);
       return;
     }
     Future<String> checked = auth.checkCredential(target.route(), request);
@@ -464,13 +497,13 @@ public class EdgeRouter {
    * can render one, and the {@code WWW-Authenticate} challenge for everything else — {@code docker}
    * on {@code /v2/} above all, which acts on the realm and would give up without it.
    */
-  private void refuseService(HttpServerRequest request) {
+  private void refuseService(HttpServerRequest request, Target target) {
     if (sessions.enabled()
         && EdgeSessions.isNavigation(
             request.method(),
             request.getHeader(EdgeSessions.FETCH_MODE),
             request.getHeader(HttpHeaders.ACCEPT))) {
-      sessions.refuse(request);
+      sessions.refuse(request, loginOrigin(request, target.environment()));
       return;
     }
     auth.challenge(request, "no bearer token");
@@ -546,7 +579,42 @@ public class EdgeRouter {
       proxy(request, target, null);
       return;
     }
-    sessions.refuse(request);
+    sessions.refuse(request, loginOrigin(request, target.environment()));
+  }
+
+  /**
+   * Where the login page is for this request: the host of whichever deployment owns the login path,
+   * written against this request's own environment origin.
+   *
+   * <p><b>The login moved off the door with every other service.</b> idp publishes {@code idp}, so
+   * the page is at {@code https://idp.example.com/idp/login}. The canonical origin cannot follow
+   * it: it is also the authority the default environment's names are derived from — see {@link
+   * #canonicalApex} and {@link EnvironmentAuthority} — so it stays the door and is only the
+   * fallback here.
+   *
+   * <p>idp is a PLATFORM service, deployed once. So an environment that owns no route for the login
+   * path asks the default environment before giving up.
+   *
+   * @return the origin, or null when no deployment owns the login path anywhere — the canonical
+   *     origin then answers, exactly as it did before any host was published
+   */
+  private String loginOrigin(HttpServerRequest request, String environment) {
+    String published = publishedLoginOrigin(request, environment);
+    if (published != null) {
+      return published;
+    }
+    String fallback = hostEnvironments.defaultEnvironment();
+    return fallback.equals(environment) ? null : publishedLoginOrigin(request, fallback);
+  }
+
+  /** One environment's answer: who owns the login path there, and the name they publish. */
+  private String publishedLoginOrigin(HttpServerRequest request, String environment) {
+    EdgeEndpoint endpoint = routes.resolve(environment, sessions.loginPath());
+    if (endpoint == null) {
+      return null;
+    }
+    EdgeRoutes.ServiceHost host = routes.applicationHost(environment, endpoint.application());
+    return host == null ? null : authorityOf(request).hostOrigin(host.host());
   }
 
   /**

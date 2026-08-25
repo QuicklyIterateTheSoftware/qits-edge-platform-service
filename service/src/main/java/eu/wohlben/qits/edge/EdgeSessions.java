@@ -55,8 +55,9 @@ import org.jboss.logging.Logger;
  *   <li>A session cookie is introspected here and becomes the three identity headers.
  *   <li>A path under {@link SessionsConfig#anonymousPrefixes()} is proxied anonymously — the login
  *       page has to be reachable by someone who cannot log in yet.
- *   <li>Anything else is refused: a navigation is sent to the login page, everything else gets a
- *       401. See {@link #refuse}.
+ *   <li>Anything else is refused: a navigation is sent to the login page — which lives on the host
+ *       of whichever deployment owns {@link SessionsConfig#loginPath()} — and everything else gets
+ *       a 401. See {@link #refuse}.
  * </ol>
  *
  * <h2>The two things the cache is for</h2>
@@ -99,7 +100,10 @@ public class EdgeSessions {
   /** {@link SessionsConfig#anonymousPrefixes()} with blanks dropped, read once at startup. */
   private List<String> anonymousPrefixes;
 
-  /** The configured, canonical browser origin and the only authorities a login may return to. */
+  /**
+   * The environment door. It is what every default-environment name is derived from, and the login
+   * origin's fallback while no deployment has published a host for the login path's owner.
+   */
   private URI canonicalOrigin;
 
   private Set<String> browserHosts;
@@ -178,10 +182,11 @@ public class EdgeSessions {
     }
     if (config.enabled()) {
       LOG.infof(
-          "browser sessions are gated here: cookie %s, login %s%s, browser hosts %s %s, anonymous %s",
+          "browser sessions are gated here: cookie %s, login %s on the host that owns it (%s while"
+              + " none does), browser hosts %s %s, anonymous %s",
           config.cookieName(),
-          canonicalOrigin,
           config.loginPath(),
+          canonicalOrigin,
           browserHosts,
           wildcardBrowserHosts.stream().map(suffix -> "*." + suffix).toList(),
           anonymousPrefixes);
@@ -200,6 +205,14 @@ public class EdgeSessions {
    */
   public String canonicalAuthority() {
     return authority(canonicalOrigin.getAuthority());
+  }
+
+  /**
+   * Where the login page is served, below whichever host owns that route. A contract with
+   * qits-platform-idp's SPA rather than a deployment's choice.
+   */
+  public String loginPath() {
+    return config.loginPath();
   }
 
   /** The one browser credential machine vhosts must remove before proxying. */
@@ -336,11 +349,17 @@ public class EdgeSessions {
    * challenge would pop the browser's own credential dialog on every background fetch a logged-out
    * tab makes, and the credential a browser holds is a cookie. The body names the login page so an
    * SPA can send the user there itself.
+   *
+   * @param loginOrigin the origin the login page is served from, or null for the canonical one —
+   *     the caller reads it off the projection, because the page lives on the host of whichever
+   *     deployment owns {@link #loginPath()}
    */
-  public void refuse(HttpServerRequest request) {
+  public void refuse(HttpServerRequest request, String loginOrigin) {
     String location =
         loginLocation(
-            request.authority() == null ? null : request.authority().toString(), request.uri());
+            loginOrigin,
+            request.authority() == null ? null : request.authority().toString(),
+            request.uri());
     if (isNavigation(
         request.method(), request.getHeader(FETCH_MODE), request.getHeader(HttpHeaders.ACCEPT))) {
       request
@@ -384,13 +403,18 @@ public class EdgeSessions {
         && accept.toLowerCase(Locale.ROOT).contains("text/html");
   }
 
-  /** The canonical login page with a configured host and the request path to come back to. */
-  String loginLocation(String requestedAuthority, String uri) {
+  /**
+   * The login page with a configured return host and the request path to come back to.
+   *
+   * <p>The ORIGIN is the caller's, because the page moves with its deployment. Only the return host
+   * is decided here: an authority nobody listed falls back to the door rather than being reflected.
+   */
+  String loginLocation(String loginOrigin, String requestedAuthority, String uri) {
     String host = authority(requestedAuthority);
     if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts)) {
       host = authority(canonicalOrigin.getAuthority());
     }
-    return canonicalOrigin
+    return (loginOrigin == null ? canonicalOrigin.toString() : loginOrigin)
         + config.loginPath()
         + "?return_host="
         + URLEncoder.encode(host, StandardCharsets.UTF_8)

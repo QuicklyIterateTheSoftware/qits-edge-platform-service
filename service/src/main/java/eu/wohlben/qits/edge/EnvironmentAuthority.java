@@ -22,10 +22,10 @@ import java.util.Set;
  * </pre>
  *
  * <p><b>The default environment's authority is the APEX, with no label of its own.</b> That
- * environment's door is {@code example.com} — where a browser lands, and where the login page lives
- * — so its services are {@code ci.example.com}, and the long spelling {@code ci.dev.example.com}
- * stays a valid name for the same place. Every OTHER environment keeps its label: {@code
- * prod.example.com}, {@code ci.prod.example.com}.
+ * environment's door is {@code example.com} — where a browser lands — so its services are {@code
+ * ci.example.com}, including the login page's {@code idp.example.com}, and the long spelling {@code
+ * ci.dev.example.com} stays a valid name for the same place. Every OTHER environment keeps its
+ * label: {@code prod.example.com}, {@code ci.prod.example.com}.
  *
  * <p><b>An apex of one label is never shortened</b>, which is the whole of the local case. {@code
  * localhost} alone names every environment at once, so a developer's platform stays at {@code
@@ -109,8 +109,8 @@ public record EnvironmentAuthority(String scheme, String authority) {
       }
     }
     // The apex, an address literal, a name nobody configured, or no Host at all. None of them says
-    // which environment it is, so the answer is the DEFAULT one at the configured origin — the same
-    // origin the login page lives at, which is the one name a deployment always states.
+    // which environment it is, so the answer is the DEFAULT one at the configured origin — the
+    // door, which is the one name a deployment always states.
     String fallback = canonicalAuthority == null ? "" : canonicalAuthority.strip();
     if (fallback.isEmpty()) {
       return defaultEnvironment;

@@ -35,14 +35,26 @@ public interface SessionsConfig {
   @WithDefault("qits-session")
   String cookieName();
 
-  /** The canonical origin where WebAuthn is allowed to run, with no trailing path. */
+  /**
+   * The environment door, with no trailing path: {@code https://wohlben.eu}, {@code
+   * http://dev.localhost:8080}.
+   *
+   * <p><b>It is also the authority the default environment's names are derived from</b> — see
+   * {@link EnvironmentAuthority} — so it names the door and nothing else. For the login page it is
+   * only the FALLBACK, used while no deployment has published a host for {@link #loginPath()}'s
+   * owner.
+   */
   @WithDefault("http://localhost:8080")
   String canonicalOrigin();
 
   /**
-   * The path below {@link #canonicalOrigin()} that serves login. The origin is deliberately not
-   * inferred from a request Host: a passkey is bound to one WebAuthn origin, and a host header is
-   * caller input.
+   * The path that serves login, and the one whose owner decides where the page is: it lives on the
+   * host of whichever deployment owns this route — {@code https://idp.wohlben.eu/idp/login} once
+   * qits-platform-idp publishes {@code idp}.
+   *
+   * <p>The origin is still never inferred from a request Host: a passkey is bound to one WebAuthn
+   * origin, and a host header is caller input. It comes from the deployment projection or from
+   * {@link #canonicalOrigin()}.
    */
   @WithDefault("/idp/login")
   String loginPath();
@@ -68,8 +80,10 @@ public interface SessionsConfig {
    * the protocol endpoints authenticate their own callers, and {@code /idp/api/*} guards itself. An
    * asset-path list would drift the first time the SPA renames a bundle.
    *
-   * <p>These are paths on the ENVIRONMENT vhost, so the prefix reaches the environment gateway and
-   * is answered by idp behind it, exactly as it is today.
+   * <p>These are paths on the ENVIRONMENT vhost, and on the OWNING service's own host — {@code
+   * idp.<env>.<domain>}, where the login page now lives. Nowhere else: a prefix served on every
+   * name would open one service's routes on all of them, so every other host still refuses {@code
+   * /idp/}.
    */
   @WithDefault("/idp/")
   List<String> anonymousPrefixes();
