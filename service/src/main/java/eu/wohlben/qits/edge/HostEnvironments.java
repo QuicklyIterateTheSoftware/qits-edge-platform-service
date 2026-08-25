@@ -11,7 +11,7 @@ import java.util.Set;
  * <p>The convention is two spellings:
  *
  * <pre>
- *   $env.$domain           prod.example.com          -> prod's deployment endpoints
+ *   $env.$domain           prod.example.com          -> prod's door, which serves nothing
  *   $app.$env.$domain      registry.prod.example.com -> prod's registry, direct
  *   $app.$domain           registry.example.com      -> the DEFAULT environment's registry
  * </pre>
@@ -32,7 +32,7 @@ import java.util.Set;
  * authenticate them, so an unconfigured app label is {@link Route#unknownApp() unroutable} and the
  * edge answers 404. Names that are not app-shaped are untouched by this: {@code
  * staging.example.com} names no known environment at position 1, so it is still the default
- * gateway's.
+ * environment's door.
  *
  * <p><b>Only the first two labels are read</b>, which is what makes the domain itself irrelevant.
  * The edge is never told what {@code $domain} is: it may be one label ({@code prod.localhost}), two
@@ -57,7 +57,7 @@ public final class HostEnvironments {
    * one.
    *
    * @param environment the environment, never null — the app's environment when there is an app
-   * @param app the configured application the name reached, or null for that environment's gateway
+   * @param app the configured application the name reached, or null for that environment's door
    * @param unknownApp the app-shaped label that is not configured, or null when the name routes.
    *     Carried rather than discarded so the 404 can name it.
    */
@@ -67,7 +67,10 @@ public final class HostEnvironments {
       return new Route(environment, null, null);
     }
 
-    /** Whether this name reaches a configured application vhost rather than deployment routing. */
+    /**
+     * Whether this name reaches a configured application vhost. False is the environment vhost,
+     * which is that environment's door: it routes nothing and serves nothing.
+     */
     public boolean toApp() {
       return app != null;
     }

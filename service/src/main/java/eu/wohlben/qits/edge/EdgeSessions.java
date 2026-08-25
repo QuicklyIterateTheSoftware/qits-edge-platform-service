@@ -43,9 +43,10 @@ import org.jboss.logging.Logger;
  *
  * <h2>A gated request, in five steps</h2>
  *
- * <p>{@link EdgeRouter} runs them on the environment vhost, and only while {@link
- * SessionsConfig#enabled()}. Application vhosts are untouched by every line here — they front
- * services that no browser talks to, and their gate is {@link AuthConfig}'s.
+ * <p>{@link EdgeRouter} runs them on a service's own host, and only while {@link
+ * SessionsConfig#enabled()}. The environment vhost is the door: it serves nothing, so it gates
+ * nothing. A CONFIGURED application vhost with no published host is untouched by every line here —
+ * it fronts a service no browser talks to, and its gate is {@link AuthConfig}'s.
  *
  * <ol>
  *   <li>Every inbound {@code X-Qits-*} header is dropped. See {@link EdgeHeaders#applyIdentity}.

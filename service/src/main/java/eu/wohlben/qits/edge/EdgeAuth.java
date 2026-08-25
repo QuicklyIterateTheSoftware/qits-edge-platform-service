@@ -32,7 +32,7 @@ import org.jboss.logging.Logger;
  * decision and {@link AuthConfig} is the switch.
  *
  * <p><b>This class is the MACHINE half.</b> A token, or the client id and secret it is minted from.
- * The browser half — a session cookie, on the environment vhost — is {@link EdgeSessions}, and it
+ * The browser half — a session cookie, on a service's own name — is {@link EdgeSessions}, and it
  * calls back into this one: a machine credential presented there is checked by exactly these rules,
  * so a commissioned client that works today keeps working when the browser gate is turned on.
  *
@@ -162,10 +162,10 @@ public class EdgeAuth {
    * APP vhost, whose app label was named.
    *
    * <p>All three conditions are load-bearing. {@code toApp()} keeps the exemption off the
-   * environment vhost, which routes the platform's whole existing traffic and has its own switch.
-   * The app label is the one the routing decision already resolved, so a label the edge does not
-   * route never reaches here — an unknown app is answered 404 one step earlier. And the method list
-   * is the two that read: everything that changes the service still needs a token.
+   * environment vhost, which is the door and serves nothing. The app label is the one the routing
+   * decision already resolved, so a label the edge does not route never reaches here — an unknown
+   * app is answered 404 one step earlier. And the method list is the two that read: everything that
+   * changes the service still needs a token.
    *
    * <p>Package-private and static so it can be asserted without booting an application.
    */
@@ -231,41 +231,27 @@ public class EdgeAuth {
   }
 
   /**
-   * Whether this request may proceed.
+   * Whether this vhost admits this request with no credential at all: the enforcement switch and
+   * the reads {@link AuthConfig#anonymousReadApps()} opened on its app label.
    *
-   * @return a future holding null when it may, or the reason it may not. A failed future means the
-   *     check could not be made — the caller denies on that too, so that an idp outage cannot
-   *     become an open door.
-   */
-  public Future<String> check(HostEnvironments.Route route, HttpServerRequest request) {
-    if (open(route, request)) {
-      return Future.succeededFuture(null);
-    }
-    return checkCredential(route, request);
-  }
-
-  /**
-   * Whether this vhost admits this request with no credential at all: the enforcement switch its
-   * kind of vhost carries, and the reads {@link AuthConfig#anonymousReadApps()} opened on its app
-   * label.
+   * <p>Asked by {@link EdgeRouter}'s service-vhost gate, which has to know the ANSWER rather than a
+   * future: a name whose reads are open must keep serving a client holding no credential, a stale
+   * one, or a browser session this vhost never introspects.
    *
-   * <p>Asked on its own by {@link EdgeRouter}'s service-vhost gate, which has to know the ANSWER
-   * rather than a future: a name whose reads are open must keep serving a client holding no
-   * credential, a stale one, or a browser session this vhost never introspects.
+   * <p>Only a service vhost reaches this. The environment vhost is the door and routes nothing, so
+   * there is no second switch for it.
    */
   public boolean open(HostEnvironments.Route route, HttpServerRequest request) {
-    boolean enforce = route.toApp() ? config.enforceOnApps() : config.enforceOnEnvironments();
-    return !enforce || anonymousRead(route, request.method(), anonymousReadApps);
+    return !config.enforceOnApps() || anonymousRead(route, request.method(), anonymousReadApps);
   }
 
   /**
    * The credential check itself, WITHOUT the vhost switch above.
    *
    * <p>The switch answers "does this vhost demand a credential"; this answers "is the one that was
-   * presented good". They come apart on the environment vhost with the session gate on: that vhost
-   * may not demand a credential of a browser, and a request that carries one anyway must still be
-   * held to every rule — otherwise an {@code Authorization} header of any junk at all would be a
-   * way past the gate. See {@link EdgeSessions}' step 2.
+   * presented good". They come apart on a vhost whose reads are open: it may not demand a
+   * credential, and a request that carries one anyway must still be held to every rule — otherwise
+   * an {@code Authorization} header of any junk at all would be a way past the gate.
    */
   public Future<String> checkCredential(HostEnvironments.Route route, HttpServerRequest request) {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);

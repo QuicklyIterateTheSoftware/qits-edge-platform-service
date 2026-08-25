@@ -8,13 +8,11 @@ import java.util.Optional;
 /**
  * Where the edge terminates idp authentication, and how hard.
  *
- * <p><b>Two switches, deliberately not one.</b> The application vhosts are new — nothing reached
- * them before the ingress campaign — so they enforce from their first request and there is no
- * "before" to be compatible with. The environment vhost is the platform's whole existing traffic,
- * which authenticates one hop further in at the environment gateway; turning that on is a separate,
- * later step, taken when the gateway's own termination moves out here.
+ * <p><b>One switch.</b> Every name the edge routes is a service vhost, and each of them fronts a
+ * service with no external auth of its own, so they enforce from their first request. The
+ * environment vhost is the door: it serves nothing, so there is nothing to gate there.
  *
- * <p><b>And one exemption, which is narrower than a third switch.</b> {@link #anonymousReadApps()}
+ * <p><b>And one exemption, which is narrower than a second switch.</b> {@link #anonymousReadApps()}
  * names the app vhosts whose READS are open. It does not turn a vhost off — writes on the same name
  * still need a token — so it cannot become an accidental way to publish a whole service.
  */
@@ -28,15 +26,6 @@ public interface AuthConfig {
    */
   @WithDefault("true")
   boolean enforceOnApps();
-
-  /**
-   * Whether an {@code $env.$domain} request must carry one. OFF, and flipping it is a step of its
-   * own: today every browser, SPA and API client on the platform reaches the environment gateway
-   * through this path and authenticates THERE, so turning this on before that termination has moved
-   * would answer every one of them with a 401 they cannot act on.
-   */
-  @WithDefault("false")
-  boolean enforceOnEnvironments();
 
   /**
    * The app labels — the {@code $app} of {@code $app.$env.$domain} — whose vhosts serve {@code GET}
@@ -59,8 +48,8 @@ public interface AuthConfig {
    * </pre>
    *
    * <p>The list is read once at startup and matched against the app label the Host name resolved
-   * to, so it reaches nothing but an app vhost — the environment vhost's behaviour is untouched by
-   * any value here, and a label the edge does not route is still a 404 rather than an open door.
+   * to, so it reaches nothing but an app vhost, and a label the edge does not route is still a 404
+   * rather than an open door.
    */
   Optional<List<String>> anonymousReadApps();
 

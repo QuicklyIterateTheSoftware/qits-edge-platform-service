@@ -26,7 +26,7 @@ import org.jboss.logging.Logger;
  *
  * <p><b>What this does not do</b> is still most of what makes it worth having. It holds no route
  * table beyond the deployment projection and application list, rewrites no path, reads no body, and
- * serves nothing of its own but {@code /q}.
+ * serves nothing of its own but {@code /q} and {@code /main-navigation}.
  *
  * <p><b>A name reaches a service two ways now.</b> {@code qits.edge.apps} is the configured one and
  * is a deployment fact — the machine vhosts, and the auth attributes that go with them. The
@@ -34,6 +34,11 @@ import org.jboss.logging.Logger;
  * {@code <app>.<env>.<domain>} then serves that service's SPA at {@code /} and every wire route it
  * owns. They are the same kind of vhost, so a request to either is gated per request rather than
  * per plane: a machine credential, then a browser session, then the reads the deployment opened.
+ *
+ * <p><b>The environment's own name is a door, and a door serves nothing.</b> {@code <env>.<domain>}
+ * answers {@code GET /} with a redirect to the projects host and 404s every other path — see {@link
+ * #door}. It routes nothing, gates nothing and proxies nothing, so a service is reachable on its
+ * own name alone.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
  * or response body and forwards a WebSocket upgrade by default, so the platform's interactive
@@ -103,7 +108,7 @@ public class EdgeRouter {
    */
   private record Target(HostEnvironments.Route route, EdgeRoutes.ServiceHost host) {
 
-    /** Whether this name reaches ONE service rather than the environment's whole path space. */
+    /** Whether this name reaches a service. False is the environment vhost, which is the door. */
     boolean service() {
       return route.toApp() || host != null;
     }
@@ -224,38 +229,12 @@ public class EdgeRouter {
       return;
     }
 
-    if (!target.service() && redirected(request, target.environment())) {
+    if (!target.service()) {
+      door(request, target.environment());
       return;
     }
 
-    if (target.service()) {
-      serviceGate(request, target);
-      return;
-    }
-
-    if (sessions.enabled()) {
-      // The environment vhost is the one a browser types with no application in mind, so it is the
-      // one whose gate has no machine plane behind it at all.
-      gate(request, target);
-      return;
-    }
-
-    Future<String> checked = auth.check(target.route(), request);
-    if (!checked.isComplete()) {
-      // The check crossed an event-loop boundary — a JWKS fetch. Hold the inbound body until there
-      // is somewhere to send it; vertx-http-proxy pauses and resumes the request itself, so handing
-      // it a paused one is the safe state to be in either way.
-      request.pause();
-    }
-    checked
-        .onSuccess(rejection -> dispatch(request, target, rejection))
-        .onFailure(
-            failure -> {
-              LOG.errorf(failure, "could not check the credential on %s", authority(request));
-              // A validator that cannot answer denies. The alternative is an outage of the identity
-              // provider becoming an outage of the auth gate, which is the wrong way round.
-              auth.challenge(request, "the credential could not be checked");
-            });
+    serviceGate(request, target);
   }
 
   /**
@@ -309,63 +288,42 @@ public class EdgeRouter {
   }
 
   /**
-   * The two conveniences on the environment vhost, and both are keyed on projection data alone.
+   * The environment's own name, which is a door and nothing else.
    *
-   * <p>A person who typed or bookmarked {@code dev.example.com/ci/runs/7} is sent to {@code
-   * ci.dev.example.com/runs/7}, so that a flipped service has ONE address rather than two — the SPA
-   * behind it now builds every link against {@code /}. Only a navigation is moved: a fetch or a
-   * socket to the old path keeps working, which is what makes the flip safe to make one service at
-   * a time. An API and a management path are never moved: {@code /ci/api} is where the SPA's own
-   * XHRs go, and moving one would cost it its origin.
+   * <p><b>It serves no path.</b> Every service is reached on its own name, so a route, an API, a
+   * wire protocol or a login page offered here would be a second address for something that already
+   * has one — and a second address is a second origin, a second cookie scope and a second thing to
+   * keep in step. There is no gate either, because there is nothing behind it to gate.
    *
-   * <p>And the environment's own name is a door rather than a page: it goes to qits-projects' host
-   * once the projection knows one. Until then this answers nothing and the request takes the path
-   * it always took.
-   *
-   * @return true when the request has been answered here
+   * <p>What is left is the one thing a door is for: {@code GET /} goes to qits-projects' host, so
+   * an anonymous visitor typing the environment's name lands on the login through the host that
+   * owns it. The edge's own {@code /q} and {@code /main-navigation} are answered before this.
    */
-  private boolean redirected(HttpServerRequest request, String environment) {
-    if (request.method() != HttpMethod.GET) {
-      return false;
-    }
-    if (request.path().equals("/")) {
-      EdgeRoutes.ServiceHost projects = routes.projectsHost(environment);
-      if (projects == null) {
-        return false;
-      }
+  private void door(HttpServerRequest request, String environment) {
+    EdgeRoutes.ServiceHost projects = routes.projectsHost(environment);
+    boolean read = request.method() == HttpMethod.GET || request.method() == HttpMethod.HEAD;
+    if (read && request.path().equals("/") && projects != null) {
       redirect(request, authorityOf(request).hostOrigin(projects.host()) + "/");
-      return true;
+      return;
     }
-    if (!EdgeSessions.isNavigation(
-        request.method(),
-        request.getHeader(EdgeSessions.FETCH_MODE),
-        request.getHeader(HttpHeaders.ACCEPT))) {
-      return false;
-    }
-    EdgeEndpoint endpoint = routes.resolve(environment, request.path());
-    if (endpoint == null) {
-      return false;
-    }
-    EdgeRoutes.ServiceHost host = routes.applicationHost(environment, endpoint.application());
-    if (host == null || !host.primaryPath().equals(endpoint.path())) {
-      // Either the application has not been flipped, or this is one of its other root routes —
-      // /v2, /git, /bootstrap-git. A wire route is nobody's bookmark and keeps its path.
-      return false;
-    }
-    String rest = request.uri().substring(endpoint.path().length());
-    if (below(rest, "/api") || below(rest, "/q")) {
-      return false;
-    }
-    redirect(
-        request,
-        authorityOf(request).hostOrigin(host.host())
-            + (rest.isEmpty() || rest.startsWith("?") ? "/" + rest : rest));
-    return true;
-  }
-
-  /** Whether what is left of a path after its segment is that segment's own {@code prefix}. */
-  private static boolean below(String rest, String prefix) {
-    return rest.equals(prefix) || rest.startsWith(prefix + "/") || rest.startsWith(prefix + "?");
+    // Once per request, at INFO: this is how anything still dialling the door is found. The door
+    // answered the whole platform until the per-service hosts landed, so a caller that has not
+    // moved is a bug somewhere else and needs a name in a log.
+    LOG.infof(
+        "the door serves nothing: %s %s on %s",
+        request.method(), request.path(), authority(request));
+    request
+        .response()
+        .setStatusCode(404)
+        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+        .end(
+            "This name is the environment door and serves nothing. Every service is on its own"
+                + " name, `<app>."
+                + authorityOf(request).authority()
+                + "`.\n"
+                + (projects == null
+                    ? ""
+                    : "Start at " + authorityOf(request).hostOrigin(projects.host()) + "\n"));
   }
 
   private static void redirect(HttpServerRequest request, String location) {
@@ -455,8 +413,7 @@ public class EdgeRouter {
         && target.host() != null) {
       EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
       if (endpoint != null && endpoint.application().equals(target.host().application())) {
-        // Nobody vouched for this caller, so no identity may arrive upstream — the same strip the
-        // environment vhost's anonymous path always did.
+        // Nobody vouched for this caller, so no identity may arrive upstream.
         EdgeHeaders.applyIdentity(request.headers(), null);
         proxy(request, target, null);
         return;
@@ -507,79 +464,6 @@ public class EdgeRouter {
       return;
     }
     auth.challenge(request, "no bearer token");
-  }
-
-  /**
-   * The gated request of the user-authentication plan, in the order the plan sets out: a machine
-   * credential, then a session cookie, then an anonymous prefix, then a refusal. Step 1 — dropping
-   * every inbound {@code X-Qits-*} — is {@link #proxy}'s, which is the single point any of these
-   * paths can reach an upstream through.
-   *
-   * <p>Reached only while {@link EdgeSessions#enabled()}, so with the flag off not one line of it
-   * runs and the request takes exactly the path it took before this existed.
-   */
-  private void gate(HttpServerRequest request, Target target) {
-    if (EdgeAuth.carriesCredential(request)) {
-      // CI dialing through the gateway, a curl with the workstation pair, a git push: the session
-      // gate is a third acceptable credential, never a replacement for these. Checked in full even
-      // though this vhost's own switch may not demand one — an unchecked Authorization header would
-      // otherwise be a way past the whole gate.
-      Future<String> checked = auth.checkCredential(target.route(), request);
-      if (!checked.isComplete()) {
-        request.pause();
-      }
-      checked
-          .onSuccess(rejection -> dispatch(request, target, rejection))
-          .onFailure(
-              failure -> {
-                LOG.errorf(failure, "could not check the credential on %s", authority(request));
-                auth.challenge(request, "the credential could not be checked");
-              });
-      return;
-    }
-
-    String cookie = sessions.cookie(request);
-    if (cookie == null) {
-      unauthenticated(request, target);
-      return;
-    }
-    Future<EdgeSessions.Session> introspected = sessions.introspect(cookie);
-    if (!introspected.isComplete()) {
-      // The same reason as the credential check above: the answer comes from idp, over a socket.
-      request.pause();
-    }
-    introspected
-        .onSuccess(
-            session -> {
-              if (session == null) {
-                unauthenticated(request, target);
-                return;
-              }
-              proxy(request, target, session);
-            })
-        .onFailure(
-            failure -> {
-              LOG.errorf(failure, "could not introspect a session for %s", authority(request));
-              unauthenticated(request, target);
-            });
-  }
-
-  /**
-   * What happens to a request with no usable session: the anonymous prefixes first, then the
-   * refusal.
-   *
-   * <p><b>The order matters and it is not the plan's.</b> The plan lists the cookie step before the
-   * anonymous one, which is right for a cookie that works — but a browser holding a session idp has
-   * since revoked would then be refused at {@code /idp/login} and redirected to {@code /idp/login},
-   * forever. The prefix is what a caller with no usable credential is entitled to, so it answers
-   * every one of them.
-   */
-  private void unauthenticated(HttpServerRequest request, Target target) {
-    if (sessions.anonymous(request.path())) {
-      proxy(request, target, null);
-      return;
-    }
-    sessions.refuse(request, loginOrigin(request, target.environment()));
   }
 
   /**
@@ -636,13 +520,12 @@ public class EdgeRouter {
    * has passed through this method, so what it does is done always.
    */
   private void proxy(HttpServerRequest request, Target target, EdgeSessions.Session session) {
-    if (target.service() && session == null) {
+    if (session == null) {
       // A parent-domain browser session reaches every sibling name by browser design. This request
       // is not using one — it is a machine's, or a read the deployment opened — so the cookie is
       // removed before the service sees it; unrelated application cookies remain intact.
       EdgeHeaders.stripCookie(request.headers(), sessions.cookieName());
-    }
-    if (sessions.enabled() && (!target.service() || session != null)) {
+    } else {
       // Strip, then assert — see EdgeHeaders.applyIdentity, where both halves live in one method on
       // purpose. On the ordinary path the proxy copies these headers upstream; on an upgrade it
       // forwards this same map, so one call covers a path the interceptor chain never sees.
@@ -664,20 +547,10 @@ public class EdgeRouter {
       endpointProxy(host.upstream()).handle(request);
       return;
     }
-    if (target.route().toApp()) {
-      // Configured, and its deployment has published no host of its own: the whole name is one
-      // service exactly as it was before the projection carried any.
-      appProxies.get(target.route().app() + "." + target.environment()).handle(request);
-      return;
-    }
-    // Deployment events own environment-vhost path routing. Admission above has already proved the
-    // startup replay reached qits-events' head, so no compatibility fallback may invent a route.
-    EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
-    if (endpoint != null) {
-      endpointProxy(endpoint.upstream()).handle(request);
-      return;
-    }
-    unknownPath(request, target.environment());
+    // Only a service target reaches this method, and a service with no published host is a
+    // CONFIGURED vhost: the whole name is one service, exactly as it was before the projection
+    // carried any.
+    appProxies.get(target.route().app() + "." + target.environment()).handle(request);
   }
 
   /**
@@ -691,9 +564,9 @@ public class EdgeRouter {
    * protocols whose names several services legitimately answer: qits-artifacts and the pull-through
    * mirror both speak {@code /v2}, and only one of them can own that path in a projection whose
    * paths are unique per environment. Routing it everywhere would send {@code mirror.dev/v2/} at
-   * the registry and break the mirror. So on a service's own name a secondary route falls through
-   * to that service, exactly like a path nobody declared — and it keeps working on the environment
-   * vhost, where paths are the whole routing rule.
+   * the registry and break the mirror. So a secondary route falls through to the service whose name
+   * this is, exactly like a path nobody declared — and it is reached on its OWNER's name, which is
+   * the only place it now exists.
    *
    * <p>A bare {@code /} never travels either, whether or not it is somebody's primary route: it is
    * the catch-all of whichever application declared it, and on this name the catch-all is the
@@ -740,19 +613,6 @@ public class EdgeRouter {
                 + " — the environment `"
                 + route.environment()
                 + "` was read from the name and is fine.\n");
-  }
-
-  private void unknownPath(HttpServerRequest request, String environment) {
-    request
-        .response()
-        .setStatusCode(404)
-        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
-        .end(
-            "No active deployment endpoint in environment `"
-                + environment
-                + "` matches `"
-                + request.path()
-                + "`.\n");
   }
 
   /**
