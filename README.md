@@ -99,8 +99,8 @@ wins over one at position 0, so `staging.prod.example.com` is *application `stag
 environment name is a coincidence nobody arranges.
 
 **The environment label is optional for the default environment.** That environment's door is the
-apex — it is where a browser lands and where the login page lives — so `ci.example.com` is its ci
-service, and `ci.dev.example.com` stays the long spelling of the same place. Only a **known**
+apex — it is where a browser lands — so `ci.example.com` is its ci service, `idp.example.com` is
+where the login page is, and `ci.dev.example.com` stays the long spelling of the same place. Only a **known**
 application label reads this way: configured in `qits.edge.apps`, or published by a deployment in
 the default environment. The apex itself is never one, and an unknown first label is not either.
 
@@ -263,10 +263,10 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on the environment vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
-| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The sole WebAuthn/login origin; domain bootstrap sets the apex HTTPS origin |
-| `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent |
+| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The environment **door**: what the default environment's names are derived from, and the login origin's fallback |
+| `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
 | `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Browser return authorities. An entry may be `*.<authority>`, which matches exactly ONE extra label — `*.dev.example.com` covers every service's own name and refuses `a.b.dev.example.com` |
-| `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all |
+| `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the environment vhost and on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
 | `qits.edge.sessions.stale-grace-ms` | `QITS_EDGE_SESSIONS_STALE_GRACE_MS` | `60000` | How long a cached session outlives an **unreachable** idp |
@@ -417,8 +417,16 @@ With the flag on, a request to `$env.$domain` is decided like this:
 4. a path under `/idp/` is proxied anonymously, because the login page has to be reachable by
    somebody who cannot log in yet;
 5. anything else is refused: a **navigation** (`Sec-Fetch-Mode: navigate`, or a `GET` accepting
-   `text/html`) gets `302` to the canonical apex `/idp/login`, carrying its configured return host
-   and path; everything else gets `401`.
+   `text/html`) gets `302` to `/idp/login` **on the host of whichever deployment owns that route** —
+   `https://idp.example.com/idp/login` — carrying its configured return host and path; everything
+   else gets `401`.
+
+**The login page lives on idp's own name, not on the door.** The origin is read off the deployment
+projection per request: whoever owns `login-path` and publishes a host. `canonical-origin` cannot
+follow it, because it is also the authority every default-environment name is derived from — so it
+stays the door, and is the fallback while no deployment has published a host for the login path.
+idp is a platform service deployed once, so an environment that owns no route for the path asks the
+default environment before falling back.
 
 ### A service's own name, gated per request
 
@@ -433,7 +441,10 @@ same thing — is decided per request rather than per plane:
    the environment vhost. The identity headers are asserted and **the cookie is kept**: the service
    behind the name is an ordinary qits service and the browser's next request carries it too;
 3. a caller holding neither still gets that app's **anonymous reads** (`anonymous-read-apps`), so
-   `docker pull`, `npm install` and `git clone` work on exactly the names they work on today;
+   `docker pull`, `npm install` and `git clone` work on exactly the names they work on today — and,
+   on the name that **owns** them, the `anonymous-prefixes`, which is what serves `/idp/login` on
+   `idp.dev.example.com`. Every other host refuses that prefix: it opens one service, not a path on
+   every name;
 4. anything left is refused in the shape the caller can act on: a navigation gets the login
    redirect, and everything else gets the `WWW-Authenticate` challenge — `docker` on `/v2/` above
    all, which acts on the realm and would give up without it.
@@ -456,10 +467,11 @@ them would be a second copy of the deployment's application list; the wildcard i
 follows it. It is not a suffix check: `a.b.dev.example.com` is a different site to a browser and is
 refused.
 
-**A dead cookie still reaches `/idp/`.** The prefix answers every caller with no usable credential,
-not only the ones carrying none — otherwise a browser holding a revoked session would be redirected
-to a login page it is refused at, forever. This is the one place the order differs from the plan's,
-and the reason is that loop.
+**A dead cookie still reaches `/idp/`**, on the environment vhost and on idp's own host alike. The
+prefix answers every caller with no usable credential, not only the ones carrying none — otherwise a
+browser holding a revoked session would be redirected to a login page it is refused at, forever.
+This is the one place the order differs from the plan's, and the reason is that loop. The refused
+cookie does not travel: the request is not using it.
 
 **A 401 here carries no `WWW-Authenticate`**, unlike an application vhost's. A `Basic` challenge
 pops the browser's own credential dialog on every background fetch a logged-out tab makes, and the

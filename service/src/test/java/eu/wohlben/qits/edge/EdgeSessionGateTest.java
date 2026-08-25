@@ -105,12 +105,110 @@ class EdgeSessionGateTest {
     StubGateways.restore();
   }
 
+  /**
+   * Take the login page's own host away again, so the tests that prove the FALLBACK — the login at
+   * the canonical origin — run against an environment where no deployment publishes one.
+   */
+  @AfterEach
+  void withdrawIdpHost() {
+    routes.replace(
+        "dev",
+        IDP,
+        "session-test-idp-" + FRAME.incrementAndGet(),
+        java.time.Instant.EPOCH.plusSeconds(FRAME.get()),
+        EdgeRoutes.Snapshot.ofEndpoints(List.of()));
+  }
+
   @AfterAll
   static void close() {
     if (client != null) {
       client.close();
       client = null;
     }
+  }
+
+  // --- the login page's own host ----------------------------------------------------------------
+
+  @Test
+  void aRefusedNavigationIsSentToTheHostThatOWNSTheLoginPath() {
+    // The login moved off the door with every other service. The origin is read off the projection
+    // — whoever owns /idp/login and publishes a host — and never from the canonical origin, which
+    // is the door and stays the door.
+    publishIdpHost();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "ci.dev.example.com",
+                "/runs/7",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "http://idp.dev.example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fruns%2F7",
+        answer.headers().get("location"));
+    assertNull(answer.line("upstream"), "it must not have reached the service");
+  }
+
+  @Test
+  void theEnvironmentVhostSendsAPersonToTheSameLoginPage() {
+    // One login page for the whole environment, whichever name the browser was typing.
+    publishIdpHost();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "dev.example.com",
+                "/projects/7",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "http://idp.dev.example.com/idp/login?return_host=dev.example.com&return_path=%2Fprojects%2F7",
+        answer.headers().get("location"));
+  }
+
+  @Test
+  void theLoginPageIsServedToAnybodyOnItsOwnHost() {
+    // Without this the redirect above is a loop: the page it points at is on a service host, whose
+    // gate refuses a caller with no session and sends them to the page they are already asking for.
+    publishIdpHost();
+    EdgeClient.Answer answer =
+        client().get("idp.dev.example.com", "/idp/login", Map.of("X-Qits-User", "admin"));
+    assertEquals(IDP_UPSTREAM, answer.line("upstream"));
+    assertNull(answer.upstreamHeader("X-Qits-User"), "a forged identity is stripped, none written");
+  }
+
+  @Test
+  void aDeadCookieReachesTheLoginPageOnItsOwnHostToo() {
+    // The same loop, one step later: a browser holding a session idp has revoked must be able to
+    // log in again. The refused cookie does not travel — the request is not using it.
+    publishIdpHost();
+    EdgeClient.Answer answer =
+        client().get("idp.dev.example.com", "/idp/login", cookieHeader("no-such-session"));
+    assertEquals(IDP_UPSTREAM, answer.line("upstream"));
+    assertEquals("theme=dark", answer.upstreamHeader("Cookie"));
+    assertNull(answer.upstreamHeader("X-Qits-User"));
+  }
+
+  @Test
+  void anotherHostStillRefusesTheLoginPrefix() {
+    // The prefix is anonymous on its OWNER's name, not on every name: /idp/ on ci is one service's
+    // routes offered by another, and ci refuses it like any path it has no credential for.
+    publishIdpHost();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "ci.dev.example.com",
+                "/idp/login",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "http://idp.dev.example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fidp%2Flogin",
+        answer.headers().get("location"));
+    assertNull(answer.line("upstream"), "it must not have reached a service");
   }
 
   // --- the refusal, in the two shapes a caller can act on ---------------------------------------
@@ -547,6 +645,31 @@ class EdgeSessionGateTest {
   }
 
   // --- helpers -----------------------------------------------------------------------------------
+
+  /** The application that owns {@code /idp/login} — a platform service, deployed once. */
+  private static final String IDP = "qits-platform-idp";
+
+  /** The stub standing in for it, which names itself in every answer. */
+  private static final String IDP_UPSTREAM = "registry-prod";
+
+  /** Frame order, so publishing and withdrawing the host cannot lose a race with itself. */
+  private static final java.util.concurrent.atomic.AtomicLong FRAME =
+      new java.util.concurrent.atomic.AtomicLong();
+
+  /** idp as it will be deployed: the login route, and its own name to serve it from. */
+  private void publishIdpHost() {
+    String upstream =
+        ConfigProvider.getConfig().getValue("qits.edge.apps.registry.hosts.prod", String.class);
+    routes.replace(
+        "dev",
+        IDP,
+        "session-test-idp-" + FRAME.incrementAndGet(),
+        java.time.Instant.EPOCH.plusSeconds(FRAME.get()),
+        new EdgeRoutes.Snapshot(
+            List.of(new EdgeEndpoint("dev", IDP, "/idp", Upstream.parse(upstream, 8080))),
+            "idp",
+            List.of()));
+  }
 
   private static long cacheTtlMs() {
     return ConfigProvider.getConfig().getValue("qits.edge.sessions.cache-ttl-ms", Long.class);
