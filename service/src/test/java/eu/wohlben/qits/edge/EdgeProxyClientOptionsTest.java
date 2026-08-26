@@ -48,4 +48,32 @@ class EdgeProxyClientOptionsTest {
     HttpClientOptions options = EdgeRouter.proxyClientOptions(5000);
     assertEquals(true, options.isKeepAlive());
   }
+
+  @Test
+  void theWaitQueueIsBoundedSoAnExhaustedPoolFailsInsteadOfHangingSilently() {
+    // Vert.x defaults the wait queue to unbounded. With 64 slots gone — the leak this bound
+    // backstops held all 64 for a day — every further request to that origin queued forever with
+    // nothing logged: the whole vhost hung, plain document GETs included. Bounded, the excess
+    // fails immediately and the origin provider's log line names the origin.
+    assertEquals(256, EdgeRouter.proxyClientOptions(5000).getMaxWaitQueueSize());
+  }
+
+  @Test
+  void anOriginRequestIsBoundedWhileItWaitsForAPoolSlot() {
+    // RequestOptions.setConnectTimeout bounds the whole acquisition, pool wait included — the
+    // client options' connect timeout only bounds the TCP connect once a slot is free. Without
+    // this, a request that got INTO the bounded queue would still wait there indefinitely.
+    assertEquals(
+        EdgeRouter.ACQUIRE_TIMEOUT_MS,
+        EdgeRouter.originRequestOptions(new Upstream("gateway", 8080)).getConnectTimeout());
+  }
+
+  @Test
+  void anOriginRequestCarriesTheFixedAddress() {
+    // The same SSRF posture as the proxies' registration: the server address is the configured
+    // upstream's, set before any request exists, and no client-supplied character reaches it.
+    var options = EdgeRouter.originRequestOptions(new Upstream("gateway", 8080));
+    assertEquals("gateway", options.getServer().host());
+    assertEquals(8080, options.getServer().port());
+  }
 }

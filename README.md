@@ -189,6 +189,17 @@ machine token are both answered `404` like any other request.
   layer pushes and chunked responses all pass through. `EdgeRoutingTest` times the first chunk of a
   slow response, which is the only assertion that catches a buffering regression.
 - **Forwards WebSocket upgrades**, which is what carries the platform's interactive PTY terminals.
+  Upgrades are the edge's **own** path, `EdgeWebSocketUpgrade`, not `vertx-http-proxy`'s built-in
+  one: under Quarkus the inbound request reaches the proxy already read, its upgrade path then
+  crashed mid-handshake — after the upstream had accepted — and every attempt leaked one upstream
+  pool connection, neither closed nor returned. At the pool's 64 the whole origin hung, plain GETs
+  included, with nothing logged. The edge's path never registers a body handler on the handshake
+  (a WebSocket client sends nothing before the `101`), closes the upstream connection on every
+  failure after acquisition, and answers a refused upgrade with the upstream's own status.
+  Saturation is bounded and visible now, whatever causes it: the per-origin pool (64) fronts a
+  bounded wait queue (256) and every origin acquisition carries a 30 s bound, so exhaustion answers
+  fast — 503 on the upgrade path, 502 through the proxy — with a WARN line naming the origin,
+  instead of queueing forever with nothing logged.
 - **Keeps the client's `Host`.** `vertx-http-proxy` leaves a proxied request's authority unset and
   the client then fills `Host` in from the socket it opened, so without the fix in `EdgeHeaders`
   every request would reach the gateway claiming to be for `prod-qits-gateway:8080`. Redirects,
@@ -225,12 +236,12 @@ machine token are both answered `404` like any other request.
 
 ### The one known gap: `Host` on a WebSocket handshake
 
-`vertx-http-proxy` short-circuits an upgrade before installing its interceptor chain and rebuilds
-the handshake with the client's own `Host` dropped, and there is no hook before it. So an upstream
-reads a socket's original host name from **`X-Forwarded-Host`**, which the edge does set on that
-path, and not from `Host`. It costs nothing today, because a handshake's `Host` is a protocol
-formality rather than something an environment gateway routes on — but if that ever changes, this is
-where to look.
+The upgrade path rebuilds the handshake with the client's own `Host` dropped — deliberately kept
+from `vertx-http-proxy`'s behaviour when `EdgeWebSocketUpgrade` replaced it, so upstreams see no
+change. An upstream therefore reads a socket's original host name from **`X-Forwarded-Host`**,
+which the edge does set on that path, and not from `Host`. It costs nothing today, because a
+handshake's `Host` is a protocol formality rather than something an environment gateway routes on —
+but if that ever changes, this is where to look.
 
 ## Configuration
 

@@ -44,8 +44,9 @@ import java.util.regex.Pattern;
  * <p><b>The response direction, on the same chain as {@link EdgeHeaders}.</b> That interceptor
  * states it touches nothing but the request, and it still does; this is a second interceptor rather
  * than a fourth job inside it, so neither class has to qualify what it says about itself. A
- * WebSocket upgrade short-circuits inside {@code vertx-http-proxy} before the chain is installed
- * and so never reaches this — correctly, a handshake carries no cache header to correct.
+ * WebSocket upgrade goes through {@code EdgeWebSocketUpgrade}, the edge's own path with no
+ * interceptor chain, and so never reaches this — correctly, a handshake carries no cache header to
+ * correct.
  *
  * <p>Stateless, but constructed per proxy like {@link EdgeHeaders}, so the two are wired the same
  * way at both call sites in {@link EdgeRouter}.

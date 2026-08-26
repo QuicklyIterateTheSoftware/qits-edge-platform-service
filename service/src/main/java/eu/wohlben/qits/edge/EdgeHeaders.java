@@ -99,8 +99,8 @@ final class EdgeHeaders implements ProxyInterceptor {
    *
    * <p><b>Called on the INBOUND request's map</b>, by {@link EdgeRouter} at the single point where
    * a request leaves this process for an upstream. That is what covers the two paths at once: an
-   * ordinary proxied request copies these headers, and a WebSocket upgrade — which short-circuits
-   * inside {@code vertx-http-proxy} before the interceptor chain is installed, so {@link
+   * ordinary proxied request copies these headers, and a WebSocket upgrade — the edge's own path,
+   * {@code EdgeWebSocketUpgrade}, which never installs the interceptor chain, so {@link
    * #handleProxyRequest} never runs for it — is forwarded from this same map. An upgrade was the
    * way a forged {@code X-Qits-User} reached the gateway through the front door before this
    * existed.
@@ -171,16 +171,16 @@ final class EdgeHeaders implements ProxyInterceptor {
    * Job 2 on a request's own header map.
    *
    * <p>Called directly by {@link EdgeRouter} for a WebSocket handshake, which never reaches the
-   * interceptor chain: {@code vertx-http-proxy}'s {@code ReverseProxy.handle} branches to its
-   * upgrade path and returns before installing it. Without this call an upgraded connection — every
-   * interactive terminal on the platform — would arrive at the environment gateway with no record
-   * of who opened it.
+   * interceptor chain: an upgrade goes through {@code EdgeWebSocketUpgrade}, the edge's own path,
+   * which forwards the inbound request's headers as this method leaves them. Without this call an
+   * upgraded connection — every interactive terminal on the platform — would arrive at the
+   * environment gateway with no record of who opened it.
    *
-   * <p><b>Job 1 has no equivalent on that path</b>, and the gap is worth knowing: the upgrade path
-   * rebuilds the handshake with the client's own {@code Host} dropped, and there is no hook before
-   * it. So an upstream reads a socket's original host name from {@code X-Forwarded-Host}, not from
-   * {@code Host}. It costs nothing today because a handshake's Host is a protocol formality rather
-   * than something an environment gateway routes on.
+   * <p><b>Job 1 has no equivalent on that path</b>, and the gap is deliberate: the upgrade path
+   * rebuilds the handshake with the client's own {@code Host} dropped, exactly as {@code
+   * vertx-http-proxy}'s did before it. So an upstream reads a socket's original host name from
+   * {@code X-Forwarded-Host}, not from {@code Host}. It costs nothing today because a handshake's
+   * Host is a protocol formality rather than something an environment gateway routes on.
    */
   static void applyForwarded(MultiMap headers, HttpServerRequest inbound) {
     SocketAddress remote = inbound.remoteAddress();

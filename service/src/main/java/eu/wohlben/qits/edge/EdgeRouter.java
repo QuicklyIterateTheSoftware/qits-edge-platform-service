@@ -8,10 +8,13 @@ import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.HostAndPort;
+import io.vertx.core.net.SocketAddress;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.httpproxy.HttpProxy;
+import io.vertx.httpproxy.OriginRequestProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -41,9 +44,10 @@ import org.jboss.logging.Logger;
  * own name alone.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
- * or response body and forwards a WebSocket upgrade by default, so the platform's interactive
- * terminals, its SSE channels, its {@code git clone}s and its OCI layer pushes all pass through
- * unchanged. A JAX-RS layer would buffer and re-encode all four.
+ * or response body, so the platform's SSE channels, its {@code git clone}s and its OCI layer pushes
+ * all pass through unchanged; a WebSocket upgrade — every interactive terminal — is spliced by
+ * {@link EdgeWebSocketUpgrade}, the edge's own path, for the reasons written there. A JAX-RS layer
+ * would buffer and re-encode all four.
  *
  * <p><b>Security posture.</b> The upstream host and port come from configuration or from the
  * deployment projection only. A Host name selects an <i>index into a fixed list</i> and never
@@ -119,6 +123,17 @@ public class EdgeRouter {
   }
 
   /**
+   * How long a request may wait for a pool slot to an origin before it fails instead. Distinct from
+   * the TCP connect timeout: that one bounds reaching a live upstream, this one bounds queueing
+   * behind a full pool — {@code RequestOptions.setConnectTimeout} covers the whole acquisition,
+   * wait included. Generous, because a queued request behind a real burst (a {@code docker push}
+   * holding many slots for minutes) used to wait indefinitely and win; but bounded, because an
+   * indefinitely hanging vhost with nothing logged is how a leak stayed invisible for a day. See
+   * {@code EdgeWebSocketUpgrade} for the leak this backstops.
+   */
+  static final int ACQUIRE_TIMEOUT_MS = 30_000;
+
+  /**
    * The proxy client's options, built here rather than inline so the values below can be asserted
    * without booting the application — see {@code EdgeProxyClientOptionsTest}.
    *
@@ -133,6 +148,11 @@ public class EdgeRouter {
         // holding its connection for minutes — starve that whole environment with nothing
         // logged to say why. The same number, for the same reason, as qits-gateway's.
         .setMaxPoolSize(64)
+        // The wait queue is bounded too, where Vert.x defaults to unbounded. An exhausted pool
+        // used to queue every further request forever — the whole vhost hung, nothing logged.
+        // Beyond this depth callers get an immediate failure, which the proxy answers as a 502;
+        // the acquisition timeout on each origin request bounds the wait of those still queued.
+        .setMaxWaitQueueSize(256)
         // Stated rather than inherited. Zero, no client-side idle timeout, is already the
         // default and has to stay: quarkus.http.idle-timeout keeps the inbound half of a
         // long exchange alive, and a timeout here would sever exactly what that exists for
@@ -141,11 +161,25 @@ public class EdgeRouter {
         .setConnectTimeout(connectTimeoutMs);
   }
 
+  /**
+   * One origin request, as both transports acquire it: the fixed address — never a character of a
+   * client's — and the acquisition bound. Static for the same reason as {@link
+   * #proxyClientOptions}: {@code EdgeProxyClientOptionsTest} asserts it without a boot.
+   */
+  static RequestOptions originRequestOptions(Upstream upstream) {
+    return new RequestOptions()
+        .setServer(SocketAddress.inetSocketAddress(upstream.port(), upstream.host()))
+        .setConnectTimeout(ACQUIRE_TIMEOUT_MS);
+  }
+
+  private EdgeWebSocketUpgrade webSocketUpgrade;
+
   void init(@Observes Router router) {
     hostEnvironments =
         HostEnvironments.of(
             config.environments(), config.defaultEnvironment(), config.apps().keySet());
     client = vertx.createHttpClient(proxyClientOptions(5_000));
+    webSocketUpgrade = new EdgeWebSocketUpgrade(client);
 
     for (String environment : hostEnvironments.environments()) {
       // Every application, in every environment. The app entry is one pattern and the environment
@@ -160,12 +194,27 @@ public class EdgeRouter {
   }
 
   private void registerApp(String key, Upstream upstream) {
-    appProxies.put(
-        key,
-        HttpProxy.reverseProxy(client)
-            .origin(upstream.port(), upstream.host())
-            .addInterceptor(new EdgeHeaders())
-            .addInterceptor(new EdgeCacheControl()));
+    appProxies.put(key, reverseProxy(upstream));
+  }
+
+  private HttpProxy reverseProxy(Upstream upstream) {
+    return HttpProxy.reverseProxy(client)
+        .origin(origin(upstream))
+        .addInterceptor(new EdgeHeaders())
+        .addInterceptor(new EdgeCacheControl());
+  }
+
+  /**
+   * {@code .origin(port, host)} with two additions the built-in provider lacks: the acquisition
+   * bound of {@link #originRequestOptions}, and a log line. An exhausted pool used to fail with
+   * nothing anywhere naming the origin that was full — the proxy answers the caller a 502 either
+   * way, but the operator reads this.
+   */
+  private OriginRequestProvider origin(Upstream upstream) {
+    return context ->
+        client
+            .request(originRequestOptions(upstream))
+            .onFailure(failure -> LOG.warnf("no upstream connection to %s: %s", upstream, failure));
   }
 
   /** Where an unmatched Host name goes. */
@@ -196,6 +245,16 @@ public class EdgeRouter {
       // itself rather than about an environment behind it.
       rc.next();
       return;
+    }
+
+    if (isWebSocketUpgrade(request)) {
+      // Paused on arrival, before the first await below, and this is load-bearing: Quarkus hands
+      // over a ResumingRequestWrapper that resumes the underlying request as soon as anything
+      // registers a handler without pausing first — after which a handshake's GET, having no
+      // body, is read to its end. An upgrade must reach EdgeWebSocketUpgrade unread; a consumed
+      // request is what used to throw mid-upgrade in the proxy and leak the upstream connection.
+      // Every non-upgrade answer below ends a paused, bodyless request, which is harmless.
+      request.pause();
     }
 
     if (!projectionBootstrap.authoritative()) {
@@ -536,26 +595,40 @@ public class EdgeRouter {
       // forwards this same map, so one call covers a path the interceptor chain never sees.
       EdgeHeaders.applyIdentity(request.headers(), session);
     }
-    // A WebSocket upgrade short-circuits inside vertx-http-proxy before the interceptor chain is
-    // installed, so the forwarded headers have to be written onto the inbound request instead. See
-    // EdgeHeaders.applyForwarded.
     if (isWebSocketUpgrade(request)) {
+      // An upgrade never reaches the interceptor chain — it is the edge's own path, see
+      // EdgeWebSocketUpgrade — so the forwarded headers are written onto the inbound request,
+      // whose header map that path forwards. See EdgeHeaders.applyForwarded.
       EdgeHeaders.applyForwarded(request.headers(), request);
+      Upstream upstream = upstreamOf(request, target);
+      webSocketUpgrade.handle(request, upstream, originRequestOptions(upstream));
+      return;
     }
-    EdgeRoutes.ServiceHost host = target.host();
-    if (host != null) {
-      EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
-      if (endpoint != null && travels(target, endpoint, host)) {
-        endpointProxy(endpoint.upstream()).handle(request);
-        return;
-      }
-      endpointProxy(host.upstream()).handle(request);
+    if (target.host() != null) {
+      endpointProxy(upstreamOf(request, target)).handle(request);
       return;
     }
     // Only a service target reaches this method, and a service with no published host is a
     // CONFIGURED vhost: the whole name is one service, exactly as it was before the projection
     // carried any.
     appProxies.get(target.route().app() + "." + target.environment()).handle(request);
+  }
+
+  /**
+   * The upstream this request is for, one answer for both transports: the owning endpoint's when a
+   * route travels here, the published host's otherwise, and the configured app grid's for a vhost
+   * the projection has not claimed.
+   */
+  private Upstream upstreamOf(HttpServerRequest request, Target target) {
+    EdgeRoutes.ServiceHost host = target.host();
+    if (host != null) {
+      EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
+      if (endpoint != null && travels(target, endpoint, host)) {
+        return endpoint.upstream();
+      }
+      return host.upstream();
+    }
+    return appUpstream(config.apps().get(target.route().app()), target.environment());
   }
 
   /**
@@ -588,13 +661,7 @@ public class EdgeRouter {
   }
 
   private HttpProxy endpointProxy(Upstream upstream) {
-    return endpointProxies.computeIfAbsent(
-        upstream,
-        address ->
-            HttpProxy.reverseProxy(client)
-                .origin(address.port(), address.host())
-                .addInterceptor(new EdgeHeaders())
-                .addInterceptor(new EdgeCacheControl()));
+    return endpointProxies.computeIfAbsent(upstream, this::reverseProxy);
   }
 
   /**
