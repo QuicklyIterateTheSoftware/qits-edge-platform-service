@@ -338,6 +338,13 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
             .requestHandler(request -> answer(environment, request))
             .webSocketHandler(
                 socket -> {
+                  if (socket.path().endsWith("/refused")) {
+                    // An upstream that accepts the TCP leg and refuses the upgrade — the shape
+                    // that leaked a pool slot per attempt. See the leak regression in
+                    // EdgeRoutingTest.
+                    socket.reject(403);
+                    return;
+                  }
                   StringBuilder seen =
                       new StringBuilder("upstream=").append(environment).append('\n');
                   for (String name : REPORTED_HANDSHAKE_HEADERS) {

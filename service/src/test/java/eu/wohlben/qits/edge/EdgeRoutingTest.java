@@ -959,6 +959,46 @@ class EdgeRoutingTest {
     assertTrue(seen.lines().anyMatch("cookie=q_session=abc"::equals), seen);
   }
 
+  @Test
+  void aRefusedUpgradeAnswersTheUpstreamsOwnStatus() {
+    // The upstream said no; the caller learns what it said, not a generic 502 — a workspace
+    // service answering 403 on a terminal socket is an authorization answer, not an edge fault.
+    activateCi();
+    EdgeClient.Answer answer =
+        client().send(HttpMethod.GET, "ci.dev.example.com", "/terminal/refused", null, upgrade());
+    assertEquals(403, answer.status());
+  }
+
+  @Test
+  void aRefusedUpgradeReturnsItsPoolSlotEveryTime() {
+    // The production outage this guards: an upgrade that failed after the upstream had accepted it
+    // left its pool connection neither closed nor released — one slot per attempt, and the browser
+    // retried until all 64 were gone and every request to the origin, plain GETs included, queued
+    // forever. More refusals than the whole pool, then a plain GET: with a leak the attempts past
+    // 64 hang and this test times out rather than fails an assertion.
+    activateCi();
+    for (int attempt = 0; attempt < 70; attempt++) {
+      EdgeClient.Answer answer =
+          client().send(HttpMethod.GET, "ci.dev.example.com", "/terminal/refused", null, upgrade());
+      assertEquals(403, answer.status(), "attempt " + attempt);
+    }
+    EdgeClient.Answer plain = client().get("ci.dev.example.com", "/anything", token("dev"));
+    assertEquals("mirror-dev", plain.line("upstream"), "the origin must survive 70 refusals");
+  }
+
+  /**
+   * A complete handshake, sent raw: the JDK client of {@link EdgeClient#handshake} throws away the
+   * response of a refused upgrade, and these tests are about exactly that response.
+   */
+  private Map<String, String> upgrade() {
+    Map<String, String> headers = new java.util.HashMap<>(token("dev"));
+    headers.put("Upgrade", "websocket");
+    headers.put("Connection", "Upgrade");
+    headers.put("Sec-WebSocket-Key", "AAAAAAAAAAAAAAAAAAAAAA==");
+    headers.put("Sec-WebSocket-Version", "13");
+    return headers;
+  }
+
   // --- the edge's own surface ------------------------------------------------------------------
 
   @Test
