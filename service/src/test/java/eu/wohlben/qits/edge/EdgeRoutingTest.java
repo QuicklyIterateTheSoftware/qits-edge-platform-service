@@ -1170,11 +1170,15 @@ class EdgeRoutingTest {
   // ---------------------------------------------------------------------
 
   @Test
-  void aSessionCookieChangesNothingWhileTheGateIsOff() {
-    // qits.edge.sessions.enabled is off in this suite, which is the shipped default, and off means
-    // the edge of before the gate existed: no introspection and no identity written. `mirror` is
-    // the
-    // vhost whose reads are open, so the cookie meets the request that needs no credential at all.
+  void theGateBeingOffTurnsOnNoSessionMachineryButStillStripsAForgedIdentity() {
+    // qits.edge.sessions.enabled is off in this suite, which is the shipped default: no session
+    // introspection and no identity WRITTEN. What is off is the browser gate — not the reserved-
+    // prefix strip, which is orthogonal to it and unconditional. A client-supplied X-Qits-* is a
+    // forged identity whatever the gate's state, and the edge cannot assume a downstream tier will
+    // drop it — the reserved-namespace hygiene is its own to uphold on every path. `mirror` is the
+    // vhost whose reads are open, so the request needs no credential at all — and the forged
+    // headers
+    // on it still must not survive.
     int before = StubGateways.introspections();
     EdgeClient.Answer answer =
         client()
@@ -1191,18 +1195,23 @@ class EdgeRoutingTest {
 
     assertEquals(200, answer.status(), "a navigation is not redirected while the gate is off");
     assertEquals("mirror-dev", answer.line("upstream"));
-    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"), "no identity is rewritten");
-    assertEquals("qits:root", answer.upstreamHeader("X-Qits-Roles"));
+    assertNull(
+        answer.upstreamHeader("X-Qits-User"), "a forged identity is stripped, gate or no gate");
+    assertNull(answer.upstreamHeader("X-Qits-Roles"));
     assertEquals(before, StubGateways.introspections(), "and idp was never asked");
   }
 
   @Test
-  void aWebSocketUpgradeIsNotGatedEitherWhileTheGateIsOff() {
+  void aWebSocketUpgradeIsNotGatedButStillStripsAForgedIdentityWhileTheGateIsOff() {
     activateCi();
     Map<String, String> headers = new java.util.HashMap<>(token("dev"));
     headers.put("X-Qits-User", "whoever");
     String seen = client().handshake("ci.dev.example.com", "/terminal", headers);
-    assertTrue(seen.lines().anyMatch("x-qits-user=whoever"::equals), seen);
+    // The stub reports every reserved header slot as `name=value`, with `-` for absent — so the
+    // strip shows as `x-qits-user=-`, and what must never appear is the forged value.
+    assertTrue(
+        seen.lines().noneMatch("x-qits-user=whoever"::equals),
+        "a forged identity on an upgrade is stripped even with the gate off:\n" + seen);
   }
 
   // --- the anonymous-read exemption, per app ----------------------------------------------------
