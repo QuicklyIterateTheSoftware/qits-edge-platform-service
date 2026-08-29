@@ -1,0 +1,123 @@
+# The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
+# service/target/userstories/ through ForwardAuthBootstrapIT — and the reports published as one docs
+# bundle, site @userflows/qits-platform-edge, version = the bare commit sha, branch riding as
+# artifacts metadata for discovery.
+#
+# NON-GATING BY DESIGN, which is why it is a separate file from ci-post-receive.yml: this run going
+# red must not cost the branch its image while "quality gate before merging" is still a decision to
+# be taken — when it is, these per-commit runs are what the gate reads. One run per push per branch,
+# collapsed to the newest tip under burst.
+#
+# THE STORAGE ID IS `qits-platform-edge`, both in the selection above and in the bundle name below,
+# and it is what ci-event-release.yml already selects on (`repository: { exact: qits-platform-edge }`).
+# Here the directory name and the storage id happen to agree — they do not in every sibling — so the
+# rule is stated rather than relied on: the name below is the storage id, not the checkout directory.
+#
+# WHAT THE STORY IS, and why this repository's is the one the whole fleet leans on. Half the platform's
+# CLAUDE.md files contain some version of the sentence "the edge asserts X-Qits-User / X-Qits-User-Id /
+# X-Qits-Roles and every service behind it believes them unconditionally". Every one of those services
+# tests the BELIEVING half against headers its own suite wrote. THIS is the repository where the
+# asserting half is true, and ForwardAuthBootstrapIT is the first proof of it against a LAUNCHED
+# artifact with the browser gate switched on: a stranger stamping the three headers herself is refused
+# in both shapes a caller can act on (the login redirect a browser follows, the WWW-Authenticate
+# challenge docker reads), and the same forgeries behind a real session arrive at the upstream
+# replaced by the identity idp vouched for — asserted on the UPSTREAM'S OWN RECORDINGS, which is what
+# makes it a fact about the bytes a service would have believed rather than about a status code. The
+# second story is the honest other half: the environment door serves nothing to anybody, an app-shaped
+# name nobody claims is a 404 rather than a fall-through, and this process's own health is never gated
+# and never proxied — because the container that binds the host's only published port must come up
+# before there is anyone to authenticate it to.
+#
+# THE GATE IS FLIPPED IN THE IT'S PROFILE, NOT HERE AND NOT IN THE SHIPPED CONFIG.
+# `qits.edge.sessions.enabled` ships FALSE on purpose — the gate landed before idp could issue a
+# session, so it is inert until a deployment turns it on — and the IT hands the launched process
+# `true` plus the idp client credential the startup check demands, as -D arguments on an artifact that
+# was already built. Nothing in the repository's shipped defaults moves.
+#
+# `user: build`, and NOT a switch inside the script: both halves of this run spawn zonky's embedded
+# postgres — the surefire suite for the routing projection and the claim ledger, and the IT for the
+# two databases it hands the launched artifact through the platform's generic resource triple —
+# initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed non-root user.
+# maven-base carries one (uid 1001), with cap-drop=ALL and no su to undo it, which nothing here wants.
+# The step containers are Alpine, which is why service/pom.xml names zonky's -alpine binaries as a
+# fourth arch; it already did before this rollout, and nothing had to be added. The `acme` module has
+# no test database and names none. qits-eventstream's pipeline is the measured precedent for all of it.
+#
+# NO QUINOA FLAG, unlike most siblings' copy of this file. `-Dquarkus.quinoa=false` is there to keep a
+# step with an EMPTY webui submodule from failing on it; this repository has no webui, no submodule and
+# no Quinoa extension at all — five runtime extensions, and the shortness of that list is the point of
+# this service (see service/pom.xml). A flag for an extension this build does not have would only read
+# as if it did.
+#
+# THE TWO IT FLAGS ARE THE OTHER HALF. `skipITs` is true in service/pom.xml and stays true, and this
+# repository does not opt its ITs back in from the pom the way qits-docs and qits-stt do — not because
+# there is a heavyweight sibling IT to keep out (ForwardAuthBootstrapIT is the only integration test
+# there is), but because of what it would do to the build a clone runs. README.md documents
+# `./mvnw verify` as "unit tests + the end-to-end proxy suite (no docker, no network)", and that build
+# is already the heaviest of its kind: the surefire half forks TWO JVMs, because EdgeSessionGateTest
+# needs a Quarkus of its own to prove the gate's other state, and spawns a real postgres. Adding a
+# launched front door plus a SECOND embedded postgres — failsafe forks its own JVM, so the suite's
+# cannot be reused — would change that build for everybody to run what this pipeline runs anyway.
+#
+# Naming the class keeps the opt-in to this pipeline and to these stories, and keeps the property's own
+# meaning ("run everything") intact for the `native` profile in service/pom.xml that now flips it:
+# `-DskipITs=false "-Dit.test=ForwardAuthBootstrapIT"`.
+#
+# NO REPAIR WAS NEEDED to make the two new test-scope jars resolve. This repository already carries
+# `.qits-maven-settings.xml` and a `qits-maven` <repositories> entry — qits-eventstream has come from
+# the platform registry since the edge grew a routing projection — and docker/Dockerfile already builds
+# with `-s .qits-maven-settings.xml`, `--network host` and the QITS_MAVEN_REPOSITORY_URL build-arg that
+# both image pipelines pass, so an image build resolves the test classpath there the same way it
+# already resolved that one. (`-DskipTests` skips test EXECUTION, not test COMPILATION, and
+# .dockerignore keeps src/ in the context, so both jars are fetched during an image build too; they are
+# small, and qits-userflows' transitive Playwright is a jar, not a browser — nothing downloads Chromium
+# unless a story asks for a Flow, and neither of these does.)
+#
+# Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. The bundle goes to
+# qits-artifacts and is read back by qits-docs, neither of which is this service. Two things here could
+# in principle close a loop and neither can: this service's own event bus is dark in the launched
+# process (`qits.eventstream.enabled=false`, with `qits.events.url` at a closed port), and its telemetry
+# is dark too (`quarkus.otel.sdk.disabled=true`) — both set by the IT's profile. The edge is also the
+# hop every one of those calls would travel THROUGH in a real deployment, which is the one extra reason
+# to be sure of it here. Publish-if-absent: events redeliver and docs versions are immutable, so 409 is
+# success (the qits-spa-ui-components release file's discipline).
+event: SCMPublishCommit
+when:
+  - repoId: { exact: qits-platform-edge }
+    suppressCi: { exact: "false" }
+checkout:
+  branch: branch
+  sha: sha
+steps:
+  - image: qits/build-images/maven-base:latest
+    user: build
+    timeout-seconds: 2400
+    script: |
+      set -eu
+      # The platform registry, exactly as qits-eventstream's step derives it: the pom's default
+      # names a host-published address unreachable from a step container, and the exact-id mirror
+      # in .qits-maven-settings.xml is what passes Maven's HTTP blocker.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        -DskipITs=false "-Dit.test=ForwardAuthBootstrapIT"
+
+      # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
+      # put it in every served URL. The path is service/target/userstories because the stories live
+      # in the one module that packages an artifact to boot; the `acme` module beside it is a plain
+      # library jar with no application in it.
+      tar -czf userstories.tgz -C service/target/userstories .
+
+      # Branch and commit ride as metadata (the docs store's exact-match discovery keys); the
+      # version is the sha itself, so a bundle URL never changes meaning.
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @userstories.tgz \
+        -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-platform-edge" \
+        "$QITS_DOCS_URL/@userflows/qits-platform-edge/-/$QITS_CI_SHA")
+      case "$status" in
+        201) echo "published userflows for qits-platform-edge@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows for qits-platform-edge@$QITS_CI_SHA already published — skipping" ;;
+        *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac
