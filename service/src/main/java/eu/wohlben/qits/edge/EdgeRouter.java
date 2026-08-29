@@ -472,8 +472,8 @@ public class EdgeRouter {
         && target.host() != null) {
       EdgeEndpoint endpoint = routes.resolve(target.environment(), request.path());
       if (endpoint != null && endpoint.application().equals(target.host().application())) {
-        // Nobody vouched for this caller, so no identity may arrive upstream.
-        EdgeHeaders.applyIdentity(request.headers(), null);
+        // Nobody vouched for this caller, so no identity may arrive upstream — proxy() strips the
+        // reserved namespace on every path now, so this needs no strip of its own.
         proxy(request, target, null);
         return;
       }
@@ -584,16 +584,23 @@ public class EdgeRouter {
    * has passed through this method, so what it does is done always.
    */
   private void proxy(HttpServerRequest request, Target target, EdgeSessions.Session session) {
+    // The reserved X-Qits-* namespace is stripped on EVERY path out of this process, and only a
+    // validated session's own identity is written back — both halves in one call, see
+    // EdgeHeaders.applyIdentity. A null session (a machine credential, or a read the deployment
+    // opened) strips and asserts nothing: its identity is in its own token, and a client-supplied
+    // X-Qits-User must never reach an upstream that trusts the prefix unconditionally. This used to
+    // strip only on the session branch, so a machine or anonymous request could forge an identity a
+    // forward-auth service behind the edge believed — the strip is the whole basis of that trust
+    // and
+    // cannot be conditional on there being a session to replace it with. On the ordinary path the
+    // proxy copies these headers upstream; on an upgrade it forwards this same map, so one call
+    // covers a path the interceptor chain never sees.
+    EdgeHeaders.applyIdentity(request.headers(), session);
     if (session == null) {
       // A parent-domain browser session reaches every sibling name by browser design. This request
       // is not using one — it is a machine's, or a read the deployment opened — so the cookie is
       // removed before the service sees it; unrelated application cookies remain intact.
       EdgeHeaders.stripCookie(request.headers(), sessions.cookieName());
-    } else {
-      // Strip, then assert — see EdgeHeaders.applyIdentity, where both halves live in one method on
-      // purpose. On the ordinary path the proxy copies these headers upstream; on an upgrade it
-      // forwards this same map, so one call covers a path the interceptor chain never sees.
-      EdgeHeaders.applyIdentity(request.headers(), session);
     }
     if (isWebSocketUpgrade(request)) {
       // An upgrade never reaches the interceptor chain — it is the edge's own path, see
