@@ -7,13 +7,13 @@
     <parent>
         <groupId>eu.wohlben</groupId>
         <artifactId>qits-platform-edge-parent</artifactId>
-        <version>2026.826.113907</version>
+        <version>2026.829.125433</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <groupId>eu.wohlben</groupId>
     <artifactId>qits-platform-edge</artifactId>
-    <version>2026.826.113907</version>
+    <version>2026.829.125433</version>
     <packaging>quarkus</packaging>
 
     <name>qits-platform-edge</name>
@@ -34,9 +34,47 @@
 
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <failsafe-plugin.version>${surefire-plugin.version}</failsafe-plugin.version>
         <spotless-plugin.version>2.44.5</spotless-plugin.version>
         <google-java-format.version>1.28.0</google-java-format.version>
         <qits.eventstream.version>2026.818.45652</qits.eventstream.version>
+
+        <!-- The user-story framework (TEST SCOPE ONLY): ForwardAuthBootstrapIT is written as
+             @UserStory methods, so the packaged forward-auth proof doubles as documentation —
+             steps, interactions and a sequence diagram emitted under service/target/userstories/,
+             published per commit by .config/qits/ci-event-userflows.yml. Published out of
+             libs/qits-userflows to the platform's own Maven repository, which is the same
+             `qits-maven` repository below that qits-eventstream already comes from — so nothing
+             about resolution changes and neither docker/Dockerfile nor either pipeline needed a
+             repair. The groupId is spelled out rather than ${project.groupId}: this repository's
+             own groupId is `eu.wohlben`, and the platform's shared jars are `eu.wohlben.qits`. -->
+        <qits.userflows.version>2026.828.153026</qits.userflows.version>
+        <!-- The recording service mocks the same IT boots against: a MockService standing in for
+             ONE upstream application behind a vhost — whose recordings are what make the header
+             claim assertable on the receiving end — and a second one standing in for
+             qits-platform-idp, which is where this service's browser half gets its answers.
+             Released out of libs/qits-integrations-quarkus. -->
+        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
+
+        <!-- INTEGRATION TESTS ARE OFF BY DEFAULT, and this repository now has both halves of that
+             sentence: a failsafe plugin bound below, and ForwardAuthBootstrapIT for it to run.
+             There was neither before.
+
+             It stays TRUE. README.md documents `./mvnw verify` as "unit tests + the end-to-end
+             proxy suite (no docker, no network)" from a clone of this repository alone, and that
+             build is already the heaviest of its kind here: the surefire half forks TWO JVMs —
+             EdgeSessionGateTest needs a Quarkus of its own, see the surefire executions below —
+             and spawns a real PostgreSQL. Opting `verify` into a launched front door plus a SECOND
+             embedded postgres (failsafe forks its own JVM, so the suite's cannot be reused) would
+             change that build, for everybody, to run what CI runs anyway.
+
+             .config/qits/ci-event-userflows.yml therefore names the class:
+             -DskipITs=false "-Dit.test=ForwardAuthBootstrapIT". The `native` profile below flips
+             the property wholesale, which keeps its plain meaning — run everything, against the
+             binary — and this IT earns its place there twice over: the edge SHIPS native, and a
+             GraalVM image is exactly where a lost reflection registration or a client built in a
+             class initialiser hides. -->
+        <skipITs>true</skipITs>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
         <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
@@ -188,6 +226,35 @@
             <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- The user-story framework: ForwardAuthBootstrapIT is written as @UserStory methods,
+                 so the packaged-boot proof doubles as documentation. Both its stories are
+                 browserless (an Interactions parameter and no Flow), so the transitive Playwright
+                 never launches anything and no browser is ever downloaded — which is what lets the
+                 userflow pipeline run in a step container with no Chromium in it. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-userflows</artifactId>
+            <version>${qits.userflows.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The recording service mock, used twice by that IT: once as the upstream behind the
+                 vhost under test — its recordings are what turn "a forged X-Qits-User does not
+                 cross the edge" from a status code into a fact about the bytes a real service would
+                 have believed — and once as qits-platform-idp, whose recordings prove the edge ASKS
+                 about a cookie, with its own client credential, rather than deciding on its own.
+
+                 It does NOT replace StubGateways and is not meant to. That resource is a Vert.x
+                 server speaking the three shapes an edge must pass through unchanged (a body, a
+                 chunked response, a WebSocket upgrade) plus a stub idp with three sessions and a
+                 revocation, and it is what the @QuarkusTest suites are built on; this one is the
+                 generic cross-service recorder the userflow needs, in a plain JVM beside a launched
+                 artifact. The two live side by side. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-service-mock</artifactId>
+            <version>${qits.service-mock.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -261,6 +328,48 @@
                 </executions>
             </plugin>
             <plugin>
+                <!-- ForwardAuthBootstrapIT binds here. There was no failsafe wiring in this
+                     repository at all before it — this pom had no integration test to run — so the
+                     executions are declared rather than inherited from anywhere, and they arrive
+                     together with the `skipITs` property above.
+
+                     NOTE WHAT IS *NOT* COPIED FROM SUREFIRE. That configuration passes
+                     -Djdk.httpclient.allowRestrictedHeaders=host on argLine, because its WebSocket
+                     tests hand the JDK's client a chosen `Host`. The IT drives every request
+                     through EdgeClient's Vert.x half, which names an authority without the JDK's
+                     restricted-header list ever being consulted, and it opens no socket — so the
+                     flag would be cargo here. A story that grew a WebSocket beat would need it. -->
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${failsafe-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- How @QuarkusIntegrationTest finds the compiled binary in a `-Dnative`
+                             build; without it the native run has nothing to launch. The name is
+                             `quarkus.package.output-name` from application.properties (and the
+                             Dockerfile's COPY line), NOT maven's finalName — with an output-name
+                             set, target/${finalName}-runner does not exist, so all three spellings
+                             have to move together or a native IT starts nothing and passes. -->
+                        <native.image.path>${project.build.directory}/qits-platform-edge</native.image.path>
+                        <!-- Launch the packaged app on a free port instead of the default 8081.
+                             This service's own test config already refuses 8081 for the suite —
+                             on the deployment host it is the platform's own npm registry — and
+                             failsafe starts while surefire's last Quarkus may still be releasing
+                             its port. 0 lets the kernel choose; RestAssured.port follows, and the
+                             IT builds its EdgeClient from it. -->
+                        <quarkus.http.test-port>0</quarkus.http.test-port>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
                 <!-- Same formatter as the rest of the platform (google-java-format, needs JDK 21+),
                      applied on every build so formatting is never a review topic. -->
                 <groupId>com.diffplug.spotless</groupId>
@@ -315,6 +424,17 @@
             </activation>
             <properties>
                 <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <!-- skipITs flips with it, the shape every deployable sibling carries: a native
+                     `./mvnw verify -Dnative` runs ForwardAuthBootstrapIT against the BINARY rather
+                     than packaging one nobody starts. That is where this IT is worth most — the
+                     shipped form of this service is the native image, and the story's whole
+                     apparatus (a Vert.x proxy copying a header map, two HTTP clients built in
+                     @PostConstruct rather than in static fields, Flyway, Bouncy Castle) is exactly
+                     what a lost reflection registration breaks with a green JVM suite.
+
+                     docker/Dockerfile is unaffected: it runs `package -DskipTests`, which failsafe
+                     honours and which never reaches the integration-test phase anyway. -->
+                <skipITs>false</skipITs>
                 <quarkus.native.enabled>true</quarkus.native.enabled>
             </properties>
         </profile>
