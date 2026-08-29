@@ -34,17 +34,20 @@ import java.util.List;
  * these three, and nothing does: they are diagnostics and link generation. What authentication the
  * edge does make a decision on is the bearer token, which is signed — see {@code EdgeAuth}.
  *
- * <p><b>3. It keeps the {@code X-Qits-*} namespace honest</b>, but only on the environment vhost
- * and only while {@link SessionsConfig#enabled()} — see {@link #applyIdentity}. Until the edge
- * asserted an identity of its own, this hygiene belonged to the component that asserts those
- * headers, which was the environment gateway alone; the edge terminating browser sessions is what
- * moved a copy of it here. The gateway still does its own, and has to: a request may reach it from
- * qits-net without passing this process at all.
+ * <p><b>3. It keeps the {@code X-Qits-*} namespace honest</b> on <b>every</b> request that leaves
+ * this process — see {@link #applyIdentity}, called unconditionally from {@code EdgeRouter.proxy}.
+ * The strip is what makes a forward-auth service's trust in {@code X-Qits-User} sound, so it cannot
+ * be conditional on there being a validated session to replace the value with: a machine credential
+ * and a deployment-opened read carry no session and must still not be allowed to forge an identity.
+ * A session's own identity is written back after the strip and only then; a request without one has
+ * the namespace emptied and nothing asserted, its identity being whatever its token proves. The
+ * gateway one hop in still does its own, and has to: a request may reach it from qits-net without
+ * passing this process at all.
  *
- * <p><b>Nothing else is touched.</b> No other header is stripped, no path is rewritten, no body is
- * read. {@code Authorization} and every custom header pass through as they arrived. The one
- * exception is the named browser-session cookie on a machine vhost; {@link #stripCookie} removes
- * only that pair and preserves the rest.
+ * <p><b>Nothing else is touched.</b> No header outside the reserved prefix is stripped, no path is
+ * rewritten, no body is read. {@code Authorization} and every custom header pass through as they
+ * arrived. The one addition is the named browser-session cookie on a session-less path; {@link
+ * #stripCookie} removes only that pair and preserves the rest.
  *
  * <p>{@code ProxyInterceptor} has no single abstract method, so this is a class rather than a
  * lambda. Nothing about it is environment-specific, so one instance is shared by every proxy.

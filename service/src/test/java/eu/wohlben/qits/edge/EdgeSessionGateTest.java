@@ -446,10 +446,14 @@ class EdgeSessionGateTest {
   // ----------------------------------------------------------
 
   @Test
-  void anApplicationVhostIsUnchangedByTheBrowserGate() {
-    // Nothing browses a registry. The app vhosts keep the machine gate and nothing else — no
-    // session lookup, no redirect, and no stripping either, since no service behind one reads the
-    // reserved prefix.
+  void anApplicationVhostKeepsTheMachineGateAndStillStripsTheReservedNamespace() {
+    // Nothing browses a registry, so the app vhosts keep the machine gate and nothing of the
+    // browser
+    // machinery — no session lookup, no redirect. But the reserved-prefix strip is NOT part of that
+    // machinery: it runs on every path out of the edge, because it is the whole basis of a
+    // forward-auth service's trust in X-Qits-User and cannot depend on there being a session here.
+    // A registry does not read the prefix, but this path is shared with application vhosts whose
+    // services do, and a valid machine token is not licence to forge a user identity behind it.
     assertEquals(401, client().get("registry.dev.example.com", "/v2/").status());
     EdgeClient.Answer answer =
         client()
@@ -460,7 +464,9 @@ class EdgeSessionGateTest {
                 null,
                 withToken("dev", "X-Qits-User", "whoever"));
     assertEquals("registry-dev", answer.line("upstream"));
-    assertEquals("whoever", answer.upstreamHeader("X-Qits-User"));
+    assertNull(
+        answer.upstreamHeader("X-Qits-User"),
+        "a client-supplied identity is stripped even on a machine vhost with a valid token");
   }
 
   @Test
