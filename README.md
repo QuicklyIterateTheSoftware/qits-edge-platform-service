@@ -1,4 +1,4 @@
-# qits-platform-edge
+# qits-edge-platform-service
 
 **The platform's L7 edge.** It binds the host's only public port, reads the `Host` name of every
 request, and streams the request unchanged to the service that name selects. An environment's own
