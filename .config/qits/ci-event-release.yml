@@ -31,7 +31,7 @@
 # not roll.
 event: SCMRelease
 when:
-  - repository: { exact: qits-platform-edge }
+  - repository: { exact: qits-edge-platform-service }
 artifacts:
   - { type: docker, name: qits/qits-platform-edge }
 steps:

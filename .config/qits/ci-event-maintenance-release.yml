@@ -5,7 +5,10 @@
 # unchanged. See qits-artifacts' file of the same name — the pattern this follows.
 event: SCMPublishCommit
 when:
-  - repoId: { exact: qits-platform-edge }
+  # repoName, not repoId: since the identity cutover the git host's own coordinate is an opaque
+  # UUID, so a name match belongs on the name. The event echoes the public name the push was
+  # addressed with; a rename updates this line in the same campaign.
+  - repoName: { exact: qits-edge-platform-service }
     suppressCi: { exact: "false" }
     branch: { prefix: maintenance/ }
 checkout:

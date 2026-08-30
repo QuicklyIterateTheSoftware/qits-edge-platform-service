@@ -1,6 +1,6 @@
 # The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
 # service/target/userstories/ through the story catalogue named below — and the reports published as
-# one docs bundle, site @userflows/qits-platform-edge, version = the bare commit sha, branch riding
+# one docs bundle, site @userflows/qits-edge-platform-service, version = the bare commit sha, branch riding
 # as artifacts metadata for discovery.
 #
 # NON-GATING BY DESIGN, which is why it is a separate file from ci-post-receive.yml: this run going
@@ -8,10 +8,11 @@
 # be taken — when it is, these per-commit runs are what the gate reads. One run per push per branch,
 # collapsed to the newest tip under burst.
 #
-# THE STORAGE ID IS `qits-platform-edge`, both in the selection above and in the bundle name below,
-# and it is what ci-event-release.yml already selects on (`repository: { exact: qits-platform-edge }`).
-# Here the directory name and the storage id happen to agree — they do not in every sibling — so the
-# rule is stated rather than relied on: the name below is the storage id, not the checkout directory.
+# THE PUBLIC NAME IS `qits-edge-platform-service`, both in the selection above and in the bundle
+# name below, and it is what ci-event-release.yml already selects on (`repository: { exact:
+# qits-edge-platform-service }`). It is not the storage id — that is an opaque UUID since the
+# identity cutover — and it is not the checkout directory either: a bundle named after the
+# directory would be published where nothing looks for it.
 #
 # WHAT THE STORIES ARE, and why this repository's are the ones the whole fleet leans on. Half the
 # platform's CLAUDE.md files contain some version of the sentence "the edge asserts X-Qits-User /
@@ -32,7 +33,7 @@
 #                              services each hold exactly one recording of it. There is no path
 #                              knowledge in this process at all.
 #     SessionlessWallIT        four callers with no credential, four services up and answering, and
-#                              assertNoEdgesFrom(qits-platform-edge): NOTHING left the process.
+#                              assertNoEdgesFrom(qits-edge-platform-service): NOTHING left the process.
 #     AnonymousReadIT          the half that broke once — a read a deployment opened asserts no
 #                              identity, so it must still empty the reserved namespace, and a
 #                              person's parent-domain cookie must not reach a machine vhost.
@@ -111,7 +112,10 @@
 # success (the qits-spa-ui-components release file's discipline).
 event: SCMPublishCommit
 when:
-  - repoId: { exact: qits-platform-edge }
+  # repoName, not repoId: since the identity cutover the git host's own coordinate is an opaque
+  # UUID, so a name match belongs on the name. The event echoes the public name the push was
+  # addressed with; a rename updates this line in the same campaign.
+  - repoName: { exact: qits-edge-platform-service }
     suppressCi: { exact: "false" }
 checkout:
   branch: branch
@@ -143,10 +147,10 @@ steps:
         -X PUT --data-binary @userstories.tgz \
         -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
         -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
-        -H "X-Artifacts-Meta-git.repository.name: qits-platform-edge" \
-        "$QITS_DOCS_URL/@userflows/qits-platform-edge/-/$QITS_CI_SHA")
+        -H "X-Artifacts-Meta-git.repository.name: qits-edge-platform-service" \
+        "$QITS_DOCS_URL/@userflows/qits-edge-platform-service/-/$QITS_CI_SHA")
       case "$status" in
-        201) echo "published userflows for qits-platform-edge@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
-        409) echo "userflows for qits-platform-edge@$QITS_CI_SHA already published — skipping" ;;
+        201) echo "published userflows for qits-edge-platform-service@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows for qits-edge-platform-service@$QITS_CI_SHA already published — skipping" ;;
         *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
       esac
