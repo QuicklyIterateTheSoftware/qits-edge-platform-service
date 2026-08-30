@@ -1,5 +1,7 @@
 package eu.wohlben.qits.edge;
 
+import eu.wohlben.qits.userflows.NetworkCapture;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -32,6 +34,41 @@ import java.util.concurrent.TimeUnit;
  * {@code jdk.httpclient.allowRestrictedHeaders=host} — which the surefire configuration in pom.xml
  * sets, and without which these tests fail with an {@code IllegalArgumentException} on the header
  * name rather than on anything about this service.
+ *
+ * <p><b>It is also the incoming tap of {@code ForwardAuthBootstrapIT}'s network diagram.</b> Every
+ * sibling service taps its userflow with a RestAssured filter; here that is impossible for the same
+ * reason this class exists at all — rest-assured cannot say {@code Host}, so nothing a story sends
+ * goes through it. {@link #sending} is the one funnel every ordinary request passes, so the
+ * observation lives there. Three things about it:
+ *
+ * <ul>
+ *   <li><b>The vhost is in the label, not just the path.</b> On this service a name is not
+ *       decoration — it IS the routing decision, and {@code GET /projects/api/me} means one thing
+ *       on a service host and a 404 on the environment door. A label that dropped it would draw
+ *       those as one arrow.
+ *   <li><b>The initiator is the story's, never the request's.</b> A stranger's browser, a machine
+ *       client with no credential and a logged-in person differ by headers a diagram must not print
+ *       — and telling them apart is the entire subject. {@link NetworkCapture#actor()} is read when
+ *       the request is BUILT, not when the answer arrives, because the answer arrives on a Vert.x
+ *       thread at a moment the story does not control.
+ *   <li><b>Only answers are observed.</b> A request that failed to get one is not an edge with an
+ *       unknown status; it is a test that broke, and {@link #await} says so. That rule now covers
+ *       three planes rather than one: {@link #stream} observes its exchange once the whole body has
+ *       landed, and {@link #handshake} observes the dial only once the {@code 101} is in hand and
+ *       the frame only once it has arrived. A refused upgrade therefore records nothing at all,
+ *       which is what stops an "attached" arrow being drawn for a socket that was never opened.
+ * </ul>
+ *
+ * <p><b>All three observations are made on the STORY's own thread</b>, at the point the waiting
+ * returned, and never from a Vert.x or JDK callback: {@link NetworkCapture#actor()} is a sticky
+ * value the framework resets at every story border, so a callback firing after that border would
+ * attribute an edge to the wrong story. The one place that cannot wait — {@link #sending}, whose
+ * whole purpose is a request in flight — reads the actor when the request is BUILT and observes
+ * before the future completes, which comes to the same guarantee.
+ *
+ * <p>Nothing about this costs the ordinary {@code @QuarkusTest}s that use this class anything: the
+ * capture registry is a JVM-global list that only a running {@code @UserStory} ever drains, so
+ * outside a story the observations are recorded and never read.
  */
 final class EdgeClient implements AutoCloseable {
 
@@ -69,6 +106,9 @@ final class EdgeClient implements AutoCloseable {
     }
   }
 
+  /** The {@code to} of every edge this tap observes — this service, as the diagram names it. */
+  private static final String SERVICE = "qits-platform-edge";
+
   private final Vertx vertx = Vertx.vertx();
   private final HttpClient client = vertx.createHttpClient();
   private final SocketAddress edge;
@@ -99,6 +139,8 @@ final class EdgeClient implements AutoCloseable {
   CompletableFuture<Answer> sending(
       HttpMethod method, String host, String uri, String body, Map<String, String> headers) {
     RequestOptions options = options(method, host, uri, headers);
+    // Read here, on the story's own thread, and kept: see the class comment.
+    String caller = NetworkCapture.actor();
     CompletableFuture<Answer> answer = new CompletableFuture<>();
     client
         .request(options)
@@ -119,6 +161,13 @@ final class EdgeClient implements AutoCloseable {
                                     raw.add(Map.entry(name, entry.getValue()));
                                     seen.putIfAbsent(name, entry.getValue());
                                   });
+                          // Observed before the future completes, so a story that awaits this
+                          // request can never race the edge into its own diagram.
+                          NetworkCapture.observe(
+                              NetworkEdge.HTTP,
+                              caller,
+                              SERVICE,
+                              label(method, host, uri, response.statusCode()));
                           return new Answer(
                               response.statusCode(), seen, List.copyOf(raw), received.toString());
                         }))
@@ -128,13 +177,39 @@ final class EdgeClient implements AutoCloseable {
   }
 
   /**
+   * One observed edge's label: {@code "GET /projects/api/me on projects.dev.example.com -> 200"}.
+   *
+   * <p>The query string is cut, the convention every service's tap follows — it carries run-local
+   * values, and the drained edge set is hashed into the story's {@code networkHash}. The path is
+   * left to {@link eu.wohlben.qits.userflows.Labels#scrub}, which {@link NetworkCapture#observe}
+   * applies on the way in and which turns {@code /projects/runs/7} into {@code
+   * /projects/runs/{id}}.
+   */
+  private static String label(HttpMethod method, String host, String uri, int status) {
+    int query = uri.indexOf('?');
+    String path = query < 0 ? uri : uri.substring(0, query);
+    return method.name() + " " + path + " on " + host + " -> " + status;
+  }
+
+  /** What a chunked read reported: the answer, when its first chunk landed, and the whole body. */
+  record Streamed(int status, long firstChunkMillis, String body) {}
+
+  /**
    * Read a chunked response and report when its FIRST chunk arrived, relative to the request. A
    * buffering proxy is invisible to a body assertion and obvious here: it delivers everything at
    * once, at the end.
    *
-   * @return the milliseconds from request to first chunk, and the whole body
+   * <p><b>Tapped like an ordinary request, and with the same label</b>, because that is what it is:
+   * one HTTP exchange with one status. Whether the bytes arrived in one piece or five is a fact
+   * about the wire that belongs in the story's assertion rather than in a dependency map — a
+   * separate arrow for it would document the upstream's flush boundaries. The observation is made
+   * here on the STORY's own thread, after the whole body has landed, so it can never race the drain
+   * at a story border.
    */
-  Map.Entry<Long, String> stream(String host, String uri, Map<String, String> headers) {
+  Streamed stream(String host, String uri, Map<String, String> headers) {
+    // Read here, on the story's own thread, and kept: see the class comment.
+    String caller = NetworkCapture.actor();
+    CompletableFuture<Integer> status = new CompletableFuture<>();
     CompletableFuture<Long> firstChunk = new CompletableFuture<>();
     CompletableFuture<String> whole = new CompletableFuture<>();
     long start = System.nanoTime();
@@ -143,21 +218,32 @@ final class EdgeClient implements AutoCloseable {
         .compose(request -> request.send())
         .onSuccess(
             response -> {
+              status.complete(response.statusCode());
               StringBuilder body = new StringBuilder();
               response.handler(
                   chunk -> {
                     firstChunk.complete((System.nanoTime() - start) / 1_000_000);
                     body.append(chunk);
                   });
-              response.endHandler(v -> whole.complete(body.toString()));
+              response.endHandler(
+                  v -> {
+                    // An answer with no body at all still ended: completing here keeps a refusal
+                    // from waiting out the timeout on a chunk that was never coming.
+                    firstChunk.complete((System.nanoTime() - start) / 1_000_000);
+                    whole.complete(body.toString());
+                  });
               response.exceptionHandler(whole::completeExceptionally);
             })
         .onFailure(
             failure -> {
+              status.completeExceptionally(failure);
               firstChunk.completeExceptionally(failure);
               whole.completeExceptionally(failure);
             });
-    return Map.entry(await(firstChunk), await(whole));
+    Streamed streamed = new Streamed(await(status), await(firstChunk), await(whole));
+    NetworkCapture.observe(
+        NetworkEdge.HTTP, caller, SERVICE, label(HttpMethod.GET, host, uri, streamed.status()));
+    return streamed;
   }
 
   /**
@@ -165,8 +251,22 @@ final class EdgeClient implements AutoCloseable {
    *
    * <p>The JDK client rather than Vert.x's — see the class javadoc for why, and for the system
    * property that lets it name a {@code Host}.
+   *
+   * <p><b>Two edges, and the split is the report contract's own.</b> The dial is a {@code socket}
+   * edge, because what a dependency map should say is that this process holds a connection open to
+   * that name; the frame that comes back is an {@code event} edge in the direction it was PUSHED,
+   * from the edge to whoever is holding the socket. Both are observed here, on the story thread,
+   * after the waiting returned — never from the JDK client's listener callback, which fires on an
+   * executor thread at a moment the story does not control and would read whatever actor is current
+   * then.
+   *
+   * <p><b>A refused upgrade records nothing</b>, which is deliberate: it leaves by the throw below,
+   * so no "attached" arrow can ever be drawn for a handshake the edge turned away. A story about a
+   * refusal sends the handshake as a plain request instead — see {@code SessionlessWallIT} — where
+   * the refusal has a real status and draws as the plain 401 it was.
    */
   String handshake(String host, String uri, Map<String, String> headers) {
+    String caller = NetworkCapture.actor();
     CompletableFuture<String> first = new CompletableFuture<>();
     java.net.http.WebSocket.Builder builder =
         java.net.http.HttpClient.newHttpClient().newWebSocketBuilder().header("Host", host);
@@ -195,11 +295,30 @@ final class EdgeClient implements AutoCloseable {
     } catch (Exception e) {
       throw new IllegalStateException("The edge refused the WebSocket handshake", e);
     }
+    // Only now, with a 101 in hand: the connection is held open, which is the dependency.
+    NetworkCapture.observe(NetworkEdge.SOCKET, caller, SERVICE, socketLabel(host, uri, ATTACHED));
     try {
-      return await(first);
+      String frame = await(first);
+      NetworkCapture.observe(NetworkEdge.EVENT, SERVICE, caller, FRAME);
+      return frame;
     } finally {
       socket.abort();
     }
+  }
+
+  /** What a socket edge's label says when the upgrade crossed the edge and the socket was held. */
+  static final String ATTACHED = "attached";
+
+  /**
+   * The one label every pushed frame collapses into. How many WebSocket messages a stream of output
+   * arrives in belongs to the upstream's write boundaries and not to the story, so an arrow per
+   * frame would document a buffer size.
+   */
+  static final String FRAME = "one text frame pushed through the spliced socket";
+
+  /** A socket edge's label: the same shape a request's carries, with a word where a status is. */
+  private static String socketLabel(String host, String uri, String outcome) {
+    return "GET " + uri + " on " + host + " -> " + outcome;
   }
 
   private RequestOptions options(

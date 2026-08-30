@@ -21,7 +21,8 @@ public record Upstream(String host, int port) {
   /**
    * Parse a configured {@code host} or {@code host:port} value.
    *
-   * @param defaultPort used when the value names no port — {@code qits.edge.upstream-port}
+   * @param defaultPort used when the value names no port — {@code qits.edge.apps.<app>.port} for a
+   *     configured vhost, and the port a deployment published for a projected one
    */
   public static Upstream parse(String value, int defaultPort) {
     if (value == null || value.isBlank()) {
