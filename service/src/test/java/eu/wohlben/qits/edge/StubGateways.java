@@ -20,8 +20,12 @@ import java.util.concurrent.TimeUnit;
  * observable from the outside: each server names itself in every answer, so a test asserts which
  * process received the request rather than only that something did. The application upstreams are
  * two per app for the same reason — an app name has to reach ITS environment's copy. Their
- * addresses reach the route table as {@code qits.edge.upstream-hosts.<env>} and {@code
- * qits.edge.apps.<app>.hosts.<env>} overrides, the config paths that exist for exactly this.
+ * addresses reach the route table as {@code qits.edge.apps.<app>.hosts.<env>} overrides — the one
+ * config path that exists for exactly this — and, for the two servers this class still calls
+ * "gateways", as the suite's OWN {@code qits.test.environment-upstreams.<env>} key, which the tests
+ * read to build a deployment endpoint with. The name is historical: there is no per-environment
+ * gateway on the platform any more, and these two are simply the far side a projected deployment
+ * endpoint points at.
  *
  * <p><b>The applications are two so the auth gate has two answers.</b> {@code mirror} is named in
  * {@code qits.edge.auth.anonymous-read-apps} and {@code registry} is not, so one suite covers both

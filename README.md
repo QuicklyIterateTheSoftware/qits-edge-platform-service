@@ -60,18 +60,28 @@ authoritative. An unavailable event log or a failed event handler leaves it down
 eventstream startup sweep is disabled here because this named, readiness-owning rebuild is the
 startup path; scheduled sweeps remain the post-start safety net.
 
+**This is the only proxy tier there is.** There was a second one — `qits-gateway`, one per
+environment, demultiplexing services by PATH inside its tier — and it is gone: every service is
+reached on a name of its own now, so a per-environment hop would have been a second address for
+something that already has one. What that repository knew came here with it, and the two places it
+shows are `EdgeCacheControl` (a port of its class, restored after the retirement dropped it) and
+the surefire split in `pom.xml` (its workaround for a WebSocket-after-restart harness bug).
+Historical mentions of it below are exactly that; nothing on the platform runs one.
+
 ```
                           ┌────────────────────────────────────────┐
   client ──:8080──▶       │ qits-platform-edge  (the only          │
-  Host: registry.dev.…    │ published port on the host)            │
-                          │   Host name → upstream · idp · /q      │
+  Host: registry.dev.…    │ published port on the host, and the    │
+                          │ only proxy tier)                       │
+                          │   Host name → service · idp · /q       │
                           └──┬──────────────┬──────────────┬───────┘
                              │ docker networks, nothing published
-              dev            │      prod    │              │  dev's registry
+       dev's registry        │  prod's registry            │  dev's ci, published
         ┌────────────────────▼┐  ┌──────────▼─────────┐  ┌─▼──────────────────┐
-        │ dev-qits-gateway    │  │ prod-qits-gateway  │  │ dev-qits-artifacts │
+        │ dev-qits-artifacts  │  │ prod-qits-artifacts│  │ dev-qits-ci        │
         │  :8080              │  │  :8080             │  │  :8080             │
         └─────────────────────┘  └────────────────────┘  └────────────────────┘
+         configured, qits.edge.apps                       deployment projection
 ```
 
 ## The routing model
@@ -111,10 +121,10 @@ An unmatched name is **not an error**. Every one of them goes to the default env
 mistyped URL reaches the platform's own page rather than a connection error.
 
 **An app-shaped name is the one exception, and it is deliberate.** A first label in front of a
-*known* environment was aimed at a service, and services are the names this edge authenticates —
-falling through to the gateway would hand exactly those requests to the one hop that does not. So an
-unconfigured app label is a **404**, not the gateway. Names that are not app-shaped are untouched by
-the rule.
+*known* environment was aimed at a service, and services are the names this edge authenticates — so
+falling it through to anything else would hand exactly those requests to a hop that does not check
+them. An unconfigured, unpublished app label is therefore a **404**, decided here. Names that are
+not app-shaped are untouched by the rule. `SessionlessWallIT` and the door story are what pin it.
 
 **A name reaches a service two ways.** `qits.edge.apps` is the configured one — the machine vhosts,
 and the auth attributes that go with them. The deployment projection is the other: a service
@@ -202,8 +212,9 @@ machine token are both answered `404` like any other request.
   instead of queueing forever with nothing logged.
 - **Keeps the client's `Host`.** `vertx-http-proxy` leaves a proxied request's authority unset and
   the client then fills `Host` in from the socket it opened, so without the fix in `EdgeHeaders`
-  every request would reach the gateway claiming to be for `prod-qits-gateway:8080`. Redirects,
-  cookie domains and absolute URLs are all built from that name.
+  every request would reach its service claiming to be for `prod-qits-projects:8080`. Redirects,
+  cookie domains and absolute URLs are all built from that name. `VhostRoutingIT` asserts it from
+  the receiving end, on two services at once.
 - **Adds `X-Forwarded-For` / `-Host` / `-Proto`, only when absent.** The edge is not always the
   outermost hop: a TLS terminator in front of it is the only thing that can tell the truth about
   `https`, so overwriting would replace a true value with a false one. Consequently **nothing may
@@ -216,7 +227,9 @@ machine token are both answered `404` like any other request.
   default is touched**: a header a handler chose is a decision, and a blanket rewrite would weaken
   this process' own `no-store` routes. qits-gateway did this and the edge did not when it replaced
   it, which is how a green, correctly deployed release could stay invisible for a day and then come
-  right on its own — a cache reading as flakiness.
+  right on its own — a cache reading as flakiness. `SpaFreshnessIT` is the story: all three shapes
+  served by a real upstream, through a launched edge, with the two that are corrected and the two
+  that are not side by side.
 - **Serves `/main-navigation` on every vhost**, from the same snapshots, and writes every origin in
   the SHORT form for the default environment — `https://example.com` and `https://ci.example.com`,
   whichever spelling the request itself used. Other environments keep their label, and a one-label
@@ -240,8 +253,12 @@ The upgrade path rebuilds the handshake with the client's own `Host` dropped —
 from `vertx-http-proxy`'s behaviour when `EdgeWebSocketUpgrade` replaced it, so upstreams see no
 change. An upstream therefore reads a socket's original host name from **`X-Forwarded-Host`**,
 which the edge does set on that path, and not from `Host`. It costs nothing today, because a
-handshake's `Host` is a protocol formality rather than something an environment gateway routes on —
-but if that ever changes, this is where to look.
+handshake's `Host` is a protocol formality rather than something a service routes on one hop
+further in — but if that ever changes, this is where to look.
+
+`StreamingPassthroughIT` asserts the gap **both ways round** — `X-Forwarded-Host` is the vhost and
+`Host` is not — so it stays a known gap rather than quietly becoming a surprise. A story that
+pinned only the half that works is how it would stop being documented.
 
 ## Configuration
 
@@ -252,9 +269,6 @@ a file.
 | --- | --- | --- | --- |
 | `qits.edge.environments` | `QITS_EDGE_ENVIRONMENTS` | `prod` | The routable environment names, comma separated |
 | `qits.edge.default-environment` | `QITS_EDGE_DEFAULT_ENVIRONMENT` | `prod` | Where the apex and every unmatched host go. **Must be in the list** |
-| `qits.edge.upstream-host-pattern` | `QITS_EDGE_UPSTREAM_HOST_PATTERN` | `{env}-qits-gateway` | `{env}` is the only placeholder |
-| `qits.edge.upstream-port` | `QITS_EDGE_UPSTREAM_PORT` | `8080` | The port every environment gateway listens on |
-| `qits.edge.upstream-hosts.<env>` | `QITS_EDGE_UPSTREAM_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
 | `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — | **Required per app.** `{env}` is the only placeholder; a platform service names none |
 | `qits.edge.apps.<app>.port` | `QITS_EDGE_APPS_<APP>_PORT` | `8080` | The port that application listens on |
 | `qits.edge.apps.<app>.hosts.<env>` | `QITS_EDGE_APPS_<APP>_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
@@ -302,12 +316,18 @@ QITS_EDGE_APPS_MIRROR_HOST_PATTERN=qits-platform-mirror
 service — there is one qits-platform-mirror for the whole host, so its entry carries no placeholder
 while an environment's registry carries one and serves every tier from a single line.
 
-`qits.edge.upstream-hosts` exists for the two topologies the pattern cannot describe — a developer
-running one gateway on `localhost:8000`, and this repository's own suite, where the gateways are
-stub servers on ephemeral ports. Prefer the pattern: an override is a second place an environment's
-address is written, and a stale one sends a whole tier's traffic to the wrong process. Note also
-that a `@ConfigMapping` map key cannot be **unset** by a later config source, only overridden, which
-is why none is shipped in `application.properties`.
+`qits.edge.apps.<app>.hosts.<env>` exists for the two topologies a pattern cannot describe — a
+developer running one service on `localhost:8000`, and this repository's own tests, where the
+upstreams are stand-in servers on ephemeral ports (`StubGateways` for the suites, `StoryUpstream`
+for the userflow catalogue). Prefer the pattern: an override is a second place an address is
+written, and a stale one sends a whole tier's traffic to the wrong process. Note also that a
+`@ConfigMapping` map key cannot be **unset** by a later config source, only overridden, which is why
+none is shipped in `application.properties`.
+
+There is **no** `qits.edge.upstream-host-pattern`, `qits.edge.upstream-port` or
+`qits.edge.upstream-hosts`. Those were the per-environment gateway's address, and there is no
+per-environment gateway: an upstream is an application entry or a host a deployment published, and
+nothing else.
 
 ## Authentication — terminated here, on the first node
 
@@ -531,11 +551,12 @@ docker:
 ```
 
 `.config/qits/deployments.yml` makes this a **platform** service, deploying from `environment/prod`.
-One edge exists because there is one host port to bind, and it fronts every environment's gateway,
+One edge exists because there is one host port to bind, and it fronts every environment's services,
 so it belongs to no tier. The target is also what makes the routing work: a platform service joins
-every environment's per-application networks, so `<env>-qits-gateway` resolves for every name in
-`qits.edge.environments`. An environment service would reach only its own tier's gateway and answer
-502 for the rest.
+every environment's per-application networks, so `<env>-qits-artifacts`, `<env>-qits-projects` and
+every other pattern in `qits.edge.apps` resolves for every name in `qits.edge.environments`. An
+environment service would reach only its own tier and answer 502 for the rest — which is exactly
+the shape `UpstreamOutageIT`'s third beat drives on purpose.
 
 ## Building
 
@@ -590,8 +611,95 @@ Two harness details worth knowing before they cost an afternoon:
   9001. It stays a fixed port because `@TestHTTPResource(management = true)` has to be able to name
   it. A bind error there is a busy 9001, not a flake either.
 
+**The integration half is a different posture entirely** and is not in `./mvnw verify` by default:
+the story catalogue (`*IT`) runs the **packaged** artifact as a launched process, with the browser
+gate ON, against stand-ins on real sockets. That is where the forward-auth claim stops being an
+in-JVM assertion about a stub and becomes a fact about the bytes a service would have believed. See
+[Userflows](#userflows--the-proofs-that-double-as-documentation) for the class list and the command.
+
+## Userflows — the proofs that double as documentation
+
+The catalogue lives in `service/src/test/java/eu/wohlben/qits/edge/*IT.java` and emits under
+`service/target/userstories/`, one directory per story with `userflow.json`, `user-story.md` and a
+self-contained `index.html`, plus a site index carrying the aggregate network of all of them.
+`.config/qits/ci-event-userflows.yml` publishes the bundle per commit as
+`@userflows/qits-platform-edge`.
+
+**Nine stories, one launched artifact, one `StoryProfile`.** A `@TestProfile` is what failsafe
+launches a process for, so a second profile would be a second front door; every story class names
+that one, `ForwardAuthBootstrapIT` included.
+
+| Class | Story | Edges |
+| --- | --- | --- |
+| `ForwardAuthBootstrapIT` | A forged identity never reaches the service, and the one idp vouched for does | 7 |
+| `ForwardAuthBootstrapIT` | The door serves nothing, and a health probe is never gated | 6 |
+| `VhostRoutingIT` | One name, one service: the Host header is the whole routing decision | 7 |
+| `SessionlessWallIT` | The 401 wall: nothing a stranger sends leaves this process | 5 |
+| `AnonymousReadIT` | An open read is still not a forged identity | 5 |
+| `SpaFreshnessIT` | A released SPA is on screen at once: the edge unfreezes the document that names the bundles | 9 |
+| `UpstreamOutageIT` | A service that is not there is an answer, and never a wait | 6 |
+| `StreamingPassthroughIT` | An interactive terminal crosses the edge, and it crosses it stripped | 4 |
+| `StreamingPassthroughIT` | A long answer arrives as it is produced, not when it is finished | 3 |
+
+**Every diagram is observed, never narrated**, and every one of its ends is somebody else's
+recording:
+
+- **In**, tapped inside `EdgeClient` — the framework's shipped rest-assured tap cannot be used here
+  for the reason that class exists at all: this service routes on `Host`, and rest-assured derives
+  that header from the URL it was given. **The label carries the vhost**, because on this service
+  the name IS the routing decision and two of `VhostRoutingIT`'s three requests are otherwise
+  identical.
+- **Out**, from `StoryUpstream` — a Vert.x recorder standing in for `qits-projects`, `qits-docs` and
+  `qits-platform-mirror`, and qits-service-mock's `MockService` standing in for
+  `qits-platform-idp`. The split is not stylistic: the applications need a chosen response header
+  (the cache rewrite), a non-JSON body (an `index.html`), an answer written over time (the
+  streaming claim), an outage arm and a WebSocket upgrade, and canned JSON can do none of the five.
+  idp needs exactly canned JSON, which is what that library is for.
+
+**What only a far-side recording can say** is most of this catalogue: the reserved `X-Qits-*`
+namespace arriving empty on an anonymous read, the vouched-for identity arriving in its place on a
+session, a person's cookie NOT arriving on a machine vhost, which of two services received an
+identical request, and a request that arrived and was then dropped mid-answer.
+
+**And what only a negative assertion can say** is the sharpest claim of all. `SessionlessWallIT`
+ends with `assertNoEdgesFrom(qits-platform-edge)` — *nothing left this process* — with all four far
+sides up and answering 200s in the stories either side of it. `assertEdgeCount` on every story is
+what catches a refused request quietly starting to be forwarded.
+
+**Running them:**
+
+```bash
+./mvnw -pl service -am -DskipITs=false verify \
+  -Dit.test=ForwardAuthBootstrapIT,AnonymousReadIT,SessionlessWallIT,SpaFreshnessIT,StreamingPassthroughIT,UpstreamOutageIT,VhostRoutingIT
+```
+
+`skipITs` stays `true` in `service/pom.xml` — see the comment there — so the class list is named on
+the command line and in `.config/qits/ci-event-userflows.yml`. **A new story class goes into that
+YAML in the same commit that adds it**, or it is written and never run. Class order is topological:
+every story carries `@UserflowRunsAfter(ForwardAuthBootstrapIT.class)` so the oldest class owns
+whatever a boot produces, and `UserflowClassOrderer` is registered as junit's *secondary* orderer in
+`src/test/resources/application.properties` — the one seam quarkus-junit permits, because it ships
+its own `junit-platform.properties` and surefire hard-fails on a local override.
+
+Two mechanics worth knowing before they cost an afternoon:
+
+- `StoryUpstream`'s recording is **cumulative for the whole run**, with the framework's per-source
+  cursor deciding which slice belongs to which story. So `onlyRequestTo(path)` can only mean
+  "exactly one" on a path exactly one story drives, which is why several stories own a path of their
+  own (`/projects/api/version`, `/projects/api/repositories`, `/projects/settings`).
+- Each story uses a **cookie value of its own**. `EdgeSessions` caches a belief against a
+  fingerprint of the cookie, so two stories sharing one would make the second's introspection edge
+  depend on how long the first took.
+
 ## Relationship to qits-gateway
 
-They are the same idea one hop apart, and the split is deliberate: this one demultiplexes
-**environments by host name**, the other demultiplexes **services by path** inside one environment.
-Keep the Quarkus platform version and the JDK release in step with it.
+**There is no qits-gateway any more.** It was the per-environment proxy that demultiplexed services
+by PATH inside one tier, and it was retired when every service gained a public name of its own — a
+second hop would have been a second address, a second origin and a second cookie scope for something
+that already had one. This process is the only proxy tier on the platform.
+
+Two things it left behind are still load-bearing here and are worth knowing the provenance of:
+`EdgeCacheControl` is a port of its class (and of the defect that appeared when the retirement
+dropped it), and the second surefire execution in `pom.xml` is its workaround for a Quarkus harness
+bug where a WebSocket upgrade only survives the first application start in a JVM. Anything else in
+this file that names it is history.

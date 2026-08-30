@@ -1,7 +1,7 @@
 # The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
-# service/target/userstories/ through ForwardAuthBootstrapIT — and the reports published as one docs
-# bundle, site @userflows/qits-platform-edge, version = the bare commit sha, branch riding as
-# artifacts metadata for discovery.
+# service/target/userstories/ through the story catalogue named below — and the reports published as
+# one docs bundle, site @userflows/qits-platform-edge, version = the bare commit sha, branch riding
+# as artifacts metadata for discovery.
 #
 # NON-GATING BY DESIGN, which is why it is a separate file from ci-post-receive.yml: this run going
 # red must not cost the branch its image while "quality gate before merging" is still a decision to
@@ -13,20 +13,41 @@
 # Here the directory name and the storage id happen to agree — they do not in every sibling — so the
 # rule is stated rather than relied on: the name below is the storage id, not the checkout directory.
 #
-# WHAT THE STORY IS, and why this repository's is the one the whole fleet leans on. Half the platform's
-# CLAUDE.md files contain some version of the sentence "the edge asserts X-Qits-User / X-Qits-User-Id /
-# X-Qits-Roles and every service behind it believes them unconditionally". Every one of those services
-# tests the BELIEVING half against headers its own suite wrote. THIS is the repository where the
-# asserting half is true, and ForwardAuthBootstrapIT is the first proof of it against a LAUNCHED
-# artifact with the browser gate switched on: a stranger stamping the three headers herself is refused
-# in both shapes a caller can act on (the login redirect a browser follows, the WWW-Authenticate
-# challenge docker reads), and the same forgeries behind a real session arrive at the upstream
-# replaced by the identity idp vouched for — asserted on the UPSTREAM'S OWN RECORDINGS, which is what
-# makes it a fact about the bytes a service would have believed rather than about a status code. The
-# second story is the honest other half: the environment door serves nothing to anybody, an app-shaped
-# name nobody claims is a 404 rather than a fall-through, and this process's own health is never gated
-# and never proxied — because the container that binds the host's only published port must come up
-# before there is anyone to authenticate it to.
+# WHAT THE STORIES ARE, and why this repository's are the ones the whole fleet leans on. Half the
+# platform's CLAUDE.md files contain some version of the sentence "the edge asserts X-Qits-User /
+# X-Qits-User-Id / X-Qits-Roles and every service behind it believes them unconditionally". Every one
+# of those services tests the BELIEVING half against headers its own suite wrote. THIS is the
+# repository where the asserting half is true, and these nine stories are the proof of it against a
+# LAUNCHED artifact with the browser gate switched on — every claim asserted on the RECEIVING side's
+# own recording, which is what makes each one a fact about the bytes a service would have believed
+# rather than about a status code this process chose.
+#
+#   edge/ (9 stories, one launched artifact, one StoryProfile)
+#     ForwardAuthBootstrapIT   a forged identity never reaches the service, and the one idp vouched
+#                              for does — refused in both shapes a caller can act on (a login
+#                              redirect, the WWW-Authenticate challenge docker reads), then served
+#                              with the forgeries replaced; and the door serves nothing while health
+#                              is never gated.
+#     VhostRoutingIT           one path, one cookie, one browser, TWO names — and two different
+#                              services each hold exactly one recording of it. There is no path
+#                              knowledge in this process at all.
+#     SessionlessWallIT        four callers with no credential, four services up and answering, and
+#                              assertNoEdgesFrom(qits-platform-edge): NOTHING left the process.
+#     AnonymousReadIT          the half that broke once — a read a deployment opened asserts no
+#                              identity, so it must still empty the reserved namespace, and a
+#                              person's parent-domain cookie must not reach a machine vhost.
+#     SpaFreshnessIT           the Cache-Control rewrite qits-gateway carried and this process did
+#                              not when it replaced it: the SPA document revalidates, the
+#                              content-hashed bundle keeps its year, and a header the upstream chose
+#                              is untouched. A green deployed release that stayed invisible for a day
+#                              is what that defect looked like.
+#     UpstreamOutageIT         a container that goes away mid-request, and a name configured to point
+#                              at nothing: both are ANSWERS. Silence is the failure the bounded pool,
+#                              the bounded wait queue and the acquisition timeout exist to prevent.
+#     StreamingPassthroughIT   the two long-lived planes — a spliced WebSocket (the one path that
+#                              never installs the interceptor chain, and the one a forged identity
+#                              used to cross on) and a chunked answer whose first half must arrive
+#                              before the second was written.
 #
 # THE GATE IS FLIPPED IN THE IT'S PROFILE, NOT HERE AND NOT IN THE SHIPPED CONFIG.
 # `qits.edge.sessions.enabled` ships FALSE on purpose — the gate landed before idp could issue a
@@ -51,17 +72,22 @@
 #
 # THE TWO IT FLAGS ARE THE OTHER HALF. `skipITs` is true in service/pom.xml and stays true, and this
 # repository does not opt its ITs back in from the pom the way qits-docs and qits-stt do — not because
-# there is a heavyweight sibling IT to keep out (ForwardAuthBootstrapIT is the only integration test
-# there is), but because of what it would do to the build a clone runs. README.md documents
+# there is a heavyweight sibling IT to keep out (the story catalogue is the whole of the integration
+# suite), but because of what it would do to the build a clone runs. README.md documents
 # `./mvnw verify` as "unit tests + the end-to-end proxy suite (no docker, no network)", and that build
 # is already the heaviest of its kind: the surefire half forks TWO JVMs, because EdgeSessionGateTest
 # needs a Quarkus of its own to prove the gate's other state, and spawns a real postgres. Adding a
 # launched front door plus a SECOND embedded postgres — failsafe forks its own JVM, so the suite's
 # cannot be reused — would change that build for everybody to run what this pipeline runs anyway.
 #
-# Naming the class keeps the opt-in to this pipeline and to these stories, and keeps the property's own
-# meaning ("run everything") intact for the `native` profile in service/pom.xml that now flips it:
-# `-DskipITs=false "-Dit.test=ForwardAuthBootstrapIT"`.
+# Naming the classes keeps the opt-in to this pipeline and to these stories, and keeps the property's
+# own meaning ("run everything") intact for the `native` profile in service/pom.xml that now flips it.
+#
+# THE LIST BELOW IS THE ONE PLACE A NEW STORY CLASS BECOMES REAL. A class that is written and not
+# added here compiles, passes review, and is never run — the failure mode is silence, so the list and
+# the class arrive in the SAME commit. It is a comma list, which is what -Dit.test takes; the order in
+# it does not decide execution order (UserflowClassOrderer does, from @UserflowRunsAfter), but keeping
+# ForwardAuthBootstrapIT first matches the order the classes actually run in and reads better.
 #
 # NO REPAIR WAS NEEDED to make the two new test-scope jars resolve. This repository already carries
 # `.qits-maven-settings.xml` and a `qits-maven` <repositories> entry — qits-eventstream has come from
@@ -71,7 +97,9 @@
 # already resolved that one. (`-DskipTests` skips test EXECUTION, not test COMPILATION, and
 # .dockerignore keeps src/ in the context, so both jars are fetched during an image build too; they are
 # small, and qits-userflows' transitive Playwright is a jar, not a browser — nothing downloads Chromium
-# unless a story asks for a Flow, and neither of these does.)
+# unless a story asks for a Flow, and not one of the nine does — every story here takes an
+# Interactions and no Flow, which is what keeps this pipeline runnable in a step container with no
+# Chromium in it.)
 #
 # Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. The bundle goes to
 # qits-artifacts and is read back by qits-docs, neither of which is this service. Two things here could
@@ -100,7 +128,8 @@ steps:
       export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
       ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
-        -DskipITs=false "-Dit.test=ForwardAuthBootstrapIT"
+        -DskipITs=false \
+        "-Dit.test=ForwardAuthBootstrapIT,AnonymousReadIT,SessionlessWallIT,SpaFreshnessIT,StreamingPassthroughIT,UpstreamOutageIT,VhostRoutingIT"
 
       # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
       # put it in every served URL. The path is service/target/userstories because the stories live

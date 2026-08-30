@@ -912,14 +912,13 @@ class EdgeRoutingTest {
     // at the end, so the FIRST chunk's arrival time is the assertion — the body alone would pass
     // either way. SSE channels and `git clone` are what this protects.
     activateCi();
-    Map.Entry<Long, String> streamed =
-        client().stream("ci.dev.example.com", "/stream", token("dev"));
+    EdgeClient.Streamed streamed = client().stream("ci.dev.example.com", "/stream", token("dev"));
 
-    assertEquals("chunk-1\nchunk-2\n", streamed.getValue());
+    assertEquals("chunk-1\nchunk-2\n", streamed.body());
     assertTrue(
-        streamed.getKey() < StubGateways.STREAM_GAP_MILLIS,
+        streamed.firstChunkMillis() < StubGateways.STREAM_GAP_MILLIS,
         "the first chunk arrived after "
-            + streamed.getKey()
+            + streamed.firstChunkMillis()
             + "ms, which is not before the upstream sent the second at "
             + StubGateways.STREAM_GAP_MILLIS
             + "ms — the response was buffered");
