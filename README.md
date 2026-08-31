@@ -530,6 +530,24 @@ covering the apex, `*.<domain>`, and `*.<environment>.<domain>` for every config
 That covers platform names such as `idp.wohlben.eu` and project names such as
 `qits.dev.wohlben.eu` without issuing one certificate per hostname.
 
+**A wildcard covers exactly one label, and `QITS_EDGE_ACME_ADDITIONAL_NAMES` covers the rest.** The
+derived set above is every depth the edge's Host reading has, so `*.<domain>` answers for
+`editor.<domain>` and for nothing under it, and `*.<env>.<domain>` only holds where that middle label
+is an environment. The web editor is served at `editor.<project>.<domain>` — one origin per project,
+under a label that is a *project* — so no wildcard this platform can order reaches it and each host
+has to be a SAN of its own:
+
+```
+QITS_EDGE_ACME_ADDITIONAL_NAMES=editor.acme,editor.gizmo.wohlben.eu
+```
+
+Whole or relative to the domain; `editor.acme` is `editor.acme.<domain>`. It is a list of **names**
+and knows nothing about editors — the editor is today's reason for it and will not be the last. The
+bootstrap owns the list (`QITS_ACME_EXTRA_SANS`) and checks it before the run, because the edge
+answers its challenges in this domain's own zone and one name outside it fails the whole order.
+Unset orders exactly the derived set; a name added reaches the certificate at the next order — the
+12h reconcile, or a restart at once.
+
 The manager writes short-lived `_acme-challenge` TXT values through Hetzner's Cloud API, waits until
 both Cloudflare and Google public DNS-over-HTTPS resolvers observe them, and removes only the value
 it created. ACME account state and certificates persist on the TLS volume. Successful certificates

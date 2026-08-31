@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -73,7 +74,9 @@ public class EdgeCertificateManager {
   private void reconcile() throws Exception {
     String domain = acme.domain().orElseThrow().strip().toLowerCase(Locale.ROOT);
     String token = hetznerToken();
-    Set<String> desired = CertificateNames.of(domain, edge.environments());
+    Set<String> desired =
+        CertificateNames.of(
+            domain, edge.environments(), acme.additionalNames().orElseGet(List::of));
     PemCertificateStore store = new PemCertificateStore(acme.directory());
     var current = store.current();
     boolean staging =
