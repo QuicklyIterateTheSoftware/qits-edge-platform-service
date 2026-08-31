@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agroal.api.AgroalDataSource;
@@ -293,6 +294,121 @@ class EdgeRoutingTest {
             .findFirst()
             .orElseThrow();
     assertNull(ci.getString("subpath"), "an entry without one opens the application's root");
+  }
+
+  @Test
+  void oneApplicationHangsSeveralRowsUnderOneHeading() {
+    // qits-workspaces is one application in one container publishing TWO rows under the project
+    // node: the workspace list and the editor. The claim used to be the slot alone, which refused
+    // this whole frame — and refused the spec a hop earlier, so the deployment failed as
+    // "deployment spec unreadable" while its build stayed green.
+    activateWorkspaces();
+
+    List<JsonObject> project =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body())
+            .getJsonObject("slots").getJsonArray("project.detail").stream()
+                .map(JsonObject.class::cast)
+                .toList();
+    assertEquals(
+        List.of("Workspaces", "Editor"),
+        project.stream().map(entry -> entry.getString("label")).toList(),
+        "two rows, in the order the positions asked for");
+    assertEquals(
+        List.of("qits-workspaces", "qits-workspaces"),
+        project.stream().map(entry -> entry.getString("app")).toList(),
+        "both of them are the same application, and nothing collapses them");
+    // The two rows differ where a shell needs them to: one opens the application's root under the
+    // scope, the other the view its subpath names. Everything else — origin, path — is shared,
+    // because it is one application.
+    assertEquals(
+        List.of("http://workspaces.dev.example.com", "http://workspaces.dev.example.com"),
+        project.stream().map(entry -> entry.getString("origin")).toList());
+    assertNull(project.get(0).getString("subpath"));
+    assertEquals("editor", project.get(1).getString("subpath"));
+  }
+
+  @Test
+  void twoRowsOfOneApplicationAtOnePositionAreATieAndNotARefusal() {
+    // A position is the repository's own number, and the document has always broken a tie by label
+    // and then by application — two applications naming 1 in one slot is ordinary. So the same tie
+    // inside one application is ordinary too: refusing it would be a rule this document does not
+    // have, and both rows would still be renderable if it did.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-workspaces")
+                .put("environmentName", "dev")
+                .put("browserHost", "workspaces")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/workspaces", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("project.detail", "Workspaces", 1))
+                        .add(placement("project.detail", "Editor", 1).put("subpath", "editor")))));
+
+    assertEquals(
+        List.of("Editor", "Workspaces"),
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body())
+            .getJsonObject("slots").getJsonArray("project.detail").stream()
+                .map(value -> ((JsonObject) value).getString("label"))
+                .toList(),
+        "the tie is broken by label, as it is between applications");
+  }
+
+  @Test
+  void theSamePlacementTwiceIsRefusedWholeAndNamesThePair() throws Exception {
+    // One row asked for twice. The pair is the key the projection's primary key holds, so this is
+    // the refusal that carries a reason before the insert fails without one — and, like every
+    // poison frame, it changes no routes at all.
+    clearProjection();
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-workspaces")
+                .put("environmentName", "dev")
+                .put("browserHost", "workspaces")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/workspaces", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("project.detail", "Editor", 1))
+                        .add(placement("project.detail", "Editor", 2).put("subpath", "editor")))));
+
+    assertTrue(routes.navigation("dev").isEmpty());
+    assertNull(routes.serviceHost("dev", "workspaces"));
+    assertNull(routes.resolve("dev", "/workspaces/42"), "the poison frame published no routes");
+
+    // The subscriber settles a poison frame with a WARN, so the sentence itself is read where it is
+    // written. It names the PAIR: a frame with four project.detail entries says which one is twice.
+    String message =
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                    routes.replace(
+                        "dev",
+                        "qits-workspaces",
+                        "duplicate-placement",
+                        Instant.now(),
+                        new EdgeRoutes.Snapshot(
+                            List.of(
+                                new EdgeEndpoint(
+                                    "dev",
+                                    "qits-workspaces",
+                                    "/workspaces",
+                                    upstream("qits.edge.apps.mirror.hosts.dev"))),
+                            "workspaces",
+                            List.of(
+                                new EdgeRoutes.NavigationEntry("project.detail", "Editor", 1),
+                                new EdgeRoutes.NavigationEntry(
+                                    "project.detail", "Editor", 2, "editor")))))
+            .getMessage();
+    assertTrue(message.contains("project.detail.Editor"), message);
   }
 
   @Test
@@ -752,6 +868,28 @@ class EdgeRoutingTest {
                     "navigation",
                     new io.vertx.core.json.JsonArray()
                         .add(placement("services.details", "CI", 2)))));
+  }
+
+  /**
+   * qits-workspaces as the editor epic publishes it: one application, one container, TWO rows under
+   * the project node — the workspace list at its root and the editor under a subpath.
+   */
+  private void activateWorkspaces() {
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-workspaces")
+                .put("environmentName", "dev")
+                .put("browserHost", "workspaces")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/workspaces", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("project.detail", "Workspaces", 1))
+                        .add(placement("project.detail", "Editor", 2).put("subpath", "editor")))));
   }
 
   /** The landing service: what makes the environment's own name a door rather than a page. */
