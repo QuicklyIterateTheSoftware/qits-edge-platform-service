@@ -20,6 +20,13 @@ import java.util.List;
  * the closed vocabulary is present, empty ones included, so a shell iterates the document rather
  * than a copy of the vocabulary.
  *
+ * <p><b>A slot is an ARRAY, and one application may fill several of its entries.</b> The loop below
+ * copies every placement of a slot in the order {@link EdgeRoutes#navigation} sorted it — slot,
+ * position, label, application — and nothing here is keyed by application, so qits-workspaces'
+ * Workspaces and Editor rows come out as two entries of the project node with one origin and two
+ * subpaths. A repeated position is an ordinary tie broken by label, whether the two entries belong
+ * to one application or to two.
+ *
  * <p>The document is {@code environment}, {@code origin}, {@code slots} and {@code applications},
  * and nothing else. There is no flat list and no synthesized {@code Home}: the environment's own
  * door is qits-projects' {@code system} entry, which is a deployment fact like every other entry

@@ -18,8 +18,13 @@ application's snapshot in its own PostgreSQL database. A snapshot is three thing
   resolves to;
 - **`browserHost`** — the DNS label the service answers to, `ci` for `ci.dev.example.com`. Absent
   until a service has been flipped, and that absence is what makes this release inert;
-- **`navigation`** — placements, at most one per slot: `{"slot":"services.details","label":"CI",
-  "position":2}`. The slot vocabulary is closed and lives in `EdgeRoutes.SLOTS`.
+- **`navigation`** — placements, at most one per `(slot, label)` pair:
+  `{"slot":"services.details","label":"CI","position":2}`. The slot vocabulary is closed and lives
+  in `EdgeRoutes.SLOTS`. **One application fills several entries of one slot** — qits-workspaces
+  hangs `Workspaces` and `Editor` under `project.detail` from one container — so the slot alone was
+  never the claim; the same pair twice is one row asked for twice and is refused. A repeated
+  `position` is not: the document breaks that tie by label, whether the two entries belong to one
+  application or to two.
 
 An **older frame** carried one `navigationLabel`/`navigationPosition` pair on an endpoint instead.
 Every frame ever published is replayed on every start, so that shape still means what it meant: one
@@ -33,7 +38,8 @@ proxied.
 
 A frame is **refused whole** — logged and settled, routes unchanged — when it publishes a path
 another application owns, a host another application owns, a host that is not a DNS label, a host
-that is an environment name, an unknown slot, or a host that is also a configured
+that is an environment name, an unknown slot, the same `(slot, label)` placement twice, or a host
+that is also a configured
 `qits.edge.apps.<app>` entry pointing somewhere else. The last one is a match rather than a ban:
 `registry` is both a configured vhost and the name qits-artifacts publishes, and they are the same
 service exactly when the configured pattern resolves to the address the deployment published.

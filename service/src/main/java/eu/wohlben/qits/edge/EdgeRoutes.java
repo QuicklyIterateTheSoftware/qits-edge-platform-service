@@ -126,7 +126,11 @@ public class EdgeRoutes {
    *     none
    * @param apiDocsPath where the application's browsable API document lives, under one of its
    *     routes, or null for a service that documents no HTTP surface
-   * @param navigation the placements, at most one per slot
+   * @param navigation the placements, at most one per {@code (slot, label)} pair — an application
+   *     hangs SEVERAL rows under one heading (qits-workspaces publishes Workspaces and Editor under
+   *     {@code project.detail}), so the slot alone was never the claim. Two of the same pair is one
+   *     row asked for twice and is refused; a repeated POSITION is not, because the document breaks
+   *     that tie by label exactly as it does between applications
    */
   public record Snapshot(
       List<EdgeEndpoint> endpoints,
@@ -398,11 +402,24 @@ public class EdgeRoutes {
                 + "`, which sits under none of its own routes.");
       }
     }
-    Set<String> slots = new LinkedHashSet<>();
+    // The claim is the (slot, label) PAIR. One application contributes several rows to one heading
+    // — qits-workspaces hangs Workspaces and Editor under project.detail — and the slot alone as
+    // the key refused that whole frame. What stays refused is the same pair twice: one row asked
+    // for twice, which the primary key could not hold and no shell could draw two of. A repeated
+    // POSITION is deliberately not refused — readAll's comparator breaks that tie by label and then
+    // by application, so two rows of one application at one number order as stably as two
+    // applications at one number already do.
+    Set<List<String>> claimed = new LinkedHashSet<>();
     for (NavigationEntry entry : snapshot.navigation()) {
-      if (!slots.add(entry.slot())) {
+      if (!claimed.add(List.of(entry.slot(), entry.label()))) {
         throw new IllegalArgumentException(
-            "`" + application + "` published two placements in " + entry.slot() + ".");
+            "`"
+                + application
+                + "` published two placements of "
+                + entry.slot()
+                + "."
+                + entry.label()
+                + ".");
       }
     }
     if (snapshot.browserHost() == null && !snapshot.navigation().isEmpty()) {
