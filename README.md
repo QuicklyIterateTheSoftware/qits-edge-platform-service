@@ -727,3 +727,16 @@ Two things it left behind are still load-bearing here and are worth knowing the 
 dropped it), and the second surefire execution in `pom.xml` is its workaround for a Quarkus harness
 bug where a WebSocket upgrade only survives the first application start in a JVM. Anything else in
 this file that names it is history.
+
+### The Hetzner token, deployer-era (2026-08-31)
+
+The deployer-managed edge container has no swarm secrets — qits-deployments'
+extras grammar carries env, mounts, publishes, aliases and groups, and nothing
+else — so `QITS_EDGE_ACME_HETZNER_TOKEN_FILE` pointing at
+`/run/secrets/qits-dns-hetzner-token` names a file that exists only in the
+bootstrap's seed stack. The live arrangement is the **by-value arm**:
+`env.QITS_EDGE_ACME_HETZNER_TOKEN` in the edge's config-host extras, beside
+`QITS_EDGE_SESSIONS_CLIENT_SECRET`, which already established that a secret may
+ride there. The file arm wins when both are set, so the file entry must stay
+deleted until a deployer `secrets[i]` facility exists — that facility is the
+structural fix, and the day it lands this section inverts.
