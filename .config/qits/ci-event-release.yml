@@ -75,6 +75,7 @@ steps:
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
