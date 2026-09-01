@@ -24,10 +24,11 @@ steps:
       # injects the run's commissioned idp client as
       # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and a Dockerfile that needs it
       # mounts it on one RUN — never a --build-arg, which is recorded in a pullable image's history.
-      # This build needs none: its Maven resolve is reactor-only over public repositories, so there
-      # is no `.qits-maven-settings.xml` here and no mount to feed. Both halves are free — buildx
-      # ignores a secret no RUN mounts, and a missing env source is NOT an error (measured on buildx
-      # v0.36.1, the build runs green with the variable unset).
+      # This build feeds them: the Dockerfile's mvnw RUN mounts the pair as the `qits-maven-network`
+      # server credential behind `.qits-maven-settings.xml` — the answer to the registry's 401 once
+      # reads are gated, unused literals until then. A run that commissioned nothing still builds
+      # green: a missing env source is NOT an error (measured on buildx v0.36.1, the mounted
+      # variable is simply unset).
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-edge:$QITS_CI_SHA"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
