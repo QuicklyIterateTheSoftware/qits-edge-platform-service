@@ -37,7 +37,7 @@
         <failsafe-plugin.version>${surefire-plugin.version}</failsafe-plugin.version>
         <spotless-plugin.version>2.44.5</spotless-plugin.version>
         <google-java-format.version>1.28.0</google-java-format.version>
-        <qits.eventstream.version>2026.818.45652</qits.eventstream.version>
+        <qits.eventstream.version>2026.902.231856</qits.eventstream.version>
 
         <!-- The user-story framework (TEST SCOPE ONLY): ForwardAuthBootstrapIT is written as
              @UserStory methods, so the packaged forward-auth proof doubles as documentation —
@@ -48,7 +48,7 @@
              about resolution changes and neither docker/Dockerfile nor either pipeline needed a
              repair. The groupId is spelled out rather than ${project.groupId}: this repository's
              own groupId is `eu.wohlben`, and the platform's shared jars are `eu.wohlben.qits`. -->
-        <qits.userflows.version>2026.829.201516</qits.userflows.version>
+        <qits.userflows.version>2026.902.53027</qits.userflows.version>
         <!-- The recording service mock, used for ONE of the two kinds of far side this catalogue
              needs: qits-platform-idp, whose whole contribution is a canned JSON introspection
              answer plus a recording of who asked for it, which is exactly what this library is for.
@@ -57,7 +57,7 @@
              upgrade, none of which canned JSON can do, so they are eu.wohlben.qits.edge.StoryUpstream
              (a Vert.x recorder in the test JVM). See that class for the four reasons, one per
              story. Released out of libs/qits-integrations-quarkus. -->
-        <qits.service-mock.version>2026.829.201505</qits.service-mock.version>
+        <qits.service-mock.version>2026.902.53026</qits.service-mock.version>
 
         <!-- INTEGRATION TESTS ARE OFF BY DEFAULT, and this repository now has both halves of that
              sentence: a failsafe plugin bound below, and ForwardAuthBootstrapIT for it to run.
