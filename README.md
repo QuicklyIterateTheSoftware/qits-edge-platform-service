@@ -574,7 +574,9 @@ docker:
 -p 8080:8080
 ```
 
-`.config/qits/deployments.yml` makes this a **platform** service, deploying from `environment/prod`.
+`.config/qits/deployments.yml` makes this a **platform** service, deployed into the platform
+environment alone. There is no branch to deploy from: a deploy pulls the version coordinate the
+release published.
 One edge exists because there is one host port to bind, and it fronts every environment's services,
 so it belongs to no tier. The target is also what makes the routing work: a platform service joins
 every environment's per-application networks, so `<env>-qits-artifacts`, `<env>-qits-projects` and
@@ -646,8 +648,9 @@ in-JVM assertion about a stub and becomes a fact about the bytes a service would
 The catalogue lives in `service/src/test/java/eu/wohlben/qits/edge/*IT.java` and emits under
 `service/target/userstories/`, one directory per story with `userflow.json`, `user-story.md` and a
 self-contained `index.html`, plus a site index carrying the aggregate network of all of them.
-`.config/qits/ci-event-userflows.yml` publishes the bundle per commit as
-`@userflows/qits-platform-edge`.
+The non-gating step of `.config/qits/ci-event-release-request.yml` publishes the bundle once per
+release-request fold as `@userflows/qits-platform-edge`. It carries `gating: false`: a red story
+fails the run and shows red without holding the request's build gate.
 
 **Nine stories, one launched artifact, one `StoryProfile`.** A `@TestProfile` is what failsafe
 launches a process for, so a second profile would be a second front door; every story class names
@@ -698,8 +701,8 @@ what catches a refused request quietly starting to be forwarded.
 ```
 
 `skipITs` stays `true` in `service/pom.xml` — see the comment there — so the class list is named on
-the command line and in `.config/qits/ci-event-userflows.yml`. **A new story class goes into that
-YAML in the same commit that adds it**, or it is written and never run. Class order is topological:
+the command line and in the non-gating step of `.config/qits/ci-event-release-request.yml`. **A new
+story class goes into that YAML in the same commit that adds it**, or it is written and never run. Class order is topological:
 every story carries `@UserflowRunsAfter(ForwardAuthBootstrapIT.class)` so the oldest class owns
 whatever a boot produces, and `UserflowClassOrderer` is registered as junit's *secondary* orderer in
 `src/test/resources/application.properties` — the one seam quarkus-junit permits, because it ships

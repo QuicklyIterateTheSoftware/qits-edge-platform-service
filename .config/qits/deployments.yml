@@ -1,11 +1,12 @@
 # How qits-platform-deployments deploys this repo. It reads this file from the git host at
 # the built sha, so the answer travels with the commit.
 #
-# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
-# decide whether this repository deploys — a library or an SPA carries none and its release is
-# the trunk push alone — and then promotes onto the branch it is configured with
-# (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
-# thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
+# CARRYING THE FILE AT ALL is the other thing it says. The release flow reads it to decide whether
+# this repository deploys — a repo without one is finalized on `main` the moment it releases, and a
+# library or an SPA carries none. What a deploy pulls is the VERSION COORDINATE the release
+# published. There is no promotion and no branch to promote onto: the entry branch
+# (`qits.workspaces.release.entry-branch`) and the `deploy_branches` that used to name it here, in
+# thirteen copies of one platform-wide answer, went with the release door.
 #
 # PLATFORM service. There is one host port to bind, so there is one edge, and it fronts EVERY
 # environment's gateway — it belongs to no tier and cannot be one tier's copy.
@@ -17,9 +18,9 @@
 # gateways of one tier and would have answered 502 for the second one until someone joined the
 # container by hand. That caveat is settled here rather than restated: nothing is joined by hand.
 #
-# It deploys from the PLATFORM ENVIRONMENT's branch and no other tier's, which is a distinction
-# with teeth here: the edge fronts every tier, so a build on preprod's branch replacing the one
-# edge would put preprod's code in front of prod. `pd_environment.platform` is what prevents it.
+# It deploys into the PLATFORM ENVIRONMENT and no other tier, which is a distinction with teeth
+# here: the edge fronts every tier, so a tier deploying its own build over the one edge would put
+# that tier's code in front of prod. `pd_environment.platform` is what prevents it.
 
 # THE NAME THIS DEPLOYS AS, spelled because the repository is renamed and the application is not.
 # Every derivation the deployer makes hangs off this name — the wire alias peers dial, the container
