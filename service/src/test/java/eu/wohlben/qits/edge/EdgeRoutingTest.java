@@ -795,7 +795,8 @@ class EdgeRoutingTest {
                             .put("navigationPosition", 1)))
             .encode(),
         null,
-        null);
+        null,
+        environment);
   }
 
   @Test
@@ -813,7 +814,8 @@ class EdgeRoutingTest {
                 .put("endpoints", new io.vertx.core.json.JsonArray())
                 .encode(),
             null,
-            null));
+            null,
+            "dev"));
 
     // /artifacts is nobody's route any more, so it stops travelling and falls to ci's own service.
     assertEquals(
@@ -926,6 +928,7 @@ class EdgeRoutingTest {
         "DeploymentActive",
         Instant.now(),
         payload.encode(),
+        null,
         null,
         null);
   }
