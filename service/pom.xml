@@ -37,7 +37,7 @@
         <failsafe-plugin.version>${surefire-plugin.version}</failsafe-plugin.version>
         <spotless-plugin.version>2.44.5</spotless-plugin.version>
         <google-java-format.version>1.28.0</google-java-format.version>
-        <qits.eventstream.version>2026.902.231856</qits.eventstream.version>
+        <qits.eventstream.version>2026.903.85121</qits.eventstream.version>
 
         <!-- The user-story framework (TEST SCOPE ONLY): ForwardAuthBootstrapIT is written as
              @UserStory methods, so the packaged forward-auth proof doubles as documentation —
