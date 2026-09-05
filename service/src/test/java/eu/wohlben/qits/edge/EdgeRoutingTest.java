@@ -181,6 +181,76 @@ class EdgeRoutingTest {
         client().get("ci.dev.example.com", "/artifacts-old", token("dev")).line("upstream"));
   }
 
+  /**
+   * The publisher's WHOLE frame, not the six fields this projection happens to read.
+   *
+   * <p>qits-deployments' {@code DeploymentActive} carries nine more components than {@link
+   * DeploymentActiveSubscriber.DeploymentActivePayload} models — {@code deploymentId}, {@code
+   * environmentId}, {@code version}, {@code commitSha}, {@code runId}, {@code containerName},
+   * {@code finishedAt} — and the platform plane fills every one of them in. That is the shape on
+   * the bus today, and it is the shape this edge must keep decoding after the publisher grows the
+   * next field: the private wire DTO exists precisely so a vocabulary addition is not a Maven
+   * release the edge has to wait for, and {@code CanonicalJson} ignores unknown properties so the
+   * addition costs nothing.
+   *
+   * <p>The field names are literals rather than a dependency on the publisher's record. Spelling
+   * them out is the point — a rename on the far side has to fail HERE, loudly, instead of quietly
+   * decoding to null and unrouting an application.
+   */
+  @Test
+  void aFullyPopulatedPublisherFrameRoutesAndItsUnmodelledFieldsAreIgnored() throws Exception {
+    clearProjection();
+    activateCi(); // the vhost the request below is addressed to, exactly as the test above uses it
+    Upstream upstream = upstream("qits.edge.apps.registry.hosts.dev");
+
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("deploymentId", "b7c1f3a4-0e29-4d51-9a8c-2f6b5d0e7c31")
+                .put("applicationName", "qits-artifacts")
+                .put("environmentId", "3f9d2c18-7b64-4a05-8e11-c6d4a92f7b83")
+                .put("environmentName", "dev")
+                .put("version", "2026.904.211334")
+                .put("commitSha", "8a9b8fa6c2d14e0b7f35a9c8d1e2b4f60a3c7d95")
+                .put("runId", "run-4821")
+                .put("containerName", "qits-artifacts-b7c1f3a4")
+                .put("finishedAt", "2026-09-04T21:13:34Z")
+                .put("browserHost", "registry")
+                .put("apiDocsPath", "/artifacts/q/swagger-ui")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/artifacts", upstream))
+                        .add(endpoint("/v2", upstream)))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("services.details", "Artifacts", 3)))));
+
+    // Decoded, not settled-unhandled: the routes, the public name and the placement all landed.
+    assertEquals(
+        "registry-dev",
+        client().get("ci.dev.example.com", "/artifacts/api/files", token("dev")).line("upstream"));
+    assertNotNull(routes.resolve("dev", "/v2/"));
+    assertEquals(
+        List.of(
+            new EdgeRoutes.NavigationPlacement(
+                "qits-artifacts",
+                "services.details",
+                "Artifacts",
+                3,
+                "registry",
+                "/artifacts",
+                null)),
+        routes.navigation("dev").stream()
+            .filter(placement -> "qits-artifacts".equals(placement.application()))
+            .toList());
+
+    // environmentName is the routing key, and a populated one files the snapshot under THAT
+    // environment alone rather than fanning out across qits.edge.environments.
+    assertNull(routes.resolve("prod", "/artifacts/api/files"));
+  }
+
   @Test
   void mainNavigationCarriesEverySlotAndOneOriginPerService() {
     activateArtifacts();
