@@ -58,8 +58,10 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # -DskipTests, deliberately: the suite has already run in the pipeline step that reached this build,
 # and running it here would fork a second Quarkus per class inside a builder image for no new
 # information. A red suite must stop the pipeline, not the image.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml package -pl service -am -Dnative -DskipTests \
       -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
       -Dquarkus.native.native-image-xmx=4g \
