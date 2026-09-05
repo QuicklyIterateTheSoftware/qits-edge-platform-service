@@ -58,8 +58,16 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # -DskipTests, deliberately: the suite has already run in the pipeline step that reached this build,
 # and running it here would fork a second Quarkus per class inside a builder image for no new
 # information. A red suite must stop the pipeline, not the image.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+#
+# The two secrets are mounted in FILE form (`/run/secrets/<id>`, read into this command's own
+# environment) and never the `env=` mount form these lines used to carry: `env=` needs a dockerfile
+# frontend the BUILDER chooses, and since the builds moved to the platform's buildkitd the frontend
+# is the builder's to pick rather than this file's. Absent secrets leave both variables empty, which
+# `.qits-maven-settings.xml` reads exactly as it reads unset — every hand build's state.
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml package -pl service -am -Dnative -DskipTests \
       -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
       -Dquarkus.native.native-image-xmx=4g \
