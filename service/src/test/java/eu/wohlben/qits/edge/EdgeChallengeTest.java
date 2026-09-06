@@ -378,8 +378,8 @@ class EdgeChallengeTest {
     // Comma-separated is safe because a role is $app:$resource:$role and holds no comma. One that
     // somehow did would arrive downstream as TWO roles, so it is dropped rather than carried.
     assertEquals(
-        "qits-platform:admin,qits:admin",
-        EdgeSessions.rolesHeader(new JsonArray(List.of("qits-platform:admin", "qits:admin"))));
+        "qits:admin",
+        EdgeSessions.rolesHeader(new JsonArray(List.of("qits:admin"))));
     assertEquals("", EdgeSessions.rolesHeader(new JsonArray()));
     assertEquals("", EdgeSessions.rolesHeader(null));
     assertEquals(

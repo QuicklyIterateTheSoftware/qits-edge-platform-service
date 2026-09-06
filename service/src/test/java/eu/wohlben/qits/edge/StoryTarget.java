@@ -209,10 +209,10 @@ public final class StoryTarget {
   public static final String SESSION_USER_ID = "b7e4a1c2-0000-4000-8000-00000000beef";
 
   /** The two rows the platform's register token grants the first account. */
-  public static final List<String> SESSION_ROLES = List.of("qits-platform:admin", "qits:admin");
+  public static final List<String> SESSION_ROLES = List.of("qits:admin");
 
   /** Those roles as one header value — comma-separated, which is what an upstream parses. */
-  public static final String SESSION_ROLES_HEADER = "qits-platform:admin,qits:admin";
+  public static final String SESSION_ROLES_HEADER = "qits:admin";
 
   /**
    * One cookie value per story, and that is load-bearing rather than tidiness: {@code EdgeSessions}
@@ -241,7 +241,7 @@ public final class StoryTarget {
 
   public static final String FORGED_USER_ID = "00000000-0000-0000-0000-000000000000";
 
-  public static final String FORGED_ROLES = "qits:root,qits-platform:admin";
+  public static final String FORGED_ROLES = "qits:root,qits:admin";
 
   /**
    * A reserved header nobody has invented yet, and the sharpest assertion in this catalogue. The

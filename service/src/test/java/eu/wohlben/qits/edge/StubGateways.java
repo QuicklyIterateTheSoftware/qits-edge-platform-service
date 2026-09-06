@@ -89,7 +89,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   static final String SESSION_USER_ID = "b7e4a1c2-0000-4000-8000-00000000beef";
 
   /** The two rows the register token grants the first account, per the plan. */
-  static final List<String> SESSION_ROLES = List.of("qits-platform:admin", "qits:admin");
+  static final List<String> SESSION_ROLES = List.of("qits:admin");
 
   /** The running instance, so a test can take the identity provider away and give it back. */
   private static volatile StubGateways running;

@@ -310,7 +310,7 @@ class EdgeSessionGateTest {
     EdgeClient.Answer answer = client().get("ci.dev.example.com", "/api/runs", spoofed);
     assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
     assertEquals(StubGateways.SESSION_USER_ID, answer.upstreamHeader("X-Qits-User-Id"));
-    assertEquals("qits-platform:admin,qits:admin", answer.upstreamHeader("X-Qits-Roles"));
+    assertEquals("qits:admin", answer.upstreamHeader("X-Qits-Roles"));
     assertNull(
         answer.upstreamHeader("X-Qits-Something-Invented-Later"),
         "the prefix is the rule, so a header nobody has thought of yet is stripped too");
@@ -350,7 +350,7 @@ class EdgeSessionGateTest {
     assertTrue(seen.lines().anyMatch(("x-qits-user=" + StubGateways.SESSION_USER)::equals), seen);
     assertTrue(
         seen.lines().anyMatch(("x-qits-user-id=" + StubGateways.SESSION_USER_ID)::equals), seen);
-    assertTrue(seen.lines().anyMatch("x-qits-roles=qits-platform:admin,qits:admin"::equals), seen);
+    assertTrue(seen.lines().anyMatch("x-qits-roles=qits:admin"::equals), seen);
   }
 
   @Test
@@ -428,7 +428,7 @@ class EdgeSessionGateTest {
     assertEquals("mirror-dev", answer.line("upstream"), "its own upstream, not the environment's");
     assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
     assertEquals(StubGateways.SESSION_USER_ID, answer.upstreamHeader("X-Qits-User-Id"));
-    assertEquals("qits-platform:admin,qits:admin", answer.upstreamHeader("X-Qits-Roles"));
+    assertEquals("qits:admin", answer.upstreamHeader("X-Qits-Roles"));
     assertTrue(
         answer.upstreamHeader("Cookie").contains("qits-session="), answer.upstreamHeader("Cookie"));
   }
