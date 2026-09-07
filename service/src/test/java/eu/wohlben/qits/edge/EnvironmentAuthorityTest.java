@@ -146,6 +146,28 @@ class EnvironmentAuthorityTest {
   }
 
   @Test
+  void aNameThatEndsAtTheLabelItWasReadForFallsBackInsteadOfThrowing() {
+    // Each of these MATCHES one of the readings above and then stops: there is no apex behind the
+    // label, so there is no origin to derive. They used to be a substring past the end of the
+    // string — an unauthenticated 500 on `/main-navigation` and on the door's own redirect, from a
+    // Host header anybody can send. The answer is the one an unusable name already got.
+    assertEquals("http://prod.example.com", of("prod").origin(), "an environment and nothing else");
+    assertEquals("http://prod.example.com", of("ci.dev").origin(), "$app.$env with no domain");
+    assertEquals("http://prod.example.com", of("acme.dev").origin(), "$project.$env, the same");
+    assertEquals(
+        "http://prod.example.com",
+        of("editor.acme.dev").origin(),
+        "the four-label reading, three labels long");
+    // The port a request carried is still the port its answer is written on, whichever arm
+    // answered.
+    assertEquals("http://dev.localhost:8080", local("ci.dev").origin());
+    // And the readings that DO have something behind them are untouched by the guard: `dev.dev` is
+    // environment `dev` under an apex spelled `dev`, which the first reading cannot serve and the
+    // third one can.
+    assertEquals("http://dev.dev", of("dev.dev").origin());
+  }
+
+  @Test
   void theSchemeIsTheOutermostHopsWhenThereIsOne() {
     // A TLS terminator in front of the edge is the only hop that knows the answer, and the header
     // is a list with the outermost hop first.

@@ -139,19 +139,26 @@ public record EnvironmentAuthority(String scheme, String authority) {
       // disagree about which environment a name is: a document written for one environment's
       // origins and served by another's routes is worse than either being wrong on its own.
       if (labels.length > 1 && environments.contains(labels[1])) {
-        String apex = name.substring(labels[0].length() + labels[1].length() + 2);
-        return emit(labels[1], apex, port);
+        String apex = behind(name, labels[0].length() + labels[1].length() + 2);
+        if (apex != null) {
+          return emit(labels[1], apex, port);
+        }
       }
       if (labels.length > 2 && projects.contains(labels[1]) && environments.contains(labels[2])) {
         // $app.$project.$env.$domain: the apex is what is left after THREE labels. Without this
         // reading `/main-navigation` on the editor's own name would fall through below and claim
         // the default environment — the editor would render dev's tree against prod's origins.
         String apex =
-            name.substring(labels[0].length() + labels[1].length() + labels[2].length() + 3);
-        return emit(labels[2], apex, port);
+            behind(name, labels[0].length() + labels[1].length() + labels[2].length() + 3);
+        if (apex != null) {
+          return emit(labels[2], apex, port);
+        }
       }
       if (environments.contains(labels[0])) {
-        return emit(labels[0], name.substring(labels[0].length() + 1), port);
+        String apex = behind(name, labels[0].length() + 1);
+        if (apex != null) {
+          return emit(labels[0], apex, port);
+        }
       }
     }
     // The apex, an address literal, a name nobody configured, or no Host at all. None of them says
@@ -162,6 +169,25 @@ public record EnvironmentAuthority(String scheme, String authority) {
       return defaultEnvironment;
     }
     return emit(defaultEnvironment, apex(fallback, defaultEnvironment), port(fallback));
+  }
+
+  /**
+   * What is left of a name after the labels a reading consumed, or null when nothing is.
+   *
+   * <p><b>Every reading above needs an apex behind it, and a Host header is caller input.</b>
+   * {@code prod}, {@code ci.dev}, {@code acme.dev} and {@code editor.acme.dev} each match one of
+   * those readings and then END — there is no domain left to build an authority from. These
+   * derivations used to be bare {@code substring} calls past the end of the string, so each of
+   * those four names was an unauthenticated 500 out of {@code /main-navigation} and out of the
+   * door's own redirect: a name that names no site, answered with a stack trace.
+   *
+   * <p>A reading with nothing behind it falls through, and what it falls through to is the
+   * canonical-origin arm below — the same answer an unusable Host gets today. It is the honest one:
+   * these names carry a label that says which environment they mean and no domain that says where,
+   * and the origins this class writes are absolute URLs a browser has to be able to follow.
+   */
+  private static String behind(String name, int consumed) {
+    return consumed < name.length() ? name.substring(consumed) : null;
   }
 
   /**
