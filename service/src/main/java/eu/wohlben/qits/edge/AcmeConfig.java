@@ -51,6 +51,23 @@ public interface AcmeConfig {
   Optional<List<String>> additionalNames();
 
   /**
+   * How long a requested reconcile waits for the frames behind it before it orders anything.
+   *
+   * <p>It exists because of epoch replay. A fresh edge reads every {@code ProjectCreated} ever
+   * published in one burst, and each of them grows the desired name set: without a debounce the
+   * first frame would place an order for a certificate missing every project after it, and the
+   * second order would draw on Let's Encrypt's production duplicate-certificate limit of five a
+   * week. One window covers the whole burst, and the order that follows carries every slug.
+   *
+   * <p>Thirty seconds is chosen against the two things it trades: an order placed too early is a
+   * rate-limited mistake, and an order placed late is a project whose editor host has no
+   * certificate for half a minute longer. There is no key in the bootstrap for it; it is here for
+   * an operator who has a reason.
+   */
+  @WithDefault("PT30S")
+  Duration reconcileDebounce();
+
+  /**
    * Docker/Kubernetes secret file; preferred over exposing the token in the process environment.
    */
   Optional<Path> hetznerTokenFile();
