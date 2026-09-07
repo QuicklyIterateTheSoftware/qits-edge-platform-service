@@ -826,6 +826,17 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void theApexIsStillTheApexWithTheRootDotAResolverWrites() {
+    // `example.com.` is the same name — a client is entitled to send the trailing dot, and every
+    // other consumer of a Host name here drops it before reading. This one compared a bare strip(),
+    // so the apex missed itself and answered a 404 offering the name the caller was already on.
+    activateProjects("prod");
+    EdgeClient.Answer landing = client().get("example.com.", "/");
+    assertEquals(302, landing.status());
+    assertEquals("http://projects.prod.example.com/", landing.headers().get("location"));
+  }
+
+  @Test
   void theApexItselfIsStillTheDefaultEnvironmentsDoor() {
     // The one name with no environment label that is still served, and the only way the edge can
     // tell it from a service name with its label left out is the configured canonical origin.

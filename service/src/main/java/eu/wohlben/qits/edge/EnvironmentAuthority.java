@@ -224,8 +224,15 @@ public record EnvironmentAuthority(String scheme, String authority) {
     return environment + "." + apex + port;
   }
 
-  /** Lower case, no surrounding space, no trailing root dot, no port, no IPv6 brackets. */
-  private static String name(String host) {
+  /**
+   * Lower case, no surrounding space, no trailing root dot, no port, no IPv6 brackets.
+   *
+   * <p>Package-visible for the same reason {@link #apex} is: {@code EdgeRouter} compares a
+   * request's own name against the apex, and a comparison against anything less normalised than
+   * this is a name that misses — {@code example.com.} is the apex, spelled the way a resolver
+   * spells it.
+   */
+  static String name(String host) {
     if (host == null) {
       return "";
     }

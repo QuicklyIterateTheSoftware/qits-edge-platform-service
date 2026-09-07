@@ -410,12 +410,25 @@ public class EdgeRouter {
    * is read, exactly as {@link EnvironmentAuthority} reads it.
    */
   private boolean isApex(String host) {
-    String canonical = sessions.canonicalAuthority();
-    if (canonical == null || host == null) {
+    return isApex(host, sessions.canonicalAuthority(), hostEnvironments.defaultEnvironment());
+  }
+
+  /**
+   * The same question without the beans, so it can be asserted without a boot — see {@code
+   * EdgeRouterNamesTest}.
+   *
+   * <p><b>The candidate is normalised the way every other consumer normalises a name.</b> It was a
+   * bare {@code strip()}, which is not the same thing: {@code Host: example.com.} — the root dot a
+   * resolver writes, and a spelling a client is entitled to send — missed the apex and fell through
+   * to a 404 offering a name the caller was already on. {@link HostEnvironments} and {@link
+   * EnvironmentAuthority} both drop the dot before they read a name; this is the third.
+   */
+  static boolean isApex(String host, String canonicalAuthority, String defaultEnvironment) {
+    if (canonicalAuthority == null || host == null) {
       return false;
     }
-    return EnvironmentAuthority.apex(canonical, hostEnvironments.defaultEnvironment())
-        .equalsIgnoreCase(host.strip());
+    return EnvironmentAuthority.apex(canonicalAuthority, defaultEnvironment)
+        .equalsIgnoreCase(EnvironmentAuthority.name(host));
   }
 
   /**
@@ -815,20 +828,38 @@ public class EdgeRouter {
         .response()
         .setStatusCode(404)
         .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
-        .end(
-            "`"
-                + route.unknownApp()
-                + "` is not an application this edge routes. Configured: "
-                + hostEnvironments.apps()
-                + (route.project() == null
-                    ? " — the environment `"
-                        + route.environment()
-                        + "` was read from the name and is fine.\n"
-                    : " — the environment `"
-                        + route.environment()
-                        + "` and the project `"
-                        + route.project()
-                        + "` were read from the name and are fine.\n"));
+        .end(unknownAppBody(route, hostEnvironments.apps()));
+  }
+
+  /**
+   * What an app-shaped name nobody claims is told, with the label echoed only when it IS one.
+   *
+   * <p><b>The label came off the wire.</b> {@link HostEnvironments} carries it as far as here so
+   * the answer can name it, and it is the first label of a {@code Host} header — attacker input,
+   * whatever this process does with it. The routing readings do not care, because a label nothing
+   * matches is unroutable either way; the ANSWER does, because it is written back to the caller.
+   * {@code Host: .prod.example.com} used to produce a sentence about an empty name, and anything
+   * else a client could smuggle through the header parser came back verbatim. So it is laundered
+   * here on the same rule {@code shortForm}'s label already obeys — echoed when {@link
+   * HostEnvironments#isLabel}, described generically otherwise — and the media type stays {@code
+   * text/plain}, which is the other half of why this is safe to read in a browser.
+   */
+  static String unknownAppBody(HostEnvironments.Route route, java.util.Set<String> apps) {
+    String label = route.unknownApp();
+    return (label != null && HostEnvironments.isLabel(label)
+            ? "`" + label + "`"
+            : "That first label")
+        + " is not an application this edge routes. Configured: "
+        + apps
+        + (route.project() == null
+            ? " — the environment `"
+                + route.environment()
+                + "` was read from the name and is fine.\n"
+            : " — the environment `"
+                + route.environment()
+                + "` and the project `"
+                + route.project()
+                + "` were read from the name and are fine.\n");
   }
 
   /**
