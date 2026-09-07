@@ -66,6 +66,13 @@ authoritative. An unavailable event log or a failed event handler leaves it down
 eventstream startup sweep is disabled here because this named, readiness-owning rebuild is the
 startup path; scheduled sweeps remain the post-start safety net.
 
+A **second** consumer, `edge-project-sans`, rebuilds the project-slug projection the certificate is
+built from, and `ProjectSansBootstrap` is deliberately not folded into that barrier: routing
+readiness must not wait on certificate bookkeeping, because a missing slug costs one project's
+editor host a certificate while a missing route sends a request to the wrong process. It catches up
+in the background and, once it reaches the head, requests one reconcile — which closes the boot race
+where the certificate manager's own startup reconcile runs before any slug is known.
+
 **This is the only proxy tier there is.** There was a second one — `qits-gateway`, one per
 environment, demultiplexing services by PATH inside its tier — and it is gone: every service is
 reached on a name of its own now, so a per-environment hop would have been a second address for
@@ -532,27 +539,46 @@ failures. Telemetry is real in a deployment.
 ### TLS: wildcard certificates through DNS-01
 
 The `acme/` module is the edge's ACME client. For a configured apex it orders one SAN certificate
-covering the apex, `*.<domain>`, and `*.<environment>.<domain>` for every configured environment.
-That covers platform names such as `idp.wohlben.eu` and project names such as
-`qits.dev.wohlben.eu` without issuing one certificate per hostname.
+whose names are **derived**, in four tiers, because a wildcard covers exactly one label:
 
-**A wildcard covers exactly one label, and `QITS_EDGE_ACME_ADDITIONAL_NAMES` covers the rest.** The
-derived set above is every depth the edge's Host reading has, so `*.<domain>` answers for
-`editor.<domain>` and for nothing under it, and `*.<env>.<domain>` only holds where that middle label
-is an environment. The web editor is served at `editor.<project>.<domain>` — one origin per project,
-under a label that is a *project* — so no wildcard this platform can order reaches it and each host
-has to be a SAN of its own:
+| tier | shape | reaches |
+| --- | --- | --- |
+| apex | `wohlben.eu`, `*.wohlben.eu` | `idp.wohlben.eu`, and nothing under it |
+| environment | `*.<env>.<domain>` | `ci.dev.wohlben.eu` |
+| project | `*.<slug>.<domain>` | `editor.acme.wohlben.eu` |
+| project × environment | `*.<slug>.<env>.<domain>` | `editor.acme.dev.wohlben.eu` |
+
+**The project tiers are fed by events, not by configuration.** qits-projects publishes
+`ProjectCreated` and `ProjectDeleted`; `ProjectLifecycleSubscriber` projects them into `edge_project`
+(a durable, replay-from-epoch consumer like the routing one, tombstoned so a late create cannot
+resurrect a deleted project) and `EdgeProjects.slugs()` is what the name set is built from. A
+project created on Tuesday is on the certificate on Tuesday — which is what retired the older
+arrangement, where the editor host reached the certificate only if somebody remembered to add it to
+a bootstrap key.
+
+A create **requests** a reconcile rather than performing one: the request is debounced by
+`qits.edge.acme.reconcile-debounce` (30s), because epoch replay delivers every `ProjectCreated` ever
+published in one burst and an order per frame would spend Let's Encrypt's five duplicate
+certificates a week within seconds. A **delete orders nothing at all** — every name on the installed
+certificate still answers, so the surplus wildcard ages out at the next renewal.
+
+**`QITS_EDGE_ACME_ADDITIONAL_NAMES` remains, for names no tier describes:**
 
 ```
 QITS_EDGE_ACME_ADDITIONAL_NAMES=editor.acme,editor.gizmo.wohlben.eu
 ```
 
 Whole or relative to the domain; `editor.acme` is `editor.acme.<domain>`. It is a list of **names**
-and knows nothing about editors — the editor is today's reason for it and will not be the last. The
-bootstrap owns the list (`QITS_ACME_EXTRA_SANS`) and checks it before the run, because the edge
-answers its challenges in this domain's own zone and one name outside it fails the whole order.
-Unset orders exactly the derived set; a name added reaches the certificate at the next order — the
-12h reconcile, or a restart at once.
+and knows nothing about projects. The bootstrap owns the list (`QITS_ACME_EXTRA_SANS`) and checks it
+before the run, because the edge answers its challenges in this domain's own zone and one name
+outside it fails the whole order. Unset orders exactly the derived set; a name added reaches the
+certificate at the next order — the 12h reconcile, or a restart at once.
+
+**The ceiling is 100 names**, which Let's Encrypt refuses past rather than trims. `CertificateNames`
+refuses first, and the manager warns at 90: a local refusal is one logged reconcile failure with the
+current certificate still installed and every name on it still answering, where an order sent anyway
+buys the same outcome for a rate-limited request. The arithmetic is `2 + E + P + P·E + A`, and the
+term that grows on its own is `P·E` — one project on a three-environment edge is four names.
 
 The manager writes short-lived `_acme-challenge` TXT values through Hetzner's Cloud API, waits until
 both Cloudflare and Google public DNS-over-HTTPS resolvers observe them, and removes only the value
