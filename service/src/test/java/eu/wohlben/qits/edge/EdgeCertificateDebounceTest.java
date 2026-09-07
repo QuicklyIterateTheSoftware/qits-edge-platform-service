@@ -1,6 +1,7 @@
 package eu.wohlben.qits.edge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import io.quarkus.runtime.configuration.DurationConverter;
@@ -49,6 +50,12 @@ class EdgeCertificateDebounceTest {
 
     final AtomicInteger reconciles = new AtomicInteger();
 
+    /**
+     * How many times a scheduled request reached the guard at all — which is what a spinning re-arm
+     * would show, and the count {@link #reconciles} cannot: a re-arm that loses runs no order.
+     */
+    final AtomicInteger attempts = new AtomicInteger();
+
     /** Held down by a test that wants an order still in flight; counted down to complete it. */
     final CountDownLatch order = new CountDownLatch(1);
 
@@ -56,6 +63,13 @@ class EdgeCertificateDebounceTest {
 
     CountingManager(AcmeConfig acme) {
       super(acme, null, null, null);
+    }
+
+    /** Counted and then DELEGATED: the guard, and losing to it, are still the real ones. */
+    @Override
+    boolean reconcileSafely() {
+      attempts.incrementAndGet();
+      return super.reconcileSafely();
     }
 
     @Override
@@ -72,13 +86,18 @@ class EdgeCertificateDebounceTest {
    * the mode off it returns before taking it, and every test here would pass without one.
    */
   private static AcmeConfig acme() {
+    return acme(DEBOUNCE);
+  }
+
+  /** The same, with a window a test chose — a zero one is what the re-arm floor is about. */
+  private static AcmeConfig acme(Duration debounce) {
     SmallRyeConfig config =
         new SmallRyeConfigBuilder()
             .withMapping(AcmeConfig.class)
             .withSources(
                 new EnvConfigSource(
                     Map.of(
-                        "QITS_EDGE_ACME_RECONCILE_DEBOUNCE", DEBOUNCE.toString(),
+                        "QITS_EDGE_ACME_RECONCILE_DEBOUNCE", debounce.toString(),
                         "QITS_EDGE_ACME_ENABLED", "true",
                         "QITS_EDGE_ACME_MODE", "staging",
                         "QITS_EDGE_ACME_DOMAIN", "wohlben.eu"),
@@ -156,6 +175,49 @@ class EdgeCertificateDebounceTest {
 
     // And it was re-armed rather than lost, so it runs on its own once the order completes.
     awaitReconciles(manager, 2);
+  }
+
+  @Test
+  void theRetryCadenceHasAFloorTheConfiguredWindowDoesNot() {
+    // Two different questions, and only one of them is a deployment's to answer. The debounce is
+    // how long to collect frames before ordering; the retry is how often a request that lost looks
+    // up at a run that takes MINUTES. A zero debounce is a legitimate answer to the first and a
+    // spin as an answer to the second.
+    assertEquals(
+        EdgeCertificateManager.RE_ARM_FLOOR,
+        new CountingManager(acme(Duration.ZERO)).reArmDelay(),
+        "a zero window still waits a second before asking again");
+    assertEquals(
+        Duration.ofMillis(1),
+        acme(Duration.ofMillis(1)).reconcileDebounce(),
+        "and the FIRST fire is still exactly what was configured");
+    assertEquals(
+        Duration.ofMinutes(5),
+        new CountingManager(acme(Duration.ofMinutes(5))).reArmDelay(),
+        "a window longer than the floor is the cadence itself");
+  }
+
+  @Test
+  void aRequestThatKeepsLosingDoesNotSpin() throws Exception {
+    // What the floor is worth, measured the way the defect was: with the window at zero and an
+    // order held open, an unfloored re-arm reschedules itself as fast as the executor will run it
+    // — ~580,000 attempts and 4.6s of CPU across a three-second order, one INFO line each. Every
+    // one of those attempts reaches the guard, which is what `attempts` counts.
+    CountingManager manager = new CountingManager(acme(Duration.ZERO));
+    manager.holdTheOrderOpen = true;
+    Thread inFlight = new Thread(manager::reconcileSafely, "an-order-in-flight");
+    inFlight.start();
+    awaitReconciles(manager, 1);
+
+    manager.requestReconcile();
+    Thread.sleep(2_000);
+    int spun = manager.attempts.get();
+
+    manager.order.countDown();
+    inFlight.join();
+    awaitReconciles(manager, 2);
+    // The in-flight run, plus one attempt per floored window and never more than a handful.
+    assertTrue(spun <= 6, "the re-arm reached the guard " + spun + " times in two seconds");
   }
 
   private static void awaitReconciles(CountingManager manager, int expected) throws Exception {

@@ -170,7 +170,28 @@ class CertificateNamesTest {
     // was dropped — the drop runs from the END of the sorted order, whatever order they arrived in.
     assertThat(sorted.droppedProjects().getLast()).isEqualTo("project-9");
     assertThat(sorted.names()).doesNotContain("*.project-9.wohlben.eu");
-    assertThat(reversed.names()).containsExactlyInAnyOrderElementsOf(sorted.names());
+    // Exact ORDER, not merely the same set: the SAN list a certificate carries is written in this
+    // order, so an arrival order that permuted it would reorder the names on every restart.
+    assertThat(reversed.names()).containsExactlyElementsOf(sorted.names());
+  }
+
+  @Test
+  void theProjectTiersAreEmittedSortedWhateverOrderTheyArriveIn() {
+    // Nothing was dropped here — this is the ORDER of a set that fits, which is a separate promise
+    // from which projects fit. It used to come out in the caller's order, and read as deterministic
+    // only because EdgeProjects happens to `order by slug`.
+    assertThat(
+            CertificateNames.capped(
+                    "wohlben.eu", List.of("dev"), List.of("gizmo", "acme"), List.of())
+                .names())
+        .containsExactly(
+            "wohlben.eu",
+            "*.wohlben.eu",
+            "*.dev.wohlben.eu",
+            "*.acme.wohlben.eu",
+            "*.gizmo.wohlben.eu",
+            "*.acme.dev.wohlben.eu",
+            "*.gizmo.dev.wohlben.eu");
   }
 
   @Test

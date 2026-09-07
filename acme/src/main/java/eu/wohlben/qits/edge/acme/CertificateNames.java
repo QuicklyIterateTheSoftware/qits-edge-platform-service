@@ -112,9 +112,11 @@ public final class CertificateNames {
    * additional names, capped at {@link #MAX_SANS} by dropping whole project tiers.
    *
    * <p>The answer keeps the order it was built in — apex, {@code *.<domain>}, the environment tier,
-   * the project tier, the project×environment tier, then the additional names as written — so the
-   * certificate's subject and SAN order is a property of the configuration and of the projection
-   * rather than of a hash seed that changes with every restart.
+   * then the two project tiers in the slugs' SORTED order, then the additional names as written —
+   * so the certificate's subject and SAN order is a property of the configuration and of the
+   * projection rather than of a hash seed that changes with every restart. The project tiers are
+   * sorted here rather than taken in arrival order, so the guarantee does not rest on the caller
+   * happening to hand them over sorted.
    *
    * <p><b>What over-cap does, and why it is not a refusal.</b> {@code 2 + E + P + P·E + A} passes
    * 100 on an estate nobody decided to grow: {@code P} moves with ordinary project creation and
@@ -203,16 +205,17 @@ public final class CertificateNames {
     for (String environment : environmentLabels) {
       names.add("*." + environment + "." + root);
     }
-    for (String project : projectLabels) {
-      if (kept.contains(project)) {
-        names.add("*." + project + "." + root);
-      }
+    // `kept` was filled in the slugs' sorted order, and emitting from it rather than from the
+    // caller's collection is what makes the ORDER as deterministic as the membership: two calls
+    // with the same slugs in different arrival orders are the same SAN list, not merely the same
+    // set. It was true in practice already — EdgeProjects sorts — and a guarantee that holds
+    // because of somebody else's ORDER BY is not one.
+    for (String project : kept) {
+      names.add("*." + project + "." + root);
     }
-    for (String project : projectLabels) {
-      if (kept.contains(project)) {
-        for (String environment : environmentLabels) {
-          names.add("*." + project + "." + environment + "." + root);
-        }
+    for (String project : kept) {
+      for (String environment : environmentLabels) {
+        names.add("*." + project + "." + environment + "." + root);
       }
     }
     names.addAll(extras);

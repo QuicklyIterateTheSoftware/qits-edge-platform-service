@@ -51,6 +51,13 @@ public class EdgeCertificateManager {
    */
   private static final int NAMES_WARNING_THRESHOLD = 90;
 
+  /**
+   * The shortest a lost request waits before asking again — see {@link #reArmDelay()}. A second is
+   * nothing against an ACME order and is a bound rather than a tuning knob, which is why it is a
+   * constant and not a key.
+   */
+  static final Duration RE_ARM_FLOOR = Duration.ofSeconds(1);
+
   private final AcmeConfig acme;
   private final EdgeConfig edge;
   private final AcmeLease lease;
@@ -93,24 +100,54 @@ public class EdgeCertificateManager {
    * {@code ProjectSansBootstrap}'s post-catch-up request lands inside that window, so the first
    * certificate carried no project SANs at all until the 12h sweep. The re-arm is bounded by the
    * pending flag rather than a queue: at most one request is ever outstanding, and it retries one
-   * debounce window at a time until it actually runs.
+   * window at a time until it actually runs.
    */
   public void requestReconcile() {
     if (!pending.compareAndSet(false, true)) {
       return;
     }
+    schedule(acme.reconcileDebounce());
+  }
+
+  /**
+   * One armed request: wait, clear the flag, and run — or ask again on the retry cadence.
+   *
+   * <p>The pending flag is re-taken before the next window is opened, so an ordinary request
+   * arriving in the meantime is the one that is outstanding and this one stops: the invariant is
+   * still "at most one".
+   */
+  private void schedule(Duration delay) {
     CompletableFuture.runAsync(
         () -> {
           pending.set(false);
-          if (!reconcileSafely()) {
-            LOG.infof(
-                "a certificate reconcile lost to one already running; asking again in %s",
-                acme.reconcileDebounce());
-            requestReconcile();
+          if (reconcileSafely() || !pending.compareAndSet(false, true)) {
+            return;
           }
+          LOG.infof(
+              "a certificate reconcile lost to one already running; asking again in %s",
+              reArmDelay());
+          schedule(reArmDelay());
         },
-        CompletableFuture.delayedExecutor(
-            acme.reconcileDebounce().toMillis(), TimeUnit.MILLISECONDS));
+        CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS));
+  }
+
+  /**
+   * How long a LOST request waits before asking again — the debounce, but never less than {@link
+   * #RE_ARM_FLOOR}.
+   *
+   * <p><b>The floor is on the retry and not on the first fire</b>, because the two are answering
+   * different questions. The debounce is how long to collect frames before ordering, and a
+   * deployment that wants that at zero is entitled to it. The retry is how often to ask a run that
+   * is already in flight whether it has finished, and that run is an ACME order with DNS
+   * propagation waits in it — minutes. At a zero debounce the re-arm becomes a spin: measured at
+   * ~580,000 re-arms and 4.6 seconds of CPU across a three-second order, with an INFO line each
+   * time, and a real 10-minute order would hold a thread at it. The window that is actually
+   * configurable is the one that decides when the order is placed; this one only decides how often
+   * a waiting request looks up.
+   */
+  Duration reArmDelay() {
+    Duration debounce = acme.reconcileDebounce();
+    return debounce.compareTo(RE_ARM_FLOOR) < 0 ? RE_ARM_FLOOR : debounce;
   }
 
   @Scheduled(every = "12h", concurrentExecution = ConcurrentExecution.SKIP)

@@ -166,6 +166,63 @@ class ProjectSansTest {
     assertEquals(0, certificates.requests.get());
   }
 
+  @Test
+  void anInterruptedCatchUpLowersTheRoutingBarrierRatherThanLeavingItUp() throws Exception {
+    // The slug set is a ROUTING input, so this bootstrap holds a 503 over the names whose reading
+    // needs it. Returning from the retry loop with that barrier still up would leave a live edge
+    // answering "retry shortly" to those names for as long as it runs, with nothing left running
+    // to lower it — the one state the barrier must never reach. What it falls back to is the
+    // behaviour the platform had before the barrier existed.
+    ProjectSansBootstrap bootstrap =
+        new ProjectSansBootstrap(
+            alwaysUnavailable(), certificates, true, java.time.Duration.ofSeconds(30));
+    Thread worker = new Thread(bootstrap::catchUpAndRequestReconcile, "an-interrupted-catch-up");
+    worker.start();
+    awaitSleeping(worker);
+    assertFalse(
+        bootstrap.authoritative(), "a projection that has read nothing is not authoritative");
+
+    worker.interrupt();
+    worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(5));
+
+    assertFalse(worker.isAlive());
+    assertTrue(bootstrap.authoritative());
+    // And nothing is ordered on the way out: the desired set was never complete.
+    assertEquals(0, certificates.requests.get());
+  }
+
+  /** A qits-events nobody can read, so the loop always reaches its retry. */
+  private static DeploymentProjectionCatchup alwaysUnavailable() {
+    return new DeploymentProjectionCatchup() {
+      @Override
+      public eu.wohlben.qits.eventstream.control.CatchupResult rebuildFromEpoch(String consumerId) {
+        return unavailable(consumerId);
+      }
+
+      @Override
+      public eu.wohlben.qits.eventstream.control.CatchupResult catchUp(String consumerId) {
+        return unavailable(consumerId);
+      }
+
+      private eu.wohlben.qits.eventstream.control.CatchupResult unavailable(String consumerId) {
+        return new eu.wohlben.qits.eventstream.control.CatchupResult(
+            consumerId, eu.wohlben.qits.eventstream.control.CatchupResult.Status.UNAVAILABLE, 0);
+      }
+    };
+  }
+
+  /** Until the thread is inside its retry sleep, so the interrupt lands where the code reads it. */
+  private static void awaitSleeping(Thread worker) throws InterruptedException {
+    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    while (System.nanoTime() < deadline) {
+      if (worker.getState() == Thread.State.TIMED_WAITING) {
+        return;
+      }
+      Thread.sleep(5);
+    }
+    throw new AssertionError("the catch-up never reached its retry wait");
+  }
+
   /**
    * The wire shape qits-projects publishes, unknown fields and all.
    *

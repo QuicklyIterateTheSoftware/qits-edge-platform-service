@@ -92,7 +92,9 @@ public class ProjectSansBootstrap {
 
   /**
    * Package-visible so a suite can put the barrier back up and take it down again; production only
-   * ever raises it, once, from {@link #catchUpAndRequestReconcile()}.
+   * ever RAISES it, and only from {@link #catchUpAndRequestReconcile()} — on reaching the log head,
+   * on catch-up being disabled by configuration, or on giving up, which are the three ways this
+   * process stops holding names back.
    */
   void authoritative(boolean value) {
     caughtUp.set(value);
@@ -123,13 +125,34 @@ public class ProjectSansBootstrap {
     }
   }
 
+  /**
+   * The retry wait, and the one place this loop can stop without having read anything.
+   *
+   * <p><b>An interrupt lowers the barrier rather than leaving it up.</b> Nothing in this process
+   * holds a reference to the virtual thread this runs on, and Quarkus does not interrupt unmanaged
+   * ones at shutdown either — so the ordinary reading is that only something extraordinary gets
+   * here. "Ordinarily unreachable" is not a proof, though, and the two failures it decides between
+   * are not symmetrical: giving up with the barrier UP leaves a live edge answering 503 to every
+   * project-shaped name for as long as it runs, with nothing left running to lower it, which is
+   * precisely the state the barrier was written to be a window rather than. Coming down leaves
+   * exactly the behaviour the platform had before the barrier existed — the persisted projection
+   * routes, and a slug it never learnt is a 404 — which is the smaller wrong and is logged as one.
+   *
+   * <p>The interrupt flag is restored on the way out, so a shutdown that did send it is still
+   * obeyed by anything that looks.
+   */
   private boolean waitForRetry() {
     try {
       Thread.sleep(retry);
       return true;
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
-      LOG.warn("project SAN catch-up was interrupted; the certificate keeps the names it has");
+      caughtUp.set(true);
+      LOG.warn(
+          "project SAN catch-up was interrupted before it reached the log head; the barrier is"
+              + " lowered rather than left up, so this edge routes on the slugs it has and a"
+              + " project created since is a 404 rather than a 503 forever. The certificate keeps"
+              + " the names it has until the next scheduled reconcile.");
       return false;
     }
   }
