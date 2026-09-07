@@ -320,6 +320,65 @@ public final class HostEnvironments {
     return Route.environment(defaultEnvironment);
   }
 
+  /**
+   * Whether this name's reading could still change once more project slugs arrive.
+   *
+   * <p><b>The project set became a ROUTING input, and it is fed by a projection that starts
+   * behind.</b> {@code EdgeProjects} replays qits-projects' log from the epoch at every boot, so
+   * there is a window — a deployment catching up, or qits-events being down for this one consumer —
+   * in which a slug the platform has exists here and a slug it has does NOT. Every name that
+   * consults the set reads differently across that window: {@code editor.acme.dev.example.com} is
+   * the editor when {@code acme} is known and a short-form 404 pointing at a name that also 404s
+   * when it is not, and {@code acme.dev.example.com} is a project door or an unknown app.
+   *
+   * <p>So the caller asks this before it answers one of those 404s, and answers {@code 503} while
+   * the projection is behind — see {@code EdgeRouter}. A retryable "not yet" is recoverable; a 404
+   * naming the wrong spelling is a person filing a bug against a platform that is merely reading.
+   *
+   * <p><b>Deliberately conservative.</b> It says yes whenever SOME slug set would read this name
+   * differently, which includes names whose middle label nobody will ever create. The cost of a
+   * false yes is one 503 instead of one 404 during a catch-up; the cost of a false no is the answer
+   * this exists to prevent.
+   *
+   * @param projects the slugs that exist right now — the same set {@link #route(String, Set)} was
+   *     given, so this answers about the reading that actually happened
+   */
+  public boolean projectSensitive(String host, Set<String> projects) {
+    String name = normalise(host);
+    if (name.isEmpty() || isAddressLiteral(name)) {
+      return false;
+    }
+    String[] labels = name.split("\\.", -1);
+    // The readings of route(), in the same order, asking of each one whether a slug could take it.
+    if (labels.length > 1 && environments.contains(labels[1])) {
+      // $app.$env.$domain. An environment at position 1 beats everything, so the only thing a slug
+      // can still change here is the FIRST label: a project there is that project's door rather
+      // than an unroutable app. A configured app label already owns it, and a slug already read as
+      // one has nothing left to learn.
+      return !apps.contains(labels[0]) && !projects.contains(labels[0]) && isLabel(labels[0]);
+    }
+    if (labels.length > 2 && projects.contains(labels[1])) {
+      return false;
+    }
+    if (labels.length > 2 && environments.contains(labels[2]) && isLabel(labels[1])) {
+      // $app.$project.$env.$domain, one slug short of being served at all.
+      return true;
+    }
+    if (environments.contains(labels[0])) {
+      // The environment's own door, and no reading below it consults a project.
+      return false;
+    }
+    if (labels.length > 2 && isLabel(labels[1])) {
+      // $app.$project.$domain — the short spelling, whose 404 names the explicit host. Which host
+      // that is depends on whether the middle label is a project, so the answer moves with the set.
+      return true;
+    }
+    // $project.$domain and $app.$domain are the same 404 either way: both readings name the same
+    // explicit host, so a slug arriving changes nothing a caller can see. And one label, an address
+    // and no Host at all name no project and never could.
+    return false;
+  }
+
   /** The leading label, when it is one at all: it is written into an answer, so it is checked. */
   private static String leading(String label) {
     return isLabel(label) ? label : null;

@@ -50,6 +50,11 @@ class EdgeRoutingTest {
 
   @Inject EdgeProjects projects;
 
+  /**
+   * The project projection's barrier, which this suite lowers to see what a behind edge answers.
+   */
+  @Inject ProjectSansBootstrap projectSans;
+
   @Inject
   @DataSource("edge")
   AgroalDataSource edgeDataSource;
@@ -834,6 +839,69 @@ class EdgeRoutingTest {
     EdgeClient.Answer elsewhere = client().get("example.com", "/anything");
     assertEquals(404, elsewhere.status());
     assertTrue(elsewhere.body().contains("serves nothing"), elsewhere.body());
+  }
+
+  // --- the project projection's own barrier -----------------------------------------------------
+
+  @Test
+  void aNameWhoseReadingNeedsMoreSlugsIs503WhileTheProjectionIsBehind() throws Exception {
+    // The window this exists for: the deployment catch-up reaches head first, or qits-events is
+    // down for this one consumer, and the slug set is short. A name in the project tiers then reads
+    // as a name nobody serves — and a 404 telling a person to use a name that also 404s is a bug
+    // report against a platform that is merely reading. A retryable 503 is recoverable.
+    projectSans.authoritative(false);
+    try {
+      // The four-label tier, one slug short of being served at all.
+      EdgeClient.Answer editor = client().get("editor.nosuchproject.dev.example.com", "/editor");
+      assertEquals(503, editor.status());
+      assertEquals("1", editor.headers().get("retry-after"));
+      assertTrue(editor.body().contains("still reading the project log"), editor.body());
+      assertNull(
+          editor.line("upstream"), "nothing reaches an upstream while the answer is unknown");
+
+      // And the project door, whose label would otherwise read as an application nobody routes.
+      assertEquals(503, client().get("nosuchproject.dev.example.com", "/").status());
+    } finally {
+      projectSans.authoritative(true);
+    }
+  }
+
+  @Test
+  void theBarrierTouchesNoNameWhoseAnswerASlugCouldNotChange() throws Exception {
+    // A restarted edge whose edge_project rows survived serves normally throughout, which is the
+    // whole reason this is a per-name question rather than a second readiness gate: the only names
+    // held are the ones that were going to 404 anyway.
+    activateCi();
+    activateProjects("prod");
+    projectSans.authoritative(false);
+    try {
+      // A configured vhost, a published host, the apex, an environment's door, and the four-label
+      // tier of a project this projection DOES know.
+      assertEquals(
+          "mirror-dev", client().get("ci.dev.example.com", "/", token("dev")).line("upstream"));
+      assertEquals(302, client().get("example.com", "/").status());
+      assertEquals(404, client().get("dev.example.com", "/anything").status());
+      assertEquals(
+          "editor-dev",
+          client()
+              .get("editor." + PROJECT + ".dev.example.com", "/editor", token("dev"))
+              .line("upstream"));
+    } finally {
+      projectSans.authoritative(true);
+    }
+  }
+
+  @Test
+  void onceTheProjectionIsAuthoritativeTheSameNamesAre404Again() {
+    // The barrier is a window, not a state: with the log read to its head an unknown slug is a slug
+    // that does not exist, and the answer is the 404 that names the spelling which works.
+    EdgeClient.Answer editor = client().get("editor.nosuchproject.dev.example.com", "/editor");
+    assertEquals(404, editor.status());
+    assertTrue(editor.body().contains("Use http://editor.prod.example.com"), editor.body());
+
+    EdgeClient.Answer door = client().get("nosuchproject.dev.example.com", "/");
+    assertEquals(404, door.status());
+    assertTrue(door.body().contains("`nosuchproject` is not an application"), door.body());
   }
 
   @Test

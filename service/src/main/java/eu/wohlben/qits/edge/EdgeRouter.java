@@ -102,6 +102,9 @@ public class EdgeRouter {
 
   @Inject DeploymentProjectionBootstrap projectionBootstrap;
 
+  /** Whether the project set above is complete — see {@link #projectsBehind}. */
+  @Inject ProjectSansBootstrap projectSans;
+
   private HostEnvironments hostEnvironments;
 
   /** One reusable proxy per configured application vhost. */
@@ -293,6 +296,8 @@ public class EdgeRouter {
       // works.
       if (isApex(authority(request))) {
         door(request, named.environment(), null);
+      } else if (projectsBehind(request)) {
+        projectsCatchingUp(request);
       } else {
         shortForm(request, named);
       }
@@ -300,6 +305,10 @@ public class EdgeRouter {
     }
     Target target = target(named);
     if (target == null) {
+      if (projectsBehind(request)) {
+        projectsCatchingUp(request);
+        return;
+      }
       // NOT a fall-through to the gateway. The name is app-shaped, so it was aimed at a service —
       // and no configuration and no deployment claims it. Answering here is the whole point: a
       // mistyped registry vhost must fail, not quietly reach an unauthenticated route.
@@ -322,6 +331,37 @@ public class EdgeRouter {
     }
 
     serviceGate(request, target);
+  }
+
+  /**
+   * Whether this name's 404 could turn into something else once the project projection catches up.
+   *
+   * <p>Two of the four served spellings carry a project slug, so a projection that is behind reads
+   * them as names nobody serves — {@code editor.acme.dev.example.com} short-form-404s at a name
+   * that also 404s, and {@code acme.dev.example.com} 404s as an unknown application. Both are the
+   * edge answering a question it cannot yet answer, so while {@link
+   * ProjectSansBootstrap#authoritative()} is false those names get a retryable 503 instead. {@link
+   * HostEnvironments#projectSensitive(String, java.util.Set)} decides which ones; everything else —
+   * a known app, a published host, the apex, an environment's own door — is untouched, and a
+   * restarted edge whose {@code edge_project} rows survived serves normally throughout.
+   */
+  private boolean projectsBehind(HttpServerRequest request) {
+    return !projectSans.authoritative()
+        && hostEnvironments.projectSensitive(authority(request), projects.slugs());
+  }
+
+  private void projectsCatchingUp(HttpServerRequest request) {
+    LOG.infof(
+        "the project projection is behind, so %s is answered 503 rather than 404",
+        authority(request));
+    request
+        .response()
+        .setStatusCode(503)
+        .putHeader(HttpHeaders.RETRY_AFTER, "1")
+        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+        .end(
+            "This name carries a project label and the edge is still reading the project log;"
+                + " retry shortly.\n");
   }
 
   /**

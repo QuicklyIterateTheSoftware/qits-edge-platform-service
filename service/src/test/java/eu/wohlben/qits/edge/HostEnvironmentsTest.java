@@ -401,6 +401,56 @@ class HostEnvironmentsTest {
   }
 
   @Test
+  void aNameIsProjectSensitiveExactlyWhenAnotherSlugCouldChangeItsReading() {
+    // What the router asks before it answers a project-shaped 404 while the projection is behind.
+    // The rule it has to satisfy: yes for every name some larger slug set would read differently.
+    assertTrue(
+        TIERS.projectSensitive("editor.nosuchproject.dev.example.com", PROJECTS),
+        "the four-label tier, one slug short of being served");
+    assertTrue(
+        TIERS.projectSensitive("nosuchproject.dev.example.com", PROJECTS),
+        "a would-be project door, read as an application nobody routes");
+    assertTrue(
+        TIERS.projectSensitive("editor.nosuchproject.example.com", PROJECTS),
+        "the short spelling, whose 404 names a different explicit host either way");
+
+    // And no for everything decided without the set, or already decided WITH it.
+    assertFalse(TIERS.projectSensitive("editor.acme.dev.example.com", PROJECTS), "already a tier");
+    assertFalse(TIERS.projectSensitive("acme.dev.example.com", PROJECTS), "already a door");
+    assertFalse(TIERS.projectSensitive("registry.dev.example.com", PROJECTS), "a configured app");
+    assertFalse(TIERS.projectSensitive("dev.example.com", PROJECTS), "an environment's own door");
+    assertFalse(TIERS.projectSensitive("example.com", PROJECTS), "the apex");
+    assertFalse(TIERS.projectSensitive("localhost", PROJECTS), "one label names no project");
+    assertFalse(TIERS.projectSensitive("127.0.0.1:8080", PROJECTS), "nor does an address");
+    assertFalse(TIERS.projectSensitive(null, PROJECTS), "nor a request with no Host at all");
+    assertFalse(
+        TIERS.projectSensitive("nosuchapp.localhost", PROJECTS),
+        "$app.$domain and $project.$domain answer the same explicit name — the label goes in front"
+            + " of the authority either way — so a slug arriving changes nothing a caller sees");
+
+    // DELIBERATELY CONSERVATIVE, and this is what that costs. `nosuchapp.example.com` is sensitive
+    // because a project called `example` would make it the short four-label spelling and move the
+    // name its 404 offers. Nobody will create that project; the answer is still yes, because the
+    // rule is "some slug set reads this differently" and a false no is the wrong answer served.
+    assertTrue(TIERS.projectSensitive("nosuchapp.example.com", PROJECTS));
+  }
+
+  @Test
+  void everyProjectSensitiveNameReallyDoesReadDifferentlyWithTheSlug() {
+    // The predicate and the readings, checked against each other rather than by inspection: for
+    // each of these the route with the slug is a different answer from the route without it.
+    for (String host :
+        List.of(
+            "editor.nosuchproject.dev.example.com",
+            "nosuchproject.dev.example.com",
+            "editor.nosuchproject.example.com")) {
+      java.util.Set<String> larger = java.util.Set.of("acme", "qits", "nosuchproject");
+      assertTrue(TIERS.projectSensitive(host, PROJECTS), host);
+      assertFalse(TIERS.route(host, PROJECTS).equals(TIERS.route(host, larger)), host);
+    }
+  }
+
+  @Test
   void anEnvironmentNameThatCannotBeADnsLabelIsRefused() {
     // The name is interpolated into a host name, so a value DNS could never resolve is a
     // configuration error rather than a connection failure per request.

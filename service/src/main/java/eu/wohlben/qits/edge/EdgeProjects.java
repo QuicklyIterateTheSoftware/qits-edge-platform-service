@@ -19,11 +19,16 @@ import java.util.Set;
 /**
  * The edge's persisted projection of which projects exist, by slug.
  *
- * <p>It exists for the certificate and for nothing else. A project's slug is a label in two of the
- * SAN tiers the edge orders — {@code *.<slug>.<domain>} and {@code *.<slug>.<env>.<domain>}, see
- * {@link eu.wohlben.qits.edge.acme.CertificateNames} — so the edge has to know the set of slugs to
- * know the set of names. No request reads this projection: it decides what is ordered, never where
- * anything is routed.
+ * <p><b>It began as a certificate input and is now a ROUTING one too.</b> A project's slug is a
+ * label in two of the SAN tiers the edge orders — {@code *.<slug>.<domain>} and {@code
+ * *.<slug>.<env>.<domain>}, see {@link eu.wohlben.qits.edge.acme.CertificateNames} — so the edge
+ * has to know the set of slugs to know the set of names. Since the grammar grew its project tiers
+ * it is also read per request: {@code <slug>.<env>.<domain>} is a project's door and {@code
+ * <app>.<slug>.<env>.<domain>} is one application for one project, and only this says which middle
+ * labels are slugs at all. Two consequences follow, and both are load-bearing — {@link #slugs()} is
+ * on the request path and must never touch PostgreSQL, and a projection that has not caught up
+ * routes those names wrongly, which is what {@link ProjectSansBootstrap#authoritative()} and the
+ * router's 503 exist for.
  *
  * <p>The database is the recoverable source, reconstructed from qits-events after a loss. The
  * volatile in-memory copy is what {@link #slugs()} serves, so building a certificate name set never

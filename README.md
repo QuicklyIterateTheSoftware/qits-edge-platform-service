@@ -66,12 +66,19 @@ authoritative. An unavailable event log or a failed event handler leaves it down
 eventstream startup sweep is disabled here because this named, readiness-owning rebuild is the
 startup path; scheduled sweeps remain the post-start safety net.
 
-A **second** consumer, `edge-project-sans`, rebuilds the project-slug projection the certificate is
-built from, and `ProjectSansBootstrap` is deliberately not folded into that barrier: routing
-readiness must not wait on certificate bookkeeping, because a missing slug costs one project's
-editor host a certificate while a missing route sends a request to the wrong process. It catches up
+A **second** consumer, `edge-project-sans`, rebuilds the project-slug projection, and
+`ProjectSansBootstrap` is deliberately not folded into that barrier: holding the whole edge down
+would refuse every request over a projection that decides two spellings out of four. It catches up
 in the background and, once it reaches the head, requests one reconcile — which closes the boot race
 where the certificate manager's own startup reconcile runs before any slug is known.
+
+That set is a **routing** input as well as a certificate one, though, so being outside the barrier
+is not being outside the problem. While it is behind, a name whose reading could still change once
+more slugs arrive — a would-be project door, a would-be four-label name, the short spelling of
+either — is answered `503 Retry-After: 1` instead of a 404 that would name the wrong host. Nothing
+else is: a configured vhost, a published host, the apex and an environment's own door never consult
+the set, and `edge_project` is persisted, so a restarted edge whose rows survived serves normally
+throughout. The window is a genuinely behind projection — a wiped database, or a first boot.
 
 **This is the only proxy tier there is.** There was a second one — `qits-gateway`, one per
 environment, demultiplexing services by PATH inside its tier — and it is gone: every service is
