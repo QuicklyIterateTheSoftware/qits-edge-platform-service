@@ -174,7 +174,8 @@ public class EdgeCertificateManager {
       LOG.warnf(
           "The edge certificate is at %d of the %d names Let's Encrypt issues per certificate;"
               + " %d project(s) across %d environment(s) is what the project tiers cost. Past the"
-              + " ceiling the order is refused and the current certificate stays installed.",
+              + " ceiling whole projects are left off the certificate, and their hosts fail the"
+              + " TLS handshake.",
           desired.size(),
           CertificateNames.MAX_SANS,
           projects.slugs().size(),
