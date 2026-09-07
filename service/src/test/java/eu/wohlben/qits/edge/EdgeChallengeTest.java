@@ -324,6 +324,38 @@ class EdgeChallengeTest {
   }
 
   @Test
+  void aWildcardEntryCoversOneLabelAndTwoOnlyWhenTheInnerOneIsAProject() {
+    // The whole matcher, and the reason it is not a suffix test. `*.dev.wohlben.eu` is one line
+    // that follows a deployment's application list — every service of an environment is its own
+    // browser host — and the editor's tier needs one label MORE than that, because a project sits
+    // between the application and the environment.
+    Set<String> exact = EdgeSessions.browserHosts(List.of("wohlben.eu", "dev.wohlben.eu"));
+    List<String> wildcards =
+        EdgeSessions.wildcardBrowserHosts(List.of("wohlben.eu", "*.dev.wohlben.eu"));
+    Set<String> projects = Set.of("acme");
+
+    assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards, projects), "an entry");
+    assertTrue(EdgeSessions.browserHost("ci.dev.wohlben.eu", exact, wildcards, projects));
+    assertTrue(
+        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards, projects),
+        "the editor's own name, which no one-label wildcard can express");
+    // Two labels where the inner one is NOT a project is another site to a browser, and a return
+    // target this process must not reflect — subdomain takeover is what an open list would cost.
+    assertFalse(EdgeSessions.browserHost("evil.co.dev.wohlben.eu", exact, wildcards, projects));
+    assertFalse(
+        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards, Set.of()),
+        "the slug has to exist: the project set is live, and a name is only a tier while it does");
+    assertFalse(
+        EdgeSessions.browserHost("a.b.c.dev.wohlben.eu", exact, wildcards, projects), "three");
+    assertFalse(
+        EdgeSessions.browserHost("dev.wohlben.eu.evil.example", exact, wildcards, projects),
+        "the entry is a suffix of this name and matches nothing");
+    // The port is part of the authority on both sides, so a name on another port matches nothing.
+    assertFalse(EdgeSessions.browserHost("ci.dev.wohlben.eu:8443", exact, wildcards, projects));
+    assertFalse(EdgeSessions.browserHost(null, exact, wildcards, projects));
+  }
+
+  @Test
   void onlyARequestThatCouldRenderALoginPageIsRedirected() {
     // Sec-Fetch-Mode answers it whenever it is there: `navigate` is the one value that means a
     // document is being loaded, and everything else is a request made by a page that already

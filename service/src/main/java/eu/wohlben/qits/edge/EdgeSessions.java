@@ -91,6 +91,13 @@ public class EdgeSessions {
 
   @Inject Idp idp;
 
+  /**
+   * The live project set, for the return host alone. A project slug is a label in the four-label
+   * tier, so {@code editor.<slug>.<env>.<domain>} is a browser host exactly when that slug exists —
+   * see {@link #browserHost(String, Set, List, Set)}.
+   */
+  @Inject EdgeProjects projects;
+
   @Inject Vertx vertx;
 
   private HttpClient client;
@@ -409,10 +416,23 @@ public class EdgeSessions {
    *
    * <p>The ORIGIN is the caller's, because the page moves with its deployment. Only the return host
    * is decided here: an authority nobody listed falls back to the door rather than being reflected.
+   *
+   * <p><b>The four-label tier is why the project set is read here.</b> A person logging in from
+   * {@code editor.acme.dev.example.com} must come back to the editor they were opening, and that
+   * name has two labels in front of the environment — no one-label wildcard matches it, so without
+   * this the login would succeed and land them on the door instead, with nothing anywhere saying
+   * why. idp holds an allow-list of its own for the same value; a return host this edge sends and
+   * idp does not accept has the same symptom one hop further away.
    */
   String loginLocation(String loginOrigin, String requestedAuthority, String uri) {
+    return loginLocation(loginOrigin, requestedAuthority, uri, projects.slugs());
+  }
+
+  /** The same, with the project set stated — so the return-host rule can be asserted directly. */
+  String loginLocation(
+      String loginOrigin, String requestedAuthority, String uri, Set<String> projects) {
     String host = authority(requestedAuthority);
-    if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts)) {
+    if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts, projects)) {
       host = authority(canonicalOrigin.getAuthority());
     }
     return (loginOrigin == null ? canonicalOrigin.toString() : loginOrigin)
@@ -479,14 +499,30 @@ public class EdgeSessions {
     return authority(configured.strip().substring(2));
   }
 
+  /** The configured list alone, for the one question asked before any project is known. */
+  static boolean browserHost(String host, Set<String> exact, List<String> wildcards) {
+    return browserHost(host, exact, wildcards, Set.of());
+  }
+
   /**
-   * Whether this authority may receive a person after login: an exact entry, or exactly one label
-   * in front of a wildcard entry's authority. The port is part of the authority on both sides, so a
-   * name on another port matches nothing.
+   * Whether this authority may receive a person after login: an exact entry, or a wildcard entry's
+   * authority with what is in front of it accounted for. The port is part of the authority on both
+   * sides, so a name on another port matches nothing.
+   *
+   * <p><b>One label in front, or two when the inner one is a PROJECT.</b> {@code *.dev.example.com}
+   * covers {@code ci.dev.example.com}, and it covers {@code editor.acme.dev.example.com} exactly
+   * when {@code acme} is a project this edge knows — which is the tier the web editor is served on,
+   * and a name no one-label wildcard can express. The check stays a match rather than becoming a
+   * suffix test: {@code evil.co.dev.example.com} is a different site to a browser and still matches
+   * nothing, because {@code co} is not a project. Naming the projects here is what keeps the
+   * widening exactly as wide as the grammar — the apex still comes from this list, so no {@code
+   * Host} header a caller invents can name a return target under a domain the deployment did not
+   * configure.
    *
    * <p>Package-private and static so the matrix can be asserted without booting anything.
    */
-  static boolean browserHost(String host, Set<String> exact, List<String> wildcards) {
+  static boolean browserHost(
+      String host, Set<String> exact, List<String> wildcards, Set<String> projects) {
     if (host == null) {
       return false;
     }
@@ -497,8 +533,15 @@ public class EdgeSessions {
       if (!host.endsWith("." + suffix)) {
         continue;
       }
-      String label = host.substring(0, host.length() - suffix.length() - 1);
-      if (!label.isEmpty() && label.indexOf('.') < 0) {
+      String leading = host.substring(0, host.length() - suffix.length() - 1);
+      if (leading.isEmpty()) {
+        continue;
+      }
+      int dot = leading.indexOf('.');
+      if (dot < 0) {
+        return true;
+      }
+      if (dot == leading.lastIndexOf('.') && projects.contains(leading.substring(dot + 1))) {
         return true;
       }
     }

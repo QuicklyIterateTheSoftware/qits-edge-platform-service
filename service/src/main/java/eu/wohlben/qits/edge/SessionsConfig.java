@@ -63,12 +63,18 @@ public interface SessionsConfig {
    * apex plus its environment host in domain mode, and localhost:port locally. This is an
    * allow-list, not a parent-domain suffix check.
    *
-   * <p><b>An entry may be {@code *.<authority>}</b>, which matches exactly ONE extra label in front
-   * of that authority and nothing else — {@code *.dev.example.com} covers {@code
-   * ci.dev.example.com} and refuses {@code a.b.dev.example.com}. Every service of an environment is
-   * its own browser host now, so listing them here would be a second copy of the deployment's app
-   * list; the wildcard is one line that follows it. The port is part of the authority on both
-   * sides, so a name reached on another port matches nothing.
+   * <p><b>An entry may be {@code *.<authority>}</b>, which matches ONE extra label in front of that
+   * authority — {@code *.dev.example.com} covers {@code ci.dev.example.com} and refuses {@code
+   * a.b.dev.example.com}. Every service of an environment is its own browser host now, so listing
+   * them here would be a second copy of the deployment's app list; the wildcard is one line that
+   * follows it. The port is part of the authority on both sides, so a name reached on another port
+   * matches nothing.
+   *
+   * <p><b>Two labels match when the inner one is a PROJECT</b>, which is the editor's tier: {@code
+   * editor.acme.dev.example.com} is covered by the same {@code *.dev.example.com} entry while
+   * {@code acme} is a project this edge knows, and {@code evil.co.dev.example.com} is covered by
+   * nothing. So no entry has to be added for the project tier, and none has to be added per
+   * project.
    */
   @WithDefault("localhost:8080")
   List<String> browserHosts();

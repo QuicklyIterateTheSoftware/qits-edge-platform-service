@@ -44,6 +44,15 @@ class EdgeSessionGateTest {
 
   @Inject EdgeRoutes routes;
 
+  @Inject EdgeProjects projects;
+
+  @Inject
+  @io.quarkus.agroal.DataSource("edge")
+  io.agroal.api.AgroalDataSource edgeDataSource;
+
+  /** The project whose editor a person is opening when the gate turns them away. */
+  private static final String PROJECT = "acme";
+
   /**
    * The flag, and nothing else. The credential and the time bounds are {@code StubGateways}', which
    * is where the facts about this stub idp belong — so the difference between the two suites is
@@ -52,14 +61,10 @@ class EdgeSessionGateTest {
   public static class SessionsOn implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      return Map.of(
-          "qits.edge.sessions.enabled", "true",
-          "qits.edge.sessions.canonical-origin", "https://example.com",
-          // The wildcard is the whole reason a service's own name can hold a session: every
-          // application of an environment is a browser host now, and listing them here would be a
-          // second copy of the deployment's app list.
-          "qits.edge.sessions.browser-hosts",
-              "example.com,dev.example.com,prod.example.com,*.dev.example.com");
+      // Literally the one line now. The canonical origin and the browser hosts moved to
+      // StubGateways with the rest of the fixture's facts: they are the domain this suite types,
+      // which both suites have to agree about, rather than anything the gate decides.
+      return Map.of("qits.edge.sessions.enabled", "true");
     }
   }
 
@@ -71,6 +76,25 @@ class EdgeSessionGateTest {
       client = new EdgeClient(RestAssured.port);
     }
     return client;
+  }
+
+  @BeforeEach
+  void publishProject() throws java.sql.SQLException {
+    // The slug is a routing input and a return-host input: `editor.acme.dev.example.com` is a
+    // browser host exactly while `acme` exists. Cleared first so the row this suite routes with is
+    // this suite's own, whatever any other class in the JVM dated its frames.
+    try (java.sql.Connection connection = edgeDataSource.getConnection();
+        java.sql.PreparedStatement delete =
+            connection.prepareStatement("delete from edge_project")) {
+      delete.executeUpdate();
+    }
+    projects.load(null);
+    projects.apply(
+        PROJECT,
+        "p-sessions",
+        true,
+        java.util.UUID.randomUUID().toString(),
+        java.time.Instant.now());
   }
 
   @BeforeEach
@@ -293,6 +317,60 @@ class EdgeSessionGateTest {
     assertEquals(
         "https://example.com/idp/login?return_host=ci.dev.example.com&return_path=%2F",
         answer.headers().get("location"));
+  }
+
+  // --- the four-label tier, which is two labels in front of the environment ----------------------
+
+  @Test
+  void aNavigationOnTheEditorsOwnNameComesBackToTheEditor() {
+    // THE POINT of teaching the matcher this shape. `editor.acme.dev.example.com` has TWO labels in
+    // front of the environment, and `*.dev.example.com` matches exactly one — so the return host
+    // used to be refused and quietly replaced by the door. A person logging in to open a file
+    // landed on the projects page instead, with nothing anywhere saying why.
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "editor." + PROJECT + ".dev.example.com",
+                "/editor/src/main.ts",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "https://example.com/idp/login?return_host=editor."
+            + PROJECT
+            + ".dev.example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
+        answer.headers().get("location"));
+    assertNull(answer.line("upstream"), "it must not have reached the editor");
+  }
+
+  @Test
+  void aNameNobodyListedStillFallsBackToTheDoor() {
+    // The widening is the grammar and no wider, and the fallback it did not touch: this suite lists
+    // `*.dev.example.com` and no wildcard for prod, so a prod service's own name is a return target
+    // this process refuses to reflect. The whole matrix of the matcher is EdgeChallengeTest's.
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "registry.prod.example.com",
+                "/v2/",
+                null,
+                Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
+    assertEquals(302, answer.status());
+    assertEquals(
+        "https://example.com/idp/login?return_host=example.com&return_path=%2Fv2%2F",
+        answer.headers().get("location"));
+  }
+
+  @Test
+  void aSessionOpensTheEditorsOwnNameWithItsIdentity() {
+    // And the other half: the tier is a service vhost like any other once the cookie is good. The
+    // upstream that answers is the NAMED environment's, which is what the third label decided.
+    EdgeClient.Answer answer =
+        client().get("editor." + PROJECT + ".dev.example.com", "/editor/src/main.ts", session());
+    assertEquals("editor-dev", answer.line("upstream"));
+    assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
   }
 
   // --- a session that works ---------------------------------------------------------------------

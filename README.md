@@ -324,7 +324,7 @@ a file.
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
 | `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The **apex**: the one name served with no environment label, what every derived origin is built on when a name says nothing else, and the login origin's fallback |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
-| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Browser return authorities. An entry may be `*.<authority>`, which matches exactly ONE extra label — `*.dev.example.com` covers every service's own name and refuses `a.b.dev.example.com` |
+| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Browser return authorities. An entry may be `*.<authority>`, which matches ONE extra label — `*.dev.example.com` covers every service's own name — or TWO when the inner one is a project, which is what covers `editor.acme.dev.example.com`. It refuses `evil.co.dev.example.com`, and needs no entry per project |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
@@ -477,6 +477,15 @@ follow it, because it is also the apex every other name is measured against — 
 and is the fallback while no deployment has published a host for the login path. idp is a platform
 service deployed once, so an environment that owns no route for the path asks the default
 environment before falling back.
+
+**The return host is the name the person was on**, when the allow-list covers it. That list is what
+stops the platform's own login becoming a redirector for somebody else's site, so it is a match and
+never a suffix test — and the project tier needed it widened by exactly one label: `*.<env>.<domain>`
+now also covers `<app>.<project>.<env>.<domain>` while that project exists, and covers nothing else
+of that depth. A name it does not cover falls back to the door, which is a person landing somewhere
+they did not ask for; that is the symptom to look for if the **idp's** own
+`QITS_IDP_BROWSER_SSO_BROWSER_HOSTS` has not learnt the same shape, because it validates the same
+value one hop later.
 
 ### A service's own name, gated per request
 
