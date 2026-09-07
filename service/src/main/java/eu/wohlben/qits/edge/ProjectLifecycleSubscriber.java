@@ -35,14 +35,22 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
   /**
    * Private wire DTO rather than a dependency on qits-projects' event jar. The contract is
    * cross-repository JSON and additions must not force the edge to wait for a Maven release, so
-   * unknown fields are ignored — {@code createdAt} and {@code deletedAt} among them, because the
-   * time this projection orders by is the FRAME's, which every consumer sees identically.
+   * unknown fields are ignored — {@code createdAt}, {@code deletedAt} and the project's display
+   * name among them. The time this projection orders by is the FRAME's, which every consumer sees
+   * identically, and the display name is nothing a certificate can be built from.
+   *
+   * <p><b>It holds TWO of the payload's fields, not all of them</b>, and that is what a private
+   * wire DTO is for. The publisher spells the display name {@code projectName} rather than {@code
+   * name}, because a record component called {@code name} collides with the QitsEvent envelope's
+   * {@code @JsonIgnore} mixin there and is silently dropped — a rule their contract test pins. A
+   * copy of that field here would be a second place to get it wrong for a value this consumer has
+   * no use for, so there is none.
    *
    * <p>{@code slug} is the only load-bearing field. It is a DNS label by construction on the
    * publisher's side and is nevertheless checked here: it becomes a certificate name, and one bad
    * name fails the whole ACME order for every other project too.
    */
-  record ProjectLifecyclePayload(String projectId, String slug, String name) {}
+  record ProjectLifecyclePayload(String projectId, String slug) {}
 
   @Inject EdgeProjects projects;
   @Inject EdgeCertificateManager certificates;

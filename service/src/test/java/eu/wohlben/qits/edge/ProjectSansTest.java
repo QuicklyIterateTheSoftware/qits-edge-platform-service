@@ -166,7 +166,15 @@ class ProjectSansTest {
     assertEquals(0, certificates.requests.get());
   }
 
-  /** The wire shape qits-projects publishes, unknown fields and all. */
+  /**
+   * The wire shape qits-projects publishes, unknown fields and all.
+   *
+   * <p>{@code projectName} and {@code createdAt}/{@code deletedAt} are on the wire and are on no
+   * record component here, which is the tolerance this fixture pins: the publisher adds a field and
+   * the edge keeps reading its frames without waiting for a Maven release. The display name is
+   * spelled {@code projectName} rather than {@code name} on that side, and the edge's indifference
+   * to which is the point — it reads neither.
+   */
   private static EventFrame created(String slug, String projectId, Instant at) {
     return frame(
         ProjectLifecycleSubscriber.CREATED,
@@ -174,10 +182,11 @@ class ProjectSansTest {
         new JsonObject()
             .put("projectId", projectId)
             .put("slug", slug)
-            .put("name", "The " + slug + " project")
+            .put("projectName", "The " + slug + " project")
             .put("createdAt", at.toString()));
   }
 
+  /** The same, minus the display name: an optional field's absence is not an unreadable frame. */
   private static EventFrame deleted(String slug, String projectId, Instant at) {
     return frame(
         ProjectLifecycleSubscriber.DELETED,
@@ -185,7 +194,6 @@ class ProjectSansTest {
         new JsonObject()
             .put("projectId", projectId)
             .put("slug", slug)
-            .put("name", "The " + slug + " project")
             .put("deletedAt", at.toString()));
   }
 
