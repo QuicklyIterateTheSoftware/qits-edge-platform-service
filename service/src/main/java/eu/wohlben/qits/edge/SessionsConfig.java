@@ -75,8 +75,15 @@ public interface SessionsConfig {
    * {@code acme} is a project this edge knows, and {@code evil.co.dev.example.com} is covered by
    * nothing. So no entry has to be added for the project tier, and none has to be added per
    * project.
+   *
+   * <p><b>The default is the three names a clone actually serves</b>, which is not what it used to
+   * be: {@code localhost:8080} alone covered the apex and nothing else, and the apex is the one
+   * name no service is on. With the shipped {@code prod} environment the local platform is {@code
+   * prod.localhost:8080} and {@code ci.prod.localhost:8080} — the environment label stopped being
+   * optional when the project tier landed — so a login started anywhere but the door returned to
+   * nothing. The canonical origin is still in the list because startup demands it.
    */
-  @WithDefault("localhost:8080")
+  @WithDefault("localhost:8080,prod.localhost:8080,*.prod.localhost:8080")
   List<String> browserHosts();
 
   /**

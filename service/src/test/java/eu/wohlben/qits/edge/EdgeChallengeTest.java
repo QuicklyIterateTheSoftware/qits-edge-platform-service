@@ -280,7 +280,12 @@ class EdgeChallengeTest {
     // here rather than left to a deployment to keep in step.
     assertEquals("qits-session", sessionDefault("cookieName"));
     assertEquals("http://localhost:8080", sessionDefault("canonicalOrigin"));
-    assertEquals("localhost:8080", sessionDefault("browserHosts"));
+    // The three names a clone serves, not one. `localhost:8080` alone covered the APEX — the one
+    // name no service is on — so with the environment label no longer optional, a login started on
+    // `ci.prod.localhost:8080` had nowhere to return to. The canonical origin stays in the list
+    // because startup refuses a list without it.
+    assertEquals(
+        "localhost:8080,prod.localhost:8080,*.prod.localhost:8080", sessionDefault("browserHosts"));
     assertEquals("/idp/login", sessionDefault("loginPath"));
     assertEquals("/idp/", sessionDefault("anonymousPrefixes"));
     assertEquals("30000", sessionDefault("cacheTtlMs"));
