@@ -613,10 +613,19 @@ outside it fails the whole order. Unset orders exactly the derived set; a name a
 certificate at the next order — the 12h reconcile, or a restart at once.
 
 **The ceiling is 100 names**, which Let's Encrypt refuses past rather than trims. `CertificateNames`
-refuses first, and the manager warns at 90: a local refusal is one logged reconcile failure with the
-current certificate still installed and every name on it still answering, where an order sent anyway
-buys the same outcome for a rate-limited request. The arithmetic is `2 + E + P + P·E + A`, and the
-term that grows on its own is `P·E` — one project on a three-environment edge is four names.
+caps first, by dropping whole **project** tiers — from the end of the slugs' sorted order, a project
+wholly on or wholly off, until the set fits — and the manager logs an `ERROR` naming every dropped
+slug on every reconcile while any are dropped. The arithmetic is `2 + E + P + P·E + A`, and the term
+that grows on its own is `P·E`: one project on a three-environment edge is four names, so a
+three-environment edge reaches the ceiling at its twenty-fourth project.
+
+It used to **refuse** there instead, which read as the cheaper failure and was the more expensive
+one: the refusal was raised while building the name set, which every reconcile does before it knows
+whether it has anything to order, so one project past the ceiling stopped **expiry renewals** too
+and the platform's only TLS terminator would have gone dark ninety days later with one log line per
+reconcile to say so. The apex, `*.<domain>`, the environment tiers and the additional names are
+never dropped — when they alone exceed 100 the derivation still throws, because that is a
+deployment to correct rather than a projection that grew. The manager still warns at 90.
 
 The manager writes short-lived `_acme-challenge` TXT values through Hetzner's Cloud API, waits until
 both Cloudflare and Google public DNS-over-HTTPS resolvers observe them, and removes only the value

@@ -44,9 +44,10 @@ public class EdgeCertificateManager {
   /**
    * The point at which the SAN list is close enough to Let's Encrypt's hard ceiling to say so.
    *
-   * <p>Ten names of headroom, which on a two-environment edge is two more projects. The refusal
-   * itself lives in {@code CertificateNames}; this is the line that appears in the log while there
-   * is still time to do something other than read it after the fact.
+   * <p>Ten names of headroom, which on a two-environment edge is three more projects. The CAP
+   * itself lives in {@code CertificateNames}, which drops whole project tiers past it; this is the
+   * line that appears while there is still time to do something other than read the drop after the
+   * fact.
    */
   private static final int NAMES_WARNING_THRESHOLD = 90;
 
@@ -85,6 +86,14 @@ public class EdgeCertificateManager {
    *
    * <p>The pending flag is cleared before the work rather than after, so a project announced while
    * an order is in flight opens a fresh window instead of being swallowed by the one running.
+   *
+   * <p><b>A request that loses to a run already in flight RE-ARMS.</b> It used to be dropped, and
+   * the boot it was written for is exactly where that cost the most: the startup reconcile holds
+   * the guard for as long as an ACME order takes — up to {@link AcmeConfig#dnsTimeout()} — and
+   * {@code ProjectSansBootstrap}'s post-catch-up request lands inside that window, so the first
+   * certificate carried no project SANs at all until the 12h sweep. The re-arm is bounded by the
+   * pending flag rather than a queue: at most one request is ever outstanding, and it retries one
+   * debounce window at a time until it actually runs.
    */
   public void requestReconcile() {
     if (!pending.compareAndSet(false, true)) {
@@ -93,7 +102,12 @@ public class EdgeCertificateManager {
     CompletableFuture.runAsync(
         () -> {
           pending.set(false);
-          reconcileSafely();
+          if (!reconcileSafely()) {
+            LOG.infof(
+                "a certificate reconcile lost to one already running; asking again in %s",
+                acme.reconcileDebounce());
+            requestReconcile();
+          }
         },
         CompletableFuture.delayedExecutor(
             acme.reconcileDebounce().toMillis(), TimeUnit.MILLISECONDS));
@@ -104,12 +118,18 @@ public class EdgeCertificateManager {
     reconcileSafely();
   }
 
-  void reconcileSafely() {
+  /**
+   * @return whether this call did the deciding — true when it ran a reconcile, and true for an edge
+   *     with no ACME to do, because there is nothing there for a caller to ask again for. False
+   *     means only that another thread held the guard, which is the one outcome a debounced request
+   *     must not treat as done.
+   */
+  boolean reconcileSafely() {
     if (!acme.enabled() || acme.mode() == AcmeConfig.Mode.OFF || acme.domain().isEmpty()) {
-      return;
+      return true;
     }
     if (!running.compareAndSet(false, true)) {
-      return;
+      return false;
     }
     try {
       reconcile();
@@ -120,17 +140,36 @@ public class EdgeCertificateManager {
     } finally {
       running.set(false);
     }
+    return true;
   }
 
-  private void reconcile() throws Exception {
+  /** Package-visible so {@code EdgeCertificateDebounceTest} can hold the real guard down. */
+  void reconcile() throws Exception {
     String domain = acme.domain().orElseThrow().strip().toLowerCase(Locale.ROOT);
     String token = hetznerToken();
-    Set<String> desired =
-        CertificateNames.of(
+    CertificateNames.Names derived =
+        CertificateNames.capped(
             domain,
             edge.environments(),
             projects.slugs(),
             acme.additionalNames().orElseGet(List::of));
+    Set<String> desired = derived.names();
+    if (!derived.droppedProjects().isEmpty()) {
+      // ERROR, on EVERY reconcile, for as long as anything is dropped: this is the alarm. The
+      // certificate is orderable and renewable, and some project's names are not on it — a
+      // condition nothing else in the platform will ever surface, because every name that IS on
+      // the certificate keeps working perfectly.
+      LOG.errorf(
+          "The edge certificate cannot carry every project: %d of %d project(s) are left off it to"
+              + " stay inside Let's Encrypt's %d names, and their hosts will fail the TLS"
+              + " handshake. Dropped: %s. The remedy is fewer environments on this domain or a"
+              + " second certificate; the tiers cost 1 + %d name(s) per project.",
+          derived.droppedProjects().size(),
+          projects.slugs().size(),
+          CertificateNames.MAX_SANS,
+          String.join(", ", derived.droppedProjects()),
+          edge.environments().size());
+    }
     if (desired.size() > NAMES_WARNING_THRESHOLD) {
       LOG.warnf(
           "The edge certificate is at %d of the %d names Let's Encrypt issues per certificate;"

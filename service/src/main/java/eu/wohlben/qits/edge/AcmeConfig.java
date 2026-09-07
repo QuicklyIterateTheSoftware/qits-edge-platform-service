@@ -34,12 +34,12 @@ public interface AcmeConfig {
    *
    * <p>A wildcard is leftmost-only, so {@code *.<domain>} answers for {@code editor.<domain>} and
    * for nothing under it, and {@code *.<env>.<domain>} only holds where that middle label is an
-   * environment. The web editor lives at {@code editor.<project>.<domain>} — a middle label that is
-   * a PROJECT — so no wildcard this platform can order reaches it and each such host has to be a
-   * SAN of its own. The key is a list of NAMES and knows nothing about editors; the editor is
-   * today's reason for it and will not be the last.
+   * environment. The edge derives a tier per known project for both of the depths a project label
+   * makes — see {@code CertificateNames} — so the editor host no longer needs a name here at all.
+   * What is left for this key is what it always said it was: a list of NAMES, for the ones no tier
+   * describes.
    *
-   * <p>The bootstrap renders it, one name per project, whole or relative to the domain:
+   * <p>The bootstrap renders it, whole or relative to the domain:
    *
    * <pre>
    * QITS_EDGE_ACME_ADDITIONAL_NAMES=editor.acme,editor.gizmo.wohlben.eu
