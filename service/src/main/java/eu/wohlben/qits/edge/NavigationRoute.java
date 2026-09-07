@@ -27,10 +27,20 @@ import java.util.List;
  * subpaths. A repeated position is an ordinary tie broken by label, whether the two entries belong
  * to one application or to two.
  *
- * <p>The document is {@code environment}, {@code origin}, {@code slots} and {@code applications},
- * and nothing else. There is no flat list and no synthesized {@code Home}: the environment's own
- * door is qits-projects' {@code system} entry, which is a deployment fact like every other entry
- * here. {@code origin} is that door — it names the environment, and the door serves nothing else.
+ * <p>The document is {@code environment}, {@code origin}, {@code projectOrigin}, {@code slots} and
+ * {@code applications}, and nothing else. There is no flat list and no synthesized {@code Home}:
+ * the environment's own door is qits-projects' {@code system} entry, which is a deployment fact
+ * like every other entry here. {@code origin} is that door — it names the environment, and the door
+ * serves nothing else.
+ *
+ * <p><b>{@code projectOrigin} is the origin a per-project name is built on</b>: prefix {@code
+ * <app>.<slug>.} onto its authority and that is where that application serves that project, {@code
+ * https://editor.acme.dev.example.com}. It is equal to {@code origin} — every environment's
+ * authority carries its own label now, so there is one origin per environment and not two — and it
+ * is published anyway, because it is the FIELD that is the contract rather than the value. It
+ * exists because the client side derived this name itself twice and shipped two domain-derivation
+ * bugs doing it (editor-origin.ts): the server states the authority, and the client's whole job is
+ * to put {@code editor.<slug>.} in front of it.
  *
  * <p>{@code applications} is per-application metadata rather than a placement: one object per
  * application that published an api-docs path, keyed by application name. The path is served on the
@@ -111,6 +121,7 @@ public class NavigationRoute {
             new JsonObject()
                 .put("environment", environment)
                 .put("origin", authority.origin())
+                .put("projectOrigin", authority.origin())
                 .put("slots", slots)
                 .put("applications", applications)
                 .encode());

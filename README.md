@@ -99,45 +99,64 @@ Historical mentions of it below are exactly that; nothing on the platform runs o
 
 ## The routing model
 
-A `Host` name selects an environment, and optionally an application inside it:
+A `Host` name selects an environment, and optionally a project and an application inside it:
 
 | Host                        | Goes to                                             |
 | --------------------------- | --------------------------------------------------- |
 | `prod.example.com`          | the `prod` **door** — `$env.$domain`, and it serves nothing |
 | `registry.prod.example.com` | `prod`'s `registry` upstream — `$app.$env.$domain`  |
 | `registry.dev.example.com`  | `dev`'s `registry` upstream — same entry, other tier |
-| `registry.example.com`      | the **default** environment's `registry` — `$app.$domain`, see below |
-| `example.com`               | the **default** environment's door                  |
-| `staging.example.com`       | the **default** door (`staging` names no environment) |
+| `acme.prod.example.com`     | the `acme` **project's door** in `prod` — `$project.$env.$domain` |
+| `editor.acme.prod.example.com` | the editor, for `acme`, in `prod` — `$app.$project.$env.$domain` |
+| `example.com`               | the **default** environment's door — the apex, and the one name with no environment label |
 | `localhost`, `127.0.0.1`, `[::1]` | the **default** door                          |
 | no `Host` at all            | the **default** door                                |
 | `ci.dev.example.com`, published by a deployment | `dev`'s ci service — its SPA at `/` and every route it owns |
 | `mirror.dev.example.com`, `mirror` unconfigured and unpublished | **404** — see below |
+| `registry.example.com`, `acme.example.com`, `editor.acme.example.com`, `staging.example.com` | **404** naming the explicit spelling — see below |
 
-Only the **first two labels** are read, which is why the domain itself is never configured: it may
+Only the **first three labels** are read, which is why the domain itself is never configured: it may
 be one label, two or three, and the edge does not have to know. An environment name at position 1
-wins over one at position 0, so `staging.prod.example.com` is *application `staging` in environment
+wins over everything, so `staging.prod.example.com` is *application `staging` in environment
 `prod`* — an application may be called anything, whereas a domain whose first label happens to be an
-environment name is a coincidence nobody arranges.
+environment name is a coincidence nobody arranges. At position 0 a configured **service** beats a
+project of the same name; the platform refuses both collisions on its own side rather than relying
+on either tie-break.
 
-**The environment label is optional for the default environment.** That environment's door is the
-apex — it is where a browser lands — so `ci.example.com` is its ci service, `idp.example.com` is
-where the login page is, and `ci.dev.example.com` stays the long spelling of the same place. Only a **known**
-application label reads this way: configured in `qits.edge.apps`, or published by a deployment in
-the default environment. The apex itself is never one, and an unknown first label is not either.
+**The environment label is not optional.** It used to be, for the default environment: the apex is
+that environment's door, so `ci.example.com` was its ci service. The **project tier** ended that.
+With a project label in the middle, `editor.acme.example.com` and `editor.acme.prod.example.com`
+would be one place whose middle label is read as a project in one spelling and an environment in the
+other, and `acme.example.com` would be a project door or an application vhost depending on which set
+a label happened to be in. So a name of more than one label that does not state its environment is
+**404, with the spelling that works in the body**, and the miss is logged at INFO once per request so
+the callers that have not moved can be found. There is no redirect, deliberately: a short name is a
+bookmark, a link or a hard-coded string, and a 302 would keep every one of them working and
+invisible.
 
-Precedence is therefore three readings and then the fallback, and an environment name still wins at
-either position, so no tier can be hidden by an application that shares its spelling:
-`$env.$domain`, `$app.$env.$domain`, `$app.$domain`, the default environment.
+**The apex is the exception**, and the only one: `example.com` is still the default environment's
+door, because that is where a browser that types the bare domain lands. Nothing in a name tells
+`example.com` from `nosuchapp.example.com`, so it is recognised by `canonical-origin` — the one name
+a deployment always states.
 
-An unmatched name is **not an error**. Every one of them goes to the default environment, so a
-mistyped URL reaches the platform's own page rather than a connection error.
+**A project's slug is a label the edge learns from the event stream.** `EdgeProjects` projects
+qits-projects' `ProjectCreated`/`ProjectDeleted` into the set that both certificate names and these
+two readings are built from, so a project created on Tuesday is routable on Tuesday. A slug nobody
+has created is just another label, and its name states no environment.
 
-**An app-shaped name is the one exception, and it is deliberate.** A first label in front of a
-*known* environment was aimed at a service, and services are the names this edge authenticates — so
-falling it through to anything else would hand exactly those requests to a hop that does not check
-them. An unconfigured, unpublished app label is therefore a **404**, decided here. Names that are
-not app-shaped are untouched by the rule. `SessionlessWallIT` and the door story are what pin it.
+**An app-shaped name is 404 rather than a fall-through, and it is deliberate.** A first label in
+front of a *known* environment — or in front of a known project in front of one — was aimed at a
+service, and services are the names this edge authenticates, so falling it through to anything else
+would hand exactly those requests to a hop that does not check them. An unconfigured, unpublished
+app label is therefore a **404**, and the answer names the environment and project it did read.
+`SessionlessWallIT` and the door story are what pin it.
+
+**A project's own name is a door too.** `acme.dev.example.com` answers `GET /` with the same
+redirect the environment door gives — to qits-projects' host — and 404s every other path, naming
+`<app>.acme.dev.example.com`. The one thing decided outside `HostEnvironments` is which of the two a
+single label in front of an environment is: a **published service claims it first**, and the door is
+what is left, because a slug and a published browser host are the same shape and only the deployment
+projection knows the second set.
 
 **A name reaches a service two ways.** `qits.edge.apps` is the configured one — the machine vhosts,
 and the auth attributes that go with them. The deployment projection is the other: a service
@@ -243,12 +262,16 @@ machine token are both answered `404` like any other request.
   right on its own — a cache reading as flakiness. `SpaFreshnessIT` is the story: all three shapes
   served by a real upstream, through a launched edge, with the two that are corrected and the two
   that are not side by side.
-- **Serves `/main-navigation` on every vhost**, from the same snapshots, and writes every origin in
-  the SHORT form for the default environment — `https://example.com` and `https://ci.example.com`,
-  whichever spelling the request itself used. Other environments keep their label, and a one-label
-  apex (`dev.localhost:8080`) keeps its environment because `localhost` alone names them all. The
-  document is `environment`, `origin` and `slots`, and nothing else. `origin` is the door, which
-  names the environment and serves nothing else: every slot of the closed
+- **Serves `/main-navigation` on every vhost**, from the same snapshots, and writes every origin
+  with its environment label — `https://prod.example.com` and `https://ci.prod.example.com`,
+  whichever spelling the request itself used, and including the default environment, whose short
+  form went with the fall-through that served it. A one-label apex (`dev.localhost:8080`) is the
+  same rule rather than an exception to one. The document is `environment`, `origin`,
+  `projectOrigin`, `slots` and `applications`, and nothing else. `origin` is the door, which
+  names the environment and serves nothing else; `projectOrigin` is the authority a client puts
+  `<app>.<slug>.` in front of to reach that application for one project, and it exists because the
+  client side derived that name itself and shipped two domain-derivation bugs doing it. Then every
+  slot of the closed
   vocabulary (empty ones included, so a shell iterates the document rather than a copy of the
   vocabulary), and one entry per placement with the application, the label, the host, that host's
   origin, the application's primary route `path` and the position. `host` is null until that
@@ -299,7 +322,7 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on a service vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
-| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The environment **door**: what the default environment's names are derived from, and the login origin's fallback |
+| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The **apex**: the one name served with no environment label, what every derived origin is built on when a name says nothing else, and the login origin's fallback |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
 | `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080` | Browser return authorities. An entry may be `*.<authority>`, which matches exactly ONE extra label — `*.dev.example.com` covers every service's own name and refuses `a.b.dev.example.com` |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
@@ -450,10 +473,10 @@ nothing.
 
 **The login page lives on idp's own name, not on the door.** The origin is read off the deployment
 projection per request: whoever owns `login-path` and publishes a host. `canonical-origin` cannot
-follow it, because it is also the authority every default-environment name is derived from — so it
-stays the door, and is the fallback while no deployment has published a host for the login path.
-idp is a platform service deployed once, so an environment that owns no route for the path asks the
-default environment before falling back.
+follow it, because it is also the apex every other name is measured against — so it stays the door,
+and is the fallback while no deployment has published a host for the login path. idp is a platform
+service deployed once, so an environment that owns no route for the path asks the default
+environment before falling back.
 
 ### A service's own name, gated per request
 
@@ -547,6 +570,12 @@ whose names are **derived**, in four tiers, because a wildcard covers exactly on
 | environment | `*.<env>.<domain>` | `ci.dev.wohlben.eu` |
 | project | `*.<slug>.<domain>` | `editor.acme.wohlben.eu` |
 | project × environment | `*.<slug>.<env>.<domain>` | `editor.acme.dev.wohlben.eu` |
+
+The third tier is now a name that **resolves and verifies and is not served**: `editor.acme.wohlben.eu`
+states no environment, so the routing model above answers it 404 with the explicit spelling. It stays
+on the certificate deliberately — the TLS handshake happens before that answer, and a name whose
+refusal arrives as a certificate error is a browser page nobody can read. It costs one SAN per
+project against the ceiling below.
 
 **The project tiers are fed by events, not by configuration.** qits-projects publishes
 `ProjectCreated` and `ProjectDeleted`; `ProjectLifecycleSubscriber` projects them into `edge_project`

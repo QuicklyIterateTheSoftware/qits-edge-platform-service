@@ -70,6 +70,21 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   static final String SINKHOLE_SECRET = "sinkhole";
 
+  /**
+   * The apex both suites type, and so the one name the edge may serve with no environment label —
+   * see {@code EdgeRouter.isApex}. Every origin derived from a name that says nothing else is built
+   * on it.
+   */
+  static final String CANONICAL_ORIGIN = "https://example.com";
+
+  /**
+   * The return authorities, with the wildcard that makes every service of an environment one. The
+   * apex must be covered or the process refuses to start; the editor's own four-label name is
+   * covered by the same wildcard, because its middle label is a project.
+   */
+  static final String BROWSER_HOSTS =
+      "example.com,dev.example.com,prod.example.com,*.dev.example.com";
+
   /** The edge's OWN idp client, the one it introspects browser sessions with. */
   static final String EDGE_ID = "an-edge";
 
@@ -185,7 +200,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     for (String environment : List.of("prod", "dev")) {
       config.put(
           "qits.test.environment-upstreams." + environment, "127.0.0.1:" + listen(environment));
-      for (String app : List.of("registry", "mirror")) {
+      for (String app : List.of("registry", "mirror", "editor")) {
         config.put(
             "qits.edge.apps." + app + ".hosts." + environment,
             "127.0.0.1:" + listen(app + "-" + environment));
@@ -195,6 +210,10 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // reached this address would be a resolution bug rather than a test that happened to pass.
     config.put("qits.edge.apps.registry.host-pattern", "{env}-qits-artifacts");
     config.put("qits.edge.apps.mirror.host-pattern", "{env}-qits-mirror");
+    // The third app exists for ONE reading: `editor.<project>.<env>.<domain>`, where the
+    // environment is the THIRD label. Its two upstreams are what makes "the named environment, not
+    // the default" an assertion about which process answered rather than about a status code.
+    config.put("qits.edge.apps.editor.host-pattern", "{env}-qits-workspaces");
     // ONE of the two apps, which is the point: the exemption is per app label, so the suite has a
     // vhost whose reads are open and a vhost that is not, side by side.
     config.put("qits.edge.auth.anonymous-read-apps", "mirror");
@@ -211,6 +230,12 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // resource serve both a suite with the gate off and one with it on.
     config.put("qits.edge.sessions.client-id", EDGE_ID);
     config.put("qits.edge.sessions.client-secret", EDGE_SECRET);
+    // The names, which are facts about this fixture rather than about the gate: the apex the suite
+    // types is `example.com`, and the edge has to be told so — it is what the door is recognised
+    // by and what every derived origin is built from when a name says nothing else. Here rather
+    // than in the profile that turns the gate ON, so both suites read the same domain.
+    config.put("qits.edge.sessions.canonical-origin", CANONICAL_ORIGIN);
+    config.put("qits.edge.sessions.browser-hosts", BROWSER_HOSTS);
     config.put("qits.edge.sessions.cache-ttl-ms", "1000");
     config.put("qits.edge.sessions.stale-grace-ms", "8000");
     // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED

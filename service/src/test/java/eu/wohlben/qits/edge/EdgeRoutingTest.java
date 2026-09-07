@@ -48,9 +48,14 @@ class EdgeRoutingTest {
 
   @Inject EdgeRoutes routes;
 
+  @Inject EdgeProjects projects;
+
   @Inject
   @DataSource("edge")
   AgroalDataSource edgeDataSource;
+
+  /** The project every name in the project tiers is spelled with here. */
+  private static final String PROJECT = "acme";
 
   private static EdgeClient client;
 
@@ -77,6 +82,7 @@ class EdgeRoutingTest {
   @BeforeEach
   void publishEnvironmentFixture() throws Exception {
     clearProjection();
+    publishProject();
     for (String environment : List.of("dev", "prod")) {
       routes.replace(
           environment,
@@ -309,13 +315,14 @@ class EdgeRoutingTest {
   void mainNavigationIsSlotsApplicationsAndNothingElse() {
     // No flat list and no synthesized Home. Every shell reads the tree, and the environment's own
     // door is qits-projects' `system` entry — a deployment fact like every other entry here.
+    // `projectOrigin` is the one addition: the authority a client puts `<app>.<slug>.` in front of.
     activateArtifacts();
     activateCi();
 
     JsonObject document =
         new JsonObject(client().get("dev.example.com", "/main-navigation").body());
     assertEquals(
-        List.of("environment", "origin", "slots", "applications"),
+        List.of("environment", "origin", "projectOrigin", "slots", "applications"),
         List.copyOf(document.fieldNames()));
   }
 
@@ -658,37 +665,191 @@ class EdgeRoutingTest {
         client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
   }
 
-  // --- the default environment, whose door is the apex -------------------------------------------
+  // --- the project tiers -------------------------------------------------------------------------
 
   @Test
-  void aServiceOfTheDefaultEnvironmentIsReachedWithNoEnvironmentLabel() {
-    // `prod` is this suite's default environment, so example.com is its door and ci.example.com is
-    // its ci service. The long spelling stays a name for the same place.
-    activateCi("prod");
+  void theFourLabelTierReachesTheNAMEDEnvironmentsUpstream() {
+    // The name the whole tier exists for: `editor.<project>.<env>.<domain>`. The environment is the
+    // THIRD label, and the two upstreams behind `editor` are what make that an assertion about
+    // which process answered — a reading that stopped at two labels would send both of these to the
+    // default environment's copy and nothing about a status code would say so.
     assertEquals(
-        "mirror-prod", client().get("ci.example.com", "/", token("prod")).line("upstream"));
+        "editor-dev",
+        client()
+            .get("editor." + PROJECT + ".dev.example.com", "/editor", token("dev"))
+            .line("upstream"));
     assertEquals(
-        "mirror-prod", client().get("ci.prod.example.com", "/", token("prod")).line("upstream"));
-    // And a label nobody published is still the default environment's DOOR rather than an
-    // app-shaped
-    // refusal — which now serves nothing, like the apex it resolves to.
-    EdgeClient.Answer unknown = client().get("nosuchapp.example.com", "/anything");
-    assertEquals(404, unknown.status());
-    assertTrue(unknown.body().contains("serves nothing"), unknown.body());
+        "editor-prod",
+        client()
+            .get("editor." + PROJECT + ".prod.example.com", "/editor", token("prod"))
+            .line("upstream"));
   }
 
   @Test
-  void theDefaultEnvironmentsNavigationIsWrittenInTheShortForm() {
+  void theFourLabelTierDemandsTheNamedEnvironmentsAudience() {
+    // The audience is derived from the environment the NAME states, so the tier's own token is the
+    // only one that opens it — the same guarantee `<app>.<env>.<domain>` has, through the same
+    // derivation, now that the environment is read from position 2.
+    assertEquals(
+        401,
+        client().get("editor." + PROJECT + ".dev.example.com", "/editor", token("prod")).status());
+  }
+
+  @Test
+  void aPublishedHostIsReachedUnderAProjectToo() {
+    // `workspaces` is a name a DEPLOYMENT publishes rather than a configured vhost, and it reaches
+    // the same tier: the label is offered as unknown here and the projection claims it.
+    activateWorkspaces();
+    assertEquals(
+        "mirror-dev",
+        client()
+            .get("workspaces." + PROJECT + ".dev.example.com", "/workspaces/42", token("dev"))
+            .line("upstream"));
+  }
+
+  @Test
+  void anUnknownApplicationUnderAProjectIs404AndTheAnswerNamesBoth() {
+    EdgeClient.Answer answer =
+        client().get("nosuchapp." + PROJECT + ".dev.example.com", "/anything");
+    assertEquals(404, answer.status());
+    assertNull(answer.line("upstream"));
+    assertTrue(answer.body().contains("`nosuchapp` is not an application"), answer.body());
+    assertTrue(answer.body().contains("the project `" + PROJECT + "`"), answer.body());
+  }
+
+  @Test
+  void aProjectsOwnNameIsADoorLikeTheEnvironmentsOwn() {
+    activateProjects();
+    EdgeClient.Answer landing = client().get(PROJECT + ".dev.example.com", "/");
+    assertEquals(302, landing.status());
+    assertEquals("http://projects.dev.example.com/", landing.headers().get("location"));
+
+    EdgeClient.Answer elsewhere =
+        client().get(PROJECT + ".dev.example.com", "/ci/api/runs", token("dev"));
+    assertEquals(404, elsewhere.status());
+    assertNull(elsewhere.line("upstream"), "a door reaches no upstream");
+    assertTrue(elsewhere.body().contains("`" + PROJECT + "` project's door"), elsewhere.body());
+    assertTrue(
+        elsewhere.body().contains("<app>." + PROJECT + ".dev.example.com"), elsewhere.body());
+  }
+
+  @Test
+  void aPublishedServiceClaimsALabelBeforeAProjectDoorDoes() {
+    // The one join HostEnvironments cannot make: a slug and a published name are both single labels
+    // in front of an environment. A deployment that published `acme` owns that name, and the door
+    // is what is left when none did.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-acme")
+                .put("environmentName", "dev")
+                .put("browserHost", PROJECT)
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/acme", upstream("qits.edge.apps.mirror.hosts.dev"))))));
+
+    assertEquals(
+        "mirror-dev",
+        client().get(PROJECT + ".dev.example.com", "/", token("dev")).line("upstream"));
+  }
+
+  @Test
+  void theShortSpellingOfEitherProjectTierIsRefusedAndNamesTheExplicitOne() {
+    // No redirect, by decision. The INFO line these write is how the callers that have not moved
+    // are found; the body is what the person reading the tab does about it.
+    EdgeClient.Answer editor = client().get("editor." + PROJECT + ".example.com", "/editor");
+    assertEquals(404, editor.status());
+    assertNull(editor.line("upstream"));
+    assertTrue(
+        editor.body().contains("Use http://editor." + PROJECT + ".prod.example.com"),
+        editor.body());
+
+    EdgeClient.Answer door = client().get(PROJECT + ".example.com", "/");
+    assertEquals(404, door.status());
+    assertTrue(door.body().contains("Use http://" + PROJECT + ".prod.example.com"), door.body());
+  }
+
+  @Test
+  void aNavigationOnTheFourLabelTierIsTheNamedEnvironmentsAndCarriesTheProjectOrigin() {
+    // The document the editor's own shell reads. Getting the environment wrong here is the failure
+    // this tier's authority reading exists to prevent: dev's editor rendering prod's services.
+    activateCi();
+    JsonObject document =
+        new JsonObject(
+            client().get("editor." + PROJECT + ".dev.example.com", "/main-navigation").body());
+    assertEquals("dev", document.getString("environment"));
+    assertEquals("http://dev.example.com", document.getString("origin"));
+    // The authority a client prefixes `<app>.<slug>.` onto — which is this request's own name back.
+    assertEquals("http://dev.example.com", document.getString("projectOrigin"));
+    assertEquals(
+        "http://ci.dev.example.com",
+        document
+            .getJsonObject("slots")
+            .getJsonArray("services.details")
+            .getJsonObject(0)
+            .getString("origin"));
+  }
+
+  // --- the default environment, whose door is the apex -------------------------------------------
+
+  @Test
+  void aServiceOfTheDefaultEnvironmentIsOnlyReachedWithItsEnvironmentLabel() {
+    // FLIPPED, and it is the whole of reading 6. `ci.example.com` used to be the default
+    // environment's ci service, because the apex is that environment's door. It 404s now, naming
+    // the one spelling that works — the environment label is what decides which tier a request
+    // lands in, and a project label in front of it is indistinguishable from one.
     activateCi("prod");
-    // Both spellings of the environment's own name. A request on the APEX itself resolves the
-    // authority from the canonical origin instead, which in this suite is localhost — that arm is
-    // EnvironmentAuthorityTest's, where the canonical origin and the host names agree.
-    for (String requested : List.of("prod.example.com", "ci.prod.example.com")) {
+    assertEquals(
+        "mirror-prod", client().get("ci.prod.example.com", "/", token("prod")).line("upstream"));
+
+    EdgeClient.Answer short_ = client().get("ci.example.com", "/", token("prod"));
+    assertEquals(404, short_.status());
+    assertNull(short_.line("upstream"), "it must reach no upstream");
+    assertEquals(
+        "This name states no environment, and the short spelling is no longer served: the"
+            + " environment label decides which tier a request reaches, and a project label in"
+            + " front of it would otherwise be indistinguishable from one.\n"
+            + "Use http://ci.prod.example.com\n",
+        short_.body());
+
+    // A label nobody published reads the same way: it states no environment either, and the answer
+    // is the same sentence rather than the default environment's door.
+    EdgeClient.Answer unknown = client().get("nosuchapp.example.com", "/anything");
+    assertEquals(404, unknown.status());
+    assertTrue(unknown.body().contains("http://nosuchapp.prod.example.com"), unknown.body());
+  }
+
+  @Test
+  void theApexItselfIsStillTheDefaultEnvironmentsDoor() {
+    // The one name with no environment label that is still served, and the only way the edge can
+    // tell it from a service name with its label left out is the configured canonical origin.
+    activateProjects("prod");
+    EdgeClient.Answer landing = client().get("example.com", "/");
+    assertEquals(302, landing.status());
+    assertEquals(
+        "http://projects.prod.example.com/",
+        landing.headers().get("location"),
+        "the door sends a visitor to a name that carries its environment");
+    EdgeClient.Answer elsewhere = client().get("example.com", "/anything");
+    assertEquals(404, elsewhere.status());
+    assertTrue(elsewhere.body().contains("serves nothing"), elsewhere.body());
+  }
+
+  @Test
+  void theDefaultEnvironmentsNavigationCarriesItsLabelLikeEveryOther() {
+    // FLIPPED. These origins used to be written in the SHORT form — `http://example.com` and
+    // `http://ci.example.com` — because the default environment's door is the apex. They are the
+    // names the shell links to, so they have to be names that still resolve, and after reading 6
+    // only the labelled spelling does. The apex is asked too, which resolves through the canonical
+    // origin rather than through its own labels and has to agree.
+    activateCi("prod");
+    for (String requested : List.of("prod.example.com", "ci.prod.example.com", "example.com")) {
       JsonObject document = new JsonObject(client().get(requested, "/main-navigation").body());
       assertEquals("prod", document.getString("environment"), requested);
-      assertEquals("http://example.com", document.getString("origin"), requested);
+      assertEquals("http://prod.example.com", document.getString("origin"), requested);
       assertEquals(
-          "http://ci.example.com",
+          "http://ci.prod.example.com",
           document
               .getJsonObject("slots")
               .getJsonArray("services.details")
@@ -818,6 +979,25 @@ class EdgeRoutingTest {
     assertEquals(
         List.of("system", "system"),
         routes.navigation("dev").stream().map(EdgeRoutes.NavigationPlacement::slot).toList());
+  }
+
+  /**
+   * The project set this suite routes with, from a clean table.
+   *
+   * <p>The rows are cleared first rather than merely added to: {@code ProjectSansTest} shares this
+   * JVM and drives the same projection with hand-dated frames, and this projection is
+   * last-writer-wins by {@code (occurredAt, eventId)} — so a row it left dated in the future would
+   * make an ordinary create here a no-op, and the slug would simply not be there.
+   */
+  private void publishProject() throws java.sql.SQLException {
+    try (java.sql.Connection connection = edgeDataSource.getConnection();
+        java.sql.PreparedStatement delete =
+            connection.prepareStatement("delete from edge_project")) {
+      delete.executeUpdate();
+    }
+    projects.load(null);
+    projects.apply(
+        PROJECT, "p-routing", true, java.util.UUID.randomUUID().toString(), Instant.now());
   }
 
   private void clearProjection() throws java.sql.SQLException {
@@ -966,11 +1146,15 @@ class EdgeRoutingTest {
 
   /** The landing service: what makes the environment's own name a door rather than a page. */
   private void activateProjects() {
+    activateProjects("dev");
+  }
+
+  private void activateProjects(String environment) {
     deployments.onFrame(
         frame(
             new JsonObject()
                 .put("applicationName", "qits-projects")
-                .put("environmentName", "dev")
+                .put("environmentName", environment)
                 .put("browserHost", "projects")
                 .put(
                     "endpoints",
