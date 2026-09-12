@@ -52,6 +52,7 @@ import java.util.concurrent.TimeUnit;
  * genuine and still opens nothing here — and one is a black hole the stub accepts and never
  * answers, which is the shape a redeploying idp takes and the only way to prove that the edge
  * answers anyway. {@link #idpDown} and {@link #idpUp} add the fourth shape, a refused connection.
+ * One more client, {@link #PLATFORM_ID}, holds only the platform audience, which opens every vhost.
  */
 public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
@@ -64,6 +65,17 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   static final String OTHER_ID = "other-client";
 
   static final String OTHER_SECRET = "other-secret";
+
+  /**
+   * The platform audience: the shipped default of {@code qits.edge.auth.platform-audience}, which
+   * the suite does not set. It opens every gated vhost on every tier.
+   */
+  static final String PLATFORM_AUDIENCE = "qits-platform";
+
+  /** A client commissioned for the platform audience alone. */
+  static final String PLATFORM_ID = "platform-client";
+
+  static final String PLATFORM_SECRET = "platform-secret";
 
   /** The credential the stub idp accepts a connection for and then never answers. */
   static final String SINKHOLE_ID = "sinkhole";
@@ -347,6 +359,9 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     }
     if (basic(OTHER_ID, OTHER_SECRET).equals(authorization)) {
       return List.of("somebody-else");
+    }
+    if (basic(PLATFORM_ID, PLATFORM_SECRET).equals(authorization)) {
+      return List.of(PLATFORM_AUDIENCE);
     }
     if (basic(SINKHOLE_ID, SINKHOLE_SECRET).equals(authorization)) {
       return List.of();

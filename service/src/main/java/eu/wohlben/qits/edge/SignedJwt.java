@@ -8,6 +8,7 @@ import java.security.PublicKey;
 import java.security.Signature;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 
 /**
  * One compact JWS, split into the parts a validator needs, plus the checks it makes. Framework-free
@@ -84,11 +85,36 @@ public record SignedJwt(
    * @param clockSkewSeconds how far the two clocks may disagree
    */
   public String problem(String issuer, String audience, Instant now, long clockSkewSeconds) {
+    return problem(issuer, List.of(audience), now, clockSkewSeconds);
+  }
+
+  /**
+   * The same checks, where any one of several audiences is enough: the vhost's own, or the platform
+   * audience ({@link AuthConfig#platformAudience()}).
+   *
+   * @param accepted the audiences that open this vhost; the token must name at least one
+   */
+  public String problem(String issuer, List<String> accepted, Instant now, long clockSkewSeconds) {
     String problem = problem(issuer, now, clockSkewSeconds);
     if (problem != null) {
       return problem;
     }
-    return audiences().contains(audience) ? null : "the token is not for " + audience;
+    return namesAny(audiences(), accepted) ? null : "the token is not for " + either(accepted);
+  }
+
+  /** Whether these {@code aud} values name at least one accepted audience. */
+  static boolean namesAny(JsonArray audiences, List<String> accepted) {
+    for (String audience : accepted) {
+      if (audiences.contains(audience)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The accepted audiences for a refusal message: "a" or "a or b". */
+  static String either(List<String> accepted) {
+    return String.join(" or ", accepted);
   }
 
   /**

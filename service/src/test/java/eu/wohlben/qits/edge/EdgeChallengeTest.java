@@ -7,11 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.smallrye.config.PropertiesConfigSource;
+import io.smallrye.config.SmallRyeConfigBuilder;
 import io.smallrye.config.WithDefault;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.JsonArray;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -81,6 +84,60 @@ class EdgeChallengeTest {
             HostEnvironments.Route.environment("prod"),
             "{env}-qits-artifacts",
             Map.of("githost", githost)));
+  }
+
+  // --- the platform audience ---------------------------------------------------------------------
+
+  @Test
+  void thePlatformAudienceIsAcceptedNextToTheVhostsOwn() {
+    assertEquals(
+        List.of("dev-qits-artifacts", "qits-platform"),
+        EdgeAuth.acceptedAudiences("dev-qits-artifacts", Optional.of("qits-platform")));
+    assertEquals(
+        List.of("dev-qits-artifacts"),
+        EdgeAuth.acceptedAudiences("dev-qits-artifacts", Optional.of("dev-qits-artifacts")),
+        "an audience that is both is named once");
+  }
+
+  @Test
+  void anEmptyPlatformAudienceSwitchesTheRuleOff() {
+    assertEquals(
+        List.of("dev-qits-artifacts"),
+        EdgeAuth.acceptedAudiences("dev-qits-artifacts", Optional.empty()));
+    assertEquals(
+        List.of("dev-qits-artifacts"),
+        EdgeAuth.acceptedAudiences("dev-qits-artifacts", Optional.of("  ")));
+  }
+
+  @Test
+  void theShippedPlatformAudienceHasNoTier() throws Exception {
+    // Roles, not tiers, are the permission. A placeholder here would make it a tier again.
+    assertEquals("qits-platform", shippedDefault("platformAudience"));
+  }
+
+  @Test
+  void anEmptyConfiguredValueIsReadAsOff() {
+    // The operator's switch: QITS_EDGE_AUTH_PLATFORM_AUDIENCE= must mean "off", not "the default".
+    assertEquals(
+        Optional.empty(),
+        authConfig(Map.of("qits.edge.auth.platform-audience", "")).platformAudience());
+    assertEquals(Optional.of("qits-platform"), authConfig(Map.of()).platformAudience());
+  }
+
+  @Test
+  void aBasicCredentialFollowsTheSameAudienceRule() {
+    // The Basic path judges the minted token's audiences, cached or fresh, with the same rule.
+    List<String> accepted =
+        EdgeAuth.acceptedAudiences("dev-qits-artifacts", Optional.of("qits-platform"));
+    assertNull(EdgeAuth.refusalFor(new JsonArray(List.of("qits-platform")), accepted));
+    assertNull(EdgeAuth.refusalFor(new JsonArray(List.of("dev-qits-artifacts")), accepted));
+    assertEquals(
+        "the credential is not for dev-qits-artifacts or qits-platform",
+        EdgeAuth.refusalFor(new JsonArray(List.of("somebody-else")), accepted));
+    assertEquals(
+        "the credential is not for dev-qits-artifacts",
+        EdgeAuth.refusalFor(
+            new JsonArray(List.of("qits-platform")), List.of("dev-qits-artifacts")));
   }
 
   @Test
@@ -453,6 +510,15 @@ class EdgeChallengeTest {
 
   private static String shippedDefault(String key) throws Exception {
     return AuthConfig.class.getMethod(key).getAnnotation(WithDefault.class).value();
+  }
+
+  /** {@link AuthConfig} as SmallRye reads it from these properties and the shipped defaults. */
+  private static AuthConfig authConfig(Map<String, String> properties) {
+    return new SmallRyeConfigBuilder()
+        .withMapping(AuthConfig.class)
+        .withSources(new PropertiesConfigSource(properties, "test", 500))
+        .build()
+        .getConfigMapping(AuthConfig.class);
   }
 
   private static String sessionDefault(String key) throws Exception {

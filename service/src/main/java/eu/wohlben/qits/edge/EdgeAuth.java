@@ -20,6 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.jboss.logging.Logger;
 
@@ -62,6 +63,10 @@ import org.jboss.logging.Logger;
  * can be: by spending them at idp ({@link IdpGrants}) and reading the token that comes back. What
  * happens next is the Bearer path exactly — same issuer, same expiry, same signature, same demanded
  * audience — so a commissioned client opens precisely the vhosts its audiences name and no others.
+ *
+ * <p><b>One audience opens every vhost:</b> {@link AuthConfig#platformAudience()}. A token that
+ * names it passes on every path above, next to the vhost's own audience. Its roles are the
+ * permission, and the services check them.
  *
  * <p><b>The result is cached against a HASH of the credential</b>, never the credential, for the
  * shorter of the minted token's life and {@link AuthConfig#basicCacheTtlMs()}. Without it every
@@ -207,6 +212,18 @@ public class EdgeAuth {
     return audienceFor(pattern, route.environment());
   }
 
+  /**
+   * The audiences that open a vhost: the one it demands, and the platform audience when one is set.
+   * A token needs only one of them. The platform audience is the same on every vhost and every
+   * tier; the token's roles are what the services then check.
+   */
+  static List<String> acceptedAudiences(String demanded, Optional<String> platform) {
+    String everywhere = platform.map(String::strip).orElse("");
+    return everywhere.isEmpty() || everywhere.equals(demanded)
+        ? List.of(demanded)
+        : List.of(demanded, everywhere);
+  }
+
   /** Whether this request is docker fetching a token rather than asking for a registry object. */
   public static boolean isTokenRequest(HttpServerRequest request) {
     return TOKEN_PATH.equals(request.path())
@@ -255,12 +272,15 @@ public class EdgeAuth {
    */
   public Future<String> checkCredential(HostEnvironments.Route route, HttpServerRequest request) {
     String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-    String audience = audienceFor(route, config.audiencePattern(), edgeConfig.apps());
+    List<String> audiences =
+        acceptedAudiences(
+            audienceFor(route, config.audiencePattern(), edgeConfig.apps()),
+            config.platformAudience());
     if (header != null && header.toLowerCase(Locale.ROOT).startsWith(BASIC)) {
       String credential = header.substring(BASIC.length()).trim();
       String workstationToken = oauth2Token(credential);
       if (workstationToken != null) {
-        return checkBearer(workstationToken, audience)
+        return checkBearer(workstationToken, audiences)
             .map(
                 problem -> {
                   if (problem == null) {
@@ -274,23 +294,23 @@ public class EdgeAuth {
       }
       // A client id and secret, sent by something that cannot do docker's token dance — maven, npm,
       // git. Spending them at idp is the only way to know they are good.
-      return checkBasic(credential, audience);
+      return checkBasic(credential, audiences);
     }
     if (header == null || !header.toLowerCase(Locale.ROOT).startsWith(BEARER)) {
       return Future.succeededFuture("no bearer token");
     }
-    return checkBearer(header.substring(BEARER.length()).trim(), audience);
+    return checkBearer(header.substring(BEARER.length()).trim(), audiences);
   }
 
   /** Validate the JWT carried directly as Bearer, or as Git's {@code oauth2:<token>} Basic pair. */
-  private Future<String> checkBearer(String compact, String audience) {
+  private Future<String> checkBearer(String compact, List<String> audiences) {
     SignedJwt jwt;
     try {
       jwt = SignedJwt.parse(compact);
     } catch (IllegalArgumentException e) {
       return Future.succeededFuture(e.getMessage());
     }
-    String problem = jwt.problem(idp.issuer(), audience, Instant.now(), config.clockSkewSeconds());
+    String problem = jwt.problem(idp.issuer(), audiences, Instant.now(), config.clockSkewSeconds());
     if (problem != null) {
       // Claims before signature: a claim check needs no key, so an expired or misaddressed token is
       // refused without a JWKS lookup — and a made-up kid cannot use one to force a fetch.
@@ -332,7 +352,7 @@ public class EdgeAuth {
    * on it (a validator that cannot answer must not open the door) but it is not written down as a
    * verdict about the credential.
    */
-  private Future<String> checkBasic(String credential, String audience) {
+  private Future<String> checkBasic(String credential, List<String> audiences) {
     if (!isClientCredentials(credential)) {
       // Refused HERE, without a call. A credential that cannot be a client id and a secret has
       // nothing to ask idp about, and asking would spend the whole patience window on it during an
@@ -342,7 +362,7 @@ public class EdgeAuth {
     String fingerprint = fingerprint(credential);
     Validated known = validated.get(fingerprint);
     if (known != null && known.expiresAtMillis() > System.currentTimeMillis()) {
-      return Future.succeededFuture(refusalFor(known.audiences(), audience));
+      return Future.succeededFuture(refusalFor(known.audiences(), audiences));
     }
     return grants
         .grant("Basic " + credential)
@@ -372,14 +392,21 @@ public class EdgeAuth {
                           return "the minted token's signature does not verify";
                         }
                         validated.put(fingerprint, remember(minted));
-                        return refusalFor(minted.audiences(), audience);
+                        return refusalFor(minted.audiences(), audiences);
                       });
             });
   }
 
-  /** null when these audiences include the one this vhost demands, the reason when they do not. */
-  private static String refusalFor(JsonArray audiences, String audience) {
-    return audiences.contains(audience) ? null : "the credential is not for " + audience;
+  /**
+   * null when the token's audiences name one this vhost accepts, the reason when they do not.
+   *
+   * @param carried the {@code aud} values of the minted token, cached or fresh
+   * @param accepted {@link #acceptedAudiences}, resolved for this request
+   */
+  static String refusalFor(JsonArray carried, List<String> accepted) {
+    return SignedJwt.namesAny(carried, accepted)
+        ? null
+        : "the credential is not for " + SignedJwt.either(accepted);
   }
 
   /** How long to believe a credential: the token's own life, capped by configuration. */

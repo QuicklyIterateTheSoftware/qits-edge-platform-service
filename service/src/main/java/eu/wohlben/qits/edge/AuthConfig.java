@@ -70,6 +70,19 @@ public interface AuthConfig {
   @WithDefault("{env}-qits-artifacts")
   String audiencePattern();
 
+  /**
+   * One audience that opens every gated vhost, next to the one the vhost demands. A person's
+   * command-line tool gets a token for this audience, and it must reach every qits service.
+   *
+   * <p><b>No {@code {env}} placeholder, on purpose.</b> The audience only says "this token is for
+   * this platform". The token's roles ({@code groups}) are the permission, and each service checks
+   * them. The user decided that roles, not tiers, are the permission system.
+   *
+   * <p>An empty value switches this rule off: then only the vhost's own audience opens it.
+   */
+  @WithDefault("qits-platform")
+  Optional<String> platformAudience();
+
   /** How far this process' clock and idp's may disagree about {@code exp}, in seconds. */
   @WithDefault("30")
   long clockSkewSeconds();

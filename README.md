@@ -321,6 +321,7 @@ a file.
 | `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Service vhosts require a valid idp token |
 | `qits.edge.auth.anonymous-read-apps` | `QITS_EDGE_AUTH_ANONYMOUS_READ_APPS` | — | App labels whose `GET` and `HEAD` are open; every other method on them still needs a token |
 | `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
+| `qits.edge.auth.platform-audience` | `QITS_EDGE_AUTH_PLATFORM_AUDIENCE` | `qits-platform` | One audience that opens every gated vhost, next to the vhost's own. No `{env}`: roles are the permission. Empty switches it off |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
 | `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
 | `qits.edge.auth.basic-cache-ttl-ms` | `QITS_EDGE_AUTH_BASIC_CACHE_TTL_MS` | `300000` | Ceiling on how long a validated HTTP Basic credential is believed; the minted token's own life is the other half |
@@ -384,13 +385,19 @@ against the keys fetched from `qits.idp.url/jwks` and cached — idp is overlay-
 cannot reach it, and keeping it off the per-pull path is worth more than the freshness a call-out
 would buy. An unknown `kid` buys **one** refresh, behind a cooldown, so a made-up kid cannot turn
 into a request per request at the identity provider. The checks are RS256 only, exact `iss`, live
-`exp` within the skew, and the demanded audience in `aud`.
+`exp` within the skew, and the demanded audience or the platform audience in `aud`.
 
 **The audience is derived per request**, from `qits.edge.auth.audience-pattern` with `{env}` filled
 in from the environment the vhost named — the same placeholder as the host patterns above. idp's
 audience values are env-prefixed, so this is what keeps the tiers apart: a token minted for
 `registry.dev.…` does not open `registry.prod.…`, from one configuration entry. A pattern with no
 placeholder is a literal audience, for a single-audience deployment.
+
+**One audience opens every vhost.** A token whose `aud` names `qits.edge.auth.platform-audience`
+(`qits-platform`) passes on every gated vhost and on every path: Bearer, Git's
+`Basic oauth2:<token>`, and Basic client credentials. A person's command-line tool gets this token.
+The audience has no `{env}`, on purpose: it only says the token is for this platform, and the
+token's roles are what each service checks. An empty value switches the rule off.
 
 ### Anonymous reads, named per app
 

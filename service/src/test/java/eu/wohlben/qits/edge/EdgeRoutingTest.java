@@ -1639,6 +1639,59 @@ class EdgeRoutingTest {
         "registry-prod", client().get("registry.prod.example.com", "/v2/", whole).line("upstream"));
   }
 
+  @Test
+  void thePlatformAudienceOpensTheVhostOnEveryTier() {
+    // A person's command-line token names only `qits-platform`. It must reach every service, and
+    // its
+    // roles are the permission. The suite runs on the shipped default of the setting.
+    Map<String, String> platform =
+        bearer(TestTokens.valid(issuer(), List.of(StubGateways.PLATFORM_AUDIENCE)));
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.example.com", "/v2/", platform).line("upstream"));
+    assertEquals(
+        "registry-prod",
+        client().get("registry.prod.example.com", "/v2/", platform).line("upstream"));
+  }
+
+  @Test
+  void gitsOauth2BasicFollowsThePlatformAudienceRule() {
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(
+                    "oauth2", TestTokens.valid(issuer(), List.of(StubGateways.PLATFORM_AUDIENCE))));
+    assertEquals("registry-dev", answer.line("upstream"));
+    assertTrue(
+        answer.body().contains("header:authorization=Bearer "),
+        "the token goes on as a Bearer: " + answer.body());
+    assertEquals(
+        401,
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic("oauth2", TestTokens.valid(issuer(), List.of("somebody-else"))))
+            .status());
+  }
+
+  @Test
+  void aClientCommissionedForThePlatformAudienceOpensTheVhostWithBasic() {
+    // The Basic client-credential path: the minted token carries only the platform audience.
+    for (String environment : List.of("dev", "prod")) {
+      assertEquals(
+          "registry-" + environment,
+          client()
+              .get(
+                  "registry." + environment + ".example.com",
+                  "/v2/",
+                  basic(StubGateways.PLATFORM_ID, StubGateways.PLATFORM_SECRET))
+              .line("upstream"));
+    }
+  }
+
   // --- the browser gate, dark
   // ---------------------------------------------------------------------
 
