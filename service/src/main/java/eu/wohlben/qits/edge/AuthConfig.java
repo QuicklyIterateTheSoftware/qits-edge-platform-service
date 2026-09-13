@@ -66,8 +66,16 @@ public interface AuthConfig {
    * env-prefixed, so a pattern makes the token for one environment's registry fail at another
    * environment's vhost — one entry, and the tiers cannot unlock each other. A value with no
    * placeholder is a literal and still works, which is what a single-audience deployment wants.
+   *
+   * <p><b>The shipped default is the literal {@code qits-platform}</b> — the same string as {@link
+   * #platformAudience()} — so a freshly configured vhost opens with roles alone, the open calling
+   * model's own rule. {@link EdgeAuth#acceptedAudiences} then names it once, not twice. A
+   * deployment that still configures the older, tier-scoped pattern (today's {@code
+   * QITS_EDGE_AUTH_AUDIENCE_PATTERN={env}-qits-artifacts}, or the githost and editor entries' own
+   * resource patterns) keeps that pattern unchanged: an explicitly configured value always wins
+   * over this default.
    */
-  @WithDefault("{env}-qits-artifacts")
+  @WithDefault("qits-platform")
   String audiencePattern();
 
   /**

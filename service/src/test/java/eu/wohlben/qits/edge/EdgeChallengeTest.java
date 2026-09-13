@@ -233,6 +233,27 @@ class EdgeChallengeTest {
   }
 
   @Test
+  void theShippedAudiencePatternsAreTheLiteralPlatformAudience() throws Exception {
+    // The open calling model's own rule (service-client-identity-plan.md, C4): a freshly configured
+    // vhost — the global default and an app entry with no override of its own — opens with roles
+    // alone, not a tier-scoped audience. An explicitly configured pattern still wins; see
+    // StubGateways, which sets one for exactly the app entries this pins.
+    assertEquals("qits-platform", shippedDefault("audiencePattern"));
+    assertEquals(
+        "qits-platform",
+        EdgeConfig.App.class.getMethod("audiencePattern").getAnnotation(WithDefault.class).value());
+  }
+
+  @Test
+  void theShippedAudienceDefaultsCollapseAcceptedAudiencesToOne() {
+    // Both shipped defaults are the SAME literal, so acceptedAudiences names it once rather than
+    // twice — proved against the real defaults above, not a value this test chose on its own.
+    assertEquals(
+        List.of("qits-platform"),
+        EdgeAuth.acceptedAudiences("qits-platform", Optional.of("qits-platform")));
+  }
+
+  @Test
   void theShippedDefaultNamesNoApp() throws Exception {
     // A default here would open reads on a deployment that never asked, and the names it would open
     // are exactly the ones worth closing. Pinned rather than assumed: absent means empty.
@@ -357,6 +378,107 @@ class EdgeChallengeTest {
     // shared.
     assertNull(SessionsConfig.class.getMethod("clientId").getAnnotation(WithDefault.class));
     assertNull(SessionsConfig.class.getMethod("clientSecret").getAnnotation(WithDefault.class));
+  }
+
+  // --- the session client's resource-var fallback (service-client-identity-plan.md C4/D6/D7) -----
+
+  @Test
+  void theSessionClientReadsTheResourceVarsFirstThenTheOlderNames() throws Exception {
+    // Read off the SHIPPED application.properties expression, not a copy of it, so a rewritten
+    // expression fails this test rather than only production.
+    assertEquals(Optional.empty(), sessionClientId(Map.of()), "neither set is still absent");
+    assertEquals(
+        Optional.of("dev-qits-edge"),
+        sessionClientId(Map.of("QITS_EDGE_SESSIONS_CLIENT_ID", "dev-qits-edge")),
+        "the older name still works, unchanged, until a resource is declared");
+    assertEquals(
+        Optional.of("qits-platform-edge"),
+        sessionClientId(
+            Map.of(
+                "QITS_RESOURCE_IDP_CLIENT_ID", "qits-platform-edge",
+                "QITS_EDGE_SESSIONS_CLIENT_ID", "dev-qits-edge")),
+        "the resource var wins, so a cutover reads it without deleting the extras entry first");
+  }
+
+  @Test
+  void theSessionSecretFollowsTheSameFallback() throws Exception {
+    assertEquals(Optional.empty(), sessionClientSecret(Map.of()));
+    assertEquals(
+        Optional.of("old-secret"),
+        sessionClientSecret(Map.of("QITS_EDGE_SESSIONS_CLIENT_SECRET", "old-secret")));
+    assertEquals(
+        Optional.of("new-secret"),
+        sessionClientSecret(
+            Map.of(
+                "QITS_RESOURCE_IDP_CLIENT_SECRET", "new-secret",
+                "QITS_EDGE_SESSIONS_CLIENT_SECRET", "old-secret")));
+  }
+
+  @Test
+  void theIdpUrlReadsTheResourceVarFirstThenTheOlderNameThenTheShippedAddress() throws Exception {
+    assertEquals("http://qits-platform-idp:8080/idp", idpUrl(Map.of()));
+    assertEquals(
+        "http://old-idp:8080/idp", idpUrl(Map.of("QITS_IDP_URL", "http://old-idp:8080/idp")));
+    assertEquals(
+        "http://new-idp:8080/idp",
+        idpUrl(
+            Map.of(
+                "QITS_RESOURCE_IDP_URL", "http://new-idp:8080/idp",
+                "QITS_IDP_URL", "http://old-idp:8080/idp")));
+  }
+
+  private static Optional<String> sessionClientId(Map<String, String> env) throws Exception {
+    return applicationProperties(env)
+        .withMapping(SessionsConfig.class)
+        .build()
+        .getConfigMapping(SessionsConfig.class)
+        .clientId();
+  }
+
+  private static Optional<String> sessionClientSecret(Map<String, String> env) throws Exception {
+    return applicationProperties(env)
+        .withMapping(SessionsConfig.class)
+        .build()
+        .getConfigMapping(SessionsConfig.class)
+        .clientSecret();
+  }
+
+  private static String idpUrl(Map<String, String> env) throws Exception {
+    return applicationProperties(env)
+        .build()
+        .getOptionalValue("qits.idp.url", String.class)
+        .orElseThrow();
+  }
+
+  /**
+   * The shipped {@code application.properties}, with expression expansion on (off by default on a
+   * bare builder) and one synthetic, higher-ordinal source standing in for the environment
+   * variables a deployment would set.
+   *
+   * <p>The test JVM's classpath carries a SECOND {@code application.properties} — this repository's
+   * own, under {@code src/test/resources} — so {@code getResource} alone cannot be trusted to pick
+   * the shipped one: the two shadow each other in classpath order rather than merging. This picks
+   * the copy that actually defines {@code qits.idp.url}, which only the shipped one does.
+   */
+  private static SmallRyeConfigBuilder applicationProperties(Map<String, String> env)
+      throws Exception {
+    var urls = EdgeChallengeTest.class.getClassLoader().getResources("application.properties");
+    java.net.URL shipped = null;
+    while (urls.hasMoreElements()) {
+      java.net.URL candidate = urls.nextElement();
+      if (new PropertiesConfigSource(candidate, 250).getValue("qits.idp.url") != null) {
+        shipped = candidate;
+        break;
+      }
+    }
+    if (shipped == null) {
+      throw new IllegalStateException(
+          "no application.properties on the test classpath defines qits.idp.url");
+    }
+    return new SmallRyeConfigBuilder()
+        .addDefaultInterceptors()
+        .withSources(new PropertiesConfigSource(shipped, 250))
+        .withSources(new PropertiesConfigSource(env, "env", 300));
   }
 
   @Test

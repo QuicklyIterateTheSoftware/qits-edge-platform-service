@@ -93,11 +93,14 @@ public interface EdgeConfig {
   interface App {
 
     /**
-     * The audience accepted for this application's direct vhost. It defaults to the historic
-     * registry audience so existing application entries retain their behaviour; applications such
-     * as githost can name their own resource audience.
+     * The audience accepted for this application's direct vhost. It defaults to the literal {@code
+     * qits-platform} — the same string {@link AuthConfig#platformAudience()} ships — so a freshly
+     * configured entry opens with roles alone, the open calling model's own rule; an application
+     * such as githost or the editor can still name its own resource audience (today's {@code
+     * QITS_EDGE_APPS_GITHOST_AUDIENCE_PATTERN}, {@code QITS_EDGE_APPS_EDITOR_AUDIENCE_PATTERN}),
+     * and that explicitly configured value keeps working unchanged.
      */
-    @WithDefault("{env}-qits-artifacts")
+    @WithDefault("qits-platform")
     String audiencePattern();
 
     /**

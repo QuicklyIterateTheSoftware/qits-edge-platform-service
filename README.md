@@ -315,12 +315,13 @@ a file.
 | `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — | **Required per app.** `{env}` is the only placeholder; a platform service names none |
 | `qits.edge.apps.<app>.port` | `QITS_EDGE_APPS_<APP>_PORT` | `8080` | The port that application listens on |
 | `qits.edge.apps.<app>.hosts.<env>` | `QITS_EDGE_APPS_<APP>_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
+| `qits.edge.apps.<app>.audience-pattern` | `QITS_EDGE_APPS_<APP>_AUDIENCE_PATTERN` | `qits-platform` | The audience this app's own vhost accepts, next to the platform audience. An app such as githost or the editor names its own resource pattern (`{env}-qits-githost`); an app with none opens with roles alone |
 | `qits.edge.projection.catchup.required` | `QITS_EDGE_PROJECTION_CATCHUP_REQUIRED` | `true` | Requires a complete deployment-history rebuild before the edge is ready; turn off only in an intentionally offline test/dev setup |
 | `qits.edge.projection.catchup.retry` | `QITS_EDGE_PROJECTION_CATCHUP_RETRY` | `PT1S` | Delay before retrying an incomplete, failed, or unavailable deployment-history read |
-| `qits.idp.url` | `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured |
+| `qits.idp.url` | `QITS_RESOURCE_IDP_URL`, then `QITS_IDP_URL` | `http://qits-platform-idp:8080/idp` | The issuer. `/jwks` and `/token` are derived from it, never configured. `QITS_RESOURCE_IDP_URL` is the `idp:client` resource a deployment may declare (service-client-identity-plan.md, C4/D6/D7); the older name keeps working unchanged until it is declared |
 | `qits.edge.auth.enforce-on-apps` | `QITS_EDGE_AUTH_ENFORCE_ON_APPS` | `true` | Service vhosts require a valid idp token |
 | `qits.edge.auth.anonymous-read-apps` | `QITS_EDGE_AUTH_ANONYMOUS_READ_APPS` | — | App labels whose `GET` and `HEAD` are open; every other method on them still needs a token |
-| `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `{env}-qits-artifacts` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal |
+| `qits.edge.auth.audience-pattern` | `QITS_EDGE_AUTH_AUDIENCE_PATTERN` | `qits-platform` | The audience a token must name; `{env}` is resolved per request, a value without it is a literal. The shipped default is the same literal as the platform audience below, so a freshly configured vhost opens with roles alone; an explicitly configured pattern (today's `{env}-qits-artifacts`, or an app's own) keeps working unchanged |
 | `qits.edge.auth.platform-audience` | `QITS_EDGE_AUTH_PLATFORM_AUDIENCE` | `qits-platform` | One audience that opens every gated vhost, next to the vhost's own. No `{env}`: roles are the permission. Empty switches it off |
 | `qits.edge.auth.clock-skew-seconds` | `QITS_EDGE_AUTH_CLOCK_SKEW_SECONDS` | `30` | How far this clock and idp's may disagree about `exp` |
 | `qits.edge.auth.jwks-refresh-cooldown-ms` | `QITS_EDGE_AUTH_JWKS_REFRESH_COOLDOWN_MS` | `5000` | Shortest gap between two JWKS fetches |
@@ -337,8 +338,8 @@ a file.
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
 | `qits.edge.sessions.stale-grace-ms` | `QITS_EDGE_SESSIONS_STALE_GRACE_MS` | `60000` | How long a cached session outlives an **unreachable** idp |
-| `qits.edge.sessions.client-id` | `QITS_EDGE_SESSIONS_CLIENT_ID` | — | The edge's own idp client (`{env}-qits-edge`), for introspection |
-| `qits.edge.sessions.client-secret` | `QITS_EDGE_SESSIONS_CLIENT_SECRET` | — | Its secret. Both are seeded by the bootstrap |
+| `qits.edge.sessions.client-id` | `QITS_RESOURCE_IDP_CLIENT_ID`, then `QITS_EDGE_SESSIONS_CLIENT_ID` | — | The edge's own idp client, for introspection. Today the bootstrap seeds `{env}-qits-edge` under the older name; `QITS_RESOURCE_IDP_CLIENT_ID` is the `idp:client` resource a deployment may declare instead (service-client-identity-plan.md, C4/D6/D7), and it becomes `qits-platform-edge` at the edge's own cutover (D2) |
+| `qits.edge.sessions.client-secret` | `QITS_RESOURCE_IDP_CLIENT_SECRET`, then `QITS_EDGE_SESSIONS_CLIENT_SECRET` | — | Its secret, same fallback. Neither pair set is still "no credential", which fails startup exactly as before if the gate is on |
 | `qits.observability.url` | `QITS_OBSERVABILITY_URL` | `http://qits-observability:8080` | Where telemetry goes; the OTLP endpoint is derived from it |
 
 Five things fail **at startup** rather than per request, deliberately: an environment or application
@@ -387,17 +388,25 @@ would buy. An unknown `kid` buys **one** refresh, behind a cooldown, so a made-u
 into a request per request at the identity provider. The checks are RS256 only, exact `iss`, live
 `exp` within the skew, and the demanded audience or the platform audience in `aud`.
 
-**The audience is derived per request**, from `qits.edge.auth.audience-pattern` with `{env}` filled
-in from the environment the vhost named — the same placeholder as the host patterns above. idp's
-audience values are env-prefixed, so this is what keeps the tiers apart: a token minted for
-`registry.dev.…` does not open `registry.prod.…`, from one configuration entry. A pattern with no
-placeholder is a literal audience, for a single-audience deployment.
+**The audience is derived per request**, from `qits.edge.auth.audience-pattern` — or an app's own
+`qits.edge.apps.<app>.audience-pattern`, when it names one — with `{env}` filled in from the
+environment the vhost named, the same placeholder as the host patterns above. idp's audience values
+are env-prefixed, so a **configured** pattern is what keeps the tiers apart: a token minted for
+`registry.dev.…` does not open `registry.prod.…`, from one entry. A pattern with no placeholder is a
+literal audience, for a single-audience deployment.
 
 **One audience opens every vhost.** A token whose `aud` names `qits.edge.auth.platform-audience`
 (`qits-platform`) passes on every gated vhost and on every path: Bearer, Git's
 `Basic oauth2:<token>`, and Basic client credentials. A person's command-line tool gets this token.
 The audience has no `{env}`, on purpose: it only says the token is for this platform, and the
 token's roles are what each service checks. An empty value switches the rule off.
+
+**The shipped default of `audience-pattern` is the same literal, `qits-platform`** — both the
+global key and an app entry's own — so a vhost nobody has configured a tier-scoped pattern for opens
+with roles alone (service-client-identity-plan.md, C4). This is additive: today's live extras still
+set `QITS_EDGE_AUTH_AUDIENCE_PATTERN={env}-qits-artifacts` and the githost and editor entries' own
+`*_AUDIENCE_PATTERN`, and an explicitly configured value always wins over the default — nothing about
+a gated vhost changes until that entry is deleted.
 
 ### Anonymous reads, named per app
 

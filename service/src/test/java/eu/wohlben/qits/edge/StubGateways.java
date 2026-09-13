@@ -226,6 +226,13 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // environment is the THIRD label. Its two upstreams are what makes "the named environment, not
     // the default" an assertion about which process answered rather than about a status code.
     config.put("qits.edge.apps.editor.host-pattern", "{env}-qits-workspaces");
+    // Every app vhost here demands the tier-scoped `{env}-qits-artifacts` audience explicitly —
+    // mirroring a live deployment's GITHOST/EDITOR extras, which name a resource pattern of their
+    // own. The shipped DEFAULT of this key is now the literal `qits-platform`, pinned instead in
+    // EdgeChallengeTest, so a change to it is a failing test rather than a silent one here.
+    config.put("qits.edge.apps.registry.audience-pattern", "{env}-qits-artifacts");
+    config.put("qits.edge.apps.mirror.audience-pattern", "{env}-qits-artifacts");
+    config.put("qits.edge.apps.editor.audience-pattern", "{env}-qits-artifacts");
     // ONE of the two apps, which is the point: the exemption is per app label, so the suite has a
     // vhost whose reads are open and a vhost that is not, side by side.
     config.put("qits.edge.auth.anonymous-read-apps", "mirror");
@@ -250,8 +257,12 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.sessions.browser-hosts", BROWSER_HOSTS);
     config.put("qits.edge.sessions.cache-ttl-ms", "1000");
     config.put("qits.edge.sessions.stale-grace-ms", "8000");
-    // qits.edge.auth.audience-pattern is deliberately NOT set: the suite runs against the SHIPPED
-    // default, so a change to it is a failing test rather than a silent one.
+    // The environment vhost's own gate falls back to this GLOBAL pattern for a name none of the
+    // three apps above claims — a PUBLISHED (deployment-projected) service such as `ci` in
+    // EdgeRoutingTest. Explicitly set for the same reason as the three per-app entries above: the
+    // SHIPPED default is now `qits-platform`, and this suite still exercises an explicitly
+    // configured, tier-scoped pattern.
+    config.put("qits.edge.auth.audience-pattern", "{env}-qits-artifacts");
     return config;
   }
 
