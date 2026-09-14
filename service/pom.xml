@@ -57,7 +57,7 @@
              upgrade, none of which canned JSON can do, so they are eu.wohlben.qits.edge.StoryUpstream
              (a Vert.x recorder in the test JVM). See that class for the four reasons, one per
              story. Released out of libs/qits-integrations-quarkus. -->
-        <qits.service-mock.version>2026.913.81413</qits.service-mock.version>
+        <qits.service-mock.version>2026.914.173515</qits.service-mock.version>
 
         <!-- INTEGRATION TESTS ARE OFF BY DEFAULT, and this repository now has both halves of that
              sentence: a failsafe plugin bound below, and ForwardAuthBootstrapIT for it to run.
