@@ -1,0 +1,7 @@
+ForwardAuthBootstrapIT
+AnonymousReadIT
+SessionlessWallIT
+SpaFreshnessIT
+StreamingPassthroughIT
+UpstreamOutageIT
+VhostRoutingIT
