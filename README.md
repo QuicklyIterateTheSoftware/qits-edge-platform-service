@@ -744,9 +744,11 @@ in-JVM assertion about a stub and becomes a fact about the bytes a service would
 The catalogue lives in `service/src/test/java/eu/wohlben/qits/edge/*IT.java` and emits under
 `service/target/userstories/`, one directory per story with `userflow.json`, `user-story.md` and a
 self-contained `index.html`, plus a site index carrying the aggregate network of all of them.
-The non-gating step of `.config/qits/ci-event-release-request.yml` publishes the bundle once per
-release-request fold as `@userflows/qits-platform-edge`. It carries `gating: false`: a red story
-fails the run and shows red without holding the request's build gate.
+The verify step of the release-request phase — `.config/qits/release.yml` declares the
+`java-service` archetype and overrides no slot — publishes the bundle once per release-request fold
+as `@userflows/qits-edge-platform-service` (the repository's own name, which is what
+`userflows: true` means). That step **gates**, like every step of the composed pipeline: a red story
+is a red verdict for the whole fold and holds the request.
 
 **Nine stories, one launched artifact, one `StoryProfile`.** A `@TestProfile` is what failsafe
 launches a process for, so a second profile would be a second front door; every story class names
@@ -797,8 +799,9 @@ what catches a refused request quietly starting to be forwarded.
 ```
 
 `skipITs` stays `true` in `service/pom.xml` — see the comment there — so the class list is named on
-the command line and in the non-gating step of `.config/qits/ci-event-release-request.yml`. **A new
-story class goes into that YAML in the same commit that adds it**, or it is written and never run. Class order is topological:
+the command line and in `.config/qits/userflow-stories`, one class name per line, which the
+archetype turns into the verify step's `-Dit.test`. **A new story class goes into that file in the
+same commit that adds it**, or it is written and never run. Class order is topological:
 every story carries `@UserflowRunsAfter(ForwardAuthBootstrapIT.class)` so the oldest class owns
 whatever a boot produces, and `UserflowClassOrderer` is registered as junit's *secondary* orderer in
 `src/test/resources/application.properties` — the one seam quarkus-junit permits, because it ships
