@@ -1906,6 +1906,122 @@ class EdgeRoutingTest {
   }
 
   @Test
+  void anAcceptedClientIdAndSecretReachTheUpstreamAsABearerAndNotAsThemselves() {
+    // The whole of the "only CI may publish" change at this hop. A service cannot check a secret,
+    // so a relayed pair tells it nothing about WHICH commissioned client is calling — and hands it
+    // a secret it has no business holding. What travels is the token the edge validated, exactly
+    // as it does for git's `oauth2:` pair, so the service builds the roles from the JWT itself.
+    EdgeClient.Answer answer =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals("registry-dev", answer.line("upstream"));
+    String forwarded = answer.upstreamHeader("Authorization");
+    assertNotNull(forwarded, "an accepted request must arrive with a credential: " + answer.body());
+    assertTrue(forwarded.startsWith("Bearer "), forwarded);
+    assertEquals(
+        List.of(StubGateways.audience("dev"), StubGateways.audience("prod")),
+        SignedJwt.parse(forwarded.substring("Bearer ".length())).audiences().getList(),
+        "and it is the token idp minted for this client, not something the edge made up");
+    // The two ways the secret could still be there: the header, and the base64 of the pair.
+    assertFalse(
+        answer.body().contains(StubGateways.CLIENT_SECRET),
+        "the client secret stops at the edge: " + answer.body());
+    assertFalse(
+        answer.body().contains("header:authorization=Basic"),
+        "and nothing upstream sees a Basic credential at all: " + answer.body());
+  }
+
+  @Test
+  void aCacheHitForwardsTheTokenItRememberedRatherThanNothingAtAll() throws Exception {
+    // The trap the cache sets for this change: a remembered acceptance used to be a verdict and
+    // nothing else, so a hit would have had no token to write — and a request that was ACCEPTED
+    // would reach the service with no credential on it at all. Anonymously, silently.
+    Thread.sleep(cacheTtlMs() + 400);
+    int before = StubGateways.grants();
+    EdgeClient.Answer cold =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals(before + 1, StubGateways.grants(), "the first request spends the credential");
+    EdgeClient.Answer hit =
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+    assertEquals(before + 1, StubGateways.grants(), "and the second is served from the cache");
+    assertEquals("registry-dev", hit.line("upstream"));
+    assertNotNull(
+        hit.upstreamHeader("Authorization"),
+        "a cache hit must forward a credential, not strip one: " + hit.body());
+    assertEquals(
+        cold.upstreamHeader("Authorization"),
+        hit.upstreamHeader("Authorization"),
+        "the same token, because the cache holds the token and not merely a yes");
+  }
+
+  @Test
+  void aTokenTooCloseToItsExpiryIsMintedAgainRatherThanServedFromTheCache() {
+    // What is cached is what will be FORWARDED, and a token is validated one hop further in, a
+    // moment later, against another process' clock. So an entry is retired a minute before its
+    // token's own `exp`, and a client whose tokens are shorter-lived than that margin is simply
+    // one whose credential is spent on every request — never one served a token nobody would take.
+    int before = StubGateways.grants();
+    for (int request = 1; request <= 2; request++) {
+      EdgeClient.Answer answer =
+          client()
+              .get(
+                  "registry.dev.example.com",
+                  "/v2/",
+                  basic(StubGateways.BRIEF_ID, StubGateways.BRIEF_SECRET));
+      assertEquals("registry-dev", answer.line("upstream"), "request " + request);
+      String forwarded = answer.upstreamHeader("Authorization");
+      assertNotNull(forwarded, "request " + request + ": " + answer.body());
+      assertTrue(forwarded.startsWith("Bearer "), forwarded);
+    }
+    assertEquals(
+        before + 2,
+        StubGateways.grants(),
+        "a token inside the margin is never a belief worth keeping, so both requests ask idp");
+  }
+
+  @Test
+  void aCredentialWhoseRemintFailsIsRefusedRatherThanForwardedBare() throws Exception {
+    // The other half of the same invariant, from the failure side: once the belief has run out
+    // there is no token to forward, and the only two answers left are a fresh one or a refusal.
+    // Passing the request through with no credential would be the precise defect this closes.
+    assertEquals(
+        "registry-dev",
+        client()
+            .get(
+                "registry.dev.example.com",
+                "/v2/",
+                basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET))
+            .line("upstream"));
+    Thread.sleep(cacheTtlMs() + 400);
+    StubGateways.idpDown();
+    try {
+      EdgeClient.Answer answer =
+          client()
+              .get(
+                  "registry.dev.example.com",
+                  "/v2/",
+                  basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET));
+      assertEquals(401, answer.status(), answer.body());
+      assertNull(
+          answer.line("upstream"),
+          "the request reached no service — a check that cannot be made refuses");
+    } finally {
+      StubGateways.idpUp();
+    }
+  }
+
+  @Test
   void aBasicCredentialCarriesTheSameAudienceDemandAsABearer() {
     // The whole point of validating rather than trusting: the client is real, its secret is right,
     // and it is commissioned for an audience this vhost does not demand.

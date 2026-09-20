@@ -2,6 +2,7 @@ package eu.wohlben.qits.edge;
 
 import eu.wohlben.qits.userflows.NetworkCapture;
 import eu.wohlben.qits.userflows.NetworkEdge;
+import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -111,6 +112,13 @@ final class EdgeClient implements AutoCloseable {
 
   private final Vertx vertx = Vertx.vertx();
   private final HttpClient client = vertx.createHttpClient();
+
+  /**
+   * ONE context, captured here and used for every request this client makes — see {@link
+   * #onOneContext}.
+   */
+  private final Context context = vertx.getOrCreateContext();
+
   private final SocketAddress edge;
   private final int port;
 
@@ -142,38 +150,69 @@ final class EdgeClient implements AutoCloseable {
     // Read here, on the story's own thread, and kept: see the class comment.
     String caller = NetworkCapture.actor();
     CompletableFuture<Answer> answer = new CompletableFuture<>();
-    client
-        .request(options)
-        .compose(request -> body == null ? request.send() : request.send(Buffer.buffer(body)))
-        .compose(
-            response ->
-                response
-                    .body()
-                    .map(
-                        received -> {
-                          Map<String, String> seen = new LinkedHashMap<>();
-                          List<Map.Entry<String, String>> raw = new ArrayList<>();
-                          response
-                              .headers()
-                              .forEach(
-                                  entry -> {
-                                    String name = entry.getKey().toLowerCase(java.util.Locale.ROOT);
-                                    raw.add(Map.entry(name, entry.getValue()));
-                                    seen.putIfAbsent(name, entry.getValue());
-                                  });
-                          // Observed before the future completes, so a story that awaits this
-                          // request can never race the edge into its own diagram.
-                          NetworkCapture.observe(
-                              NetworkEdge.HTTP,
-                              caller,
-                              SERVICE,
-                              label(method, host, uri, response.statusCode()));
-                          return new Answer(
-                              response.statusCode(), seen, List.copyOf(raw), received.toString());
-                        }))
-        .onSuccess(answer::complete)
-        .onFailure(answer::completeExceptionally);
+    onOneContext(
+        () ->
+            client
+                .request(options)
+                .compose(
+                    request -> body == null ? request.send() : request.send(Buffer.buffer(body)))
+                .compose(
+                    response ->
+                        response
+                            .body()
+                            .map(
+                                received -> {
+                                  Map<String, String> seen = new LinkedHashMap<>();
+                                  List<Map.Entry<String, String>> raw = new ArrayList<>();
+                                  response
+                                      .headers()
+                                      .forEach(
+                                          entry -> {
+                                            String name =
+                                                entry.getKey().toLowerCase(java.util.Locale.ROOT);
+                                            raw.add(Map.entry(name, entry.getValue()));
+                                            seen.putIfAbsent(name, entry.getValue());
+                                          });
+                                  // Observed before the future completes, so a story that awaits
+                                  // this
+                                  // request can never race the edge into its own diagram.
+                                  NetworkCapture.observe(
+                                      NetworkEdge.HTTP,
+                                      caller,
+                                      SERVICE,
+                                      label(method, host, uri, response.statusCode()));
+                                  return new Answer(
+                                      response.statusCode(),
+                                      seen,
+                                      List.copyOf(raw),
+                                      received.toString());
+                                }))
+                .onSuccess(answer::complete)
+                .onFailure(answer::completeExceptionally));
     return answer;
+  }
+
+  /**
+   * Issue a request from the ONE context this client captured, whoever is calling.
+   *
+   * <p><b>Not a nicety: without it this class hangs a request outright, for the whole 30 seconds
+   * {@link #await} waits.</b> Every call here comes off the JUnit thread, which is not a Vert.x
+   * thread, so {@code vertx.getOrCreateContext()} inside {@code HttpClient.request} mints a NEW
+   * context per call — and Vert.x 4.5.26's connection pool intermittently never leases that waiter
+   * a connection under CPU contention. The socket is open and nothing is ever written to it, so the
+   * failure reads as "the edge did not answer" while the edge was never asked: measured across this
+   * estate as roughly three hangs in eleven runs of a busy suite, and none in thirty once every
+   * request was issued on one captured context.
+   *
+   * <p>Run inline when the caller is already on that context, so a callback that sends a second
+   * request does not have to wait for another turn of the loop.
+   */
+  private void onOneContext(Runnable request) {
+    if (Vertx.currentContext() == context) {
+      request.run();
+      return;
+    }
+    context.runOnContext(ignored -> request.run());
   }
 
   /**
@@ -213,33 +252,36 @@ final class EdgeClient implements AutoCloseable {
     CompletableFuture<Long> firstChunk = new CompletableFuture<>();
     CompletableFuture<String> whole = new CompletableFuture<>();
     long start = System.nanoTime();
-    client
-        .request(options(HttpMethod.GET, host, uri, headers))
-        .compose(request -> request.send())
-        .onSuccess(
-            response -> {
-              status.complete(response.statusCode());
-              StringBuilder body = new StringBuilder();
-              response.handler(
-                  chunk -> {
-                    firstChunk.complete((System.nanoTime() - start) / 1_000_000);
-                    body.append(chunk);
-                  });
-              response.endHandler(
-                  v -> {
-                    // An answer with no body at all still ended: completing here keeps a refusal
-                    // from waiting out the timeout on a chunk that was never coming.
-                    firstChunk.complete((System.nanoTime() - start) / 1_000_000);
-                    whole.complete(body.toString());
-                  });
-              response.exceptionHandler(whole::completeExceptionally);
-            })
-        .onFailure(
-            failure -> {
-              status.completeExceptionally(failure);
-              firstChunk.completeExceptionally(failure);
-              whole.completeExceptionally(failure);
-            });
+    onOneContext(
+        () ->
+            client
+                .request(options(HttpMethod.GET, host, uri, headers))
+                .compose(request -> request.send())
+                .onSuccess(
+                    response -> {
+                      status.complete(response.statusCode());
+                      StringBuilder body = new StringBuilder();
+                      response.handler(
+                          chunk -> {
+                            firstChunk.complete((System.nanoTime() - start) / 1_000_000);
+                            body.append(chunk);
+                          });
+                      response.endHandler(
+                          v -> {
+                            // An answer with no body at all still ended: completing here keeps a
+                            // refusal
+                            // from waiting out the timeout on a chunk that was never coming.
+                            firstChunk.complete((System.nanoTime() - start) / 1_000_000);
+                            whole.complete(body.toString());
+                          });
+                      response.exceptionHandler(whole::completeExceptionally);
+                    })
+                .onFailure(
+                    failure -> {
+                      status.completeExceptionally(failure);
+                      firstChunk.completeExceptionally(failure);
+                      whole.completeExceptionally(failure);
+                    }));
     Streamed streamed = new Streamed(await(status), await(firstChunk), await(whole));
     NetworkCapture.observe(
         NetworkEdge.HTTP, caller, SERVICE, label(HttpMethod.GET, host, uri, streamed.status()));

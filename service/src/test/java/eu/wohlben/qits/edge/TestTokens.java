@@ -61,7 +61,15 @@ final class TestTokens {
 
   /** A token idp would issue: signed by the published key, live, for the given audiences. */
   static String valid(String issuer, List<String> audiences) {
-    return mint(IDP, KID, "RS256", claims(issuer, audiences, Instant.now().plusSeconds(300)));
+    return validFor(issuer, audiences, 300);
+  }
+
+  /**
+   * The same, with a life of its own — what a token already inside the edge's re-mint margin looks
+   * like. Genuine and live: the only thing wrong with it is that it is nearly over.
+   */
+  static String validFor(String issuer, List<String> audiences, long seconds) {
+    return mint(IDP, KID, "RS256", claims(issuer, audiences, Instant.now().plusSeconds(seconds)));
   }
 
   static JsonObject claims(String issuer, List<String> audiences, Instant expiry) {

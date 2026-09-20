@@ -12,6 +12,7 @@ import io.smallrye.config.SmallRyeConfigBuilder;
 import io.smallrye.config.WithDefault;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.JsonArray;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -308,6 +309,41 @@ class EdgeChallengeTest {
     assertNotEquals(fingerprint, EdgeAuth.fingerprint(encode("a-client:another-secret")));
     assertFalse(fingerprint.contains("a-secret"));
     assertFalse(fingerprint.contains(credential));
+  }
+
+  @Test
+  void aBeliefOutlivesNeitherTheCeilingNorTheTokenItHolds() {
+    // What is cached beside the verdict is the token the edge will FORWARD, so the entry has to
+    // die while that token is still worth forwarding — it is validated one hop further in, a
+    // moment later, against another process' clock.
+    long now = 1_000_000L;
+    assertEquals(
+        now + 60_000,
+        EdgeAuth.believeUntil(now, 60_000, Instant.ofEpochMilli(now + 300_000), 60_000),
+        "the configured ceiling binds while the token has life to spare");
+    assertEquals(
+        now + 240_000,
+        EdgeAuth.believeUntil(now, 300_000, Instant.ofEpochMilli(now + 300_000), 60_000),
+        "and the token's own life binds otherwise — less the margin, which is the whole point");
+    assertEquals(
+        now,
+        EdgeAuth.believeUntil(now, 300_000, Instant.ofEpochMilli(now + 30_000), 60_000),
+        "a token already inside the margin is a belief that expired before it was written, so the"
+            + " credential is spent again rather than a dying token being handed on");
+    assertEquals(
+        now,
+        EdgeAuth.believeUntil(now, 300_000, Instant.ofEpochMilli(now - 1), 60_000),
+        "and never a time in the past, which a hit would read as live");
+    assertEquals(
+        now,
+        EdgeAuth.believeUntil(now, 300_000, null, 60_000),
+        "a token that names no expiry is refused before this, and is cached for no time at all");
+  }
+
+  @Test
+  void theRemintMarginIsTheEstatesOwn() {
+    // The same sixty seconds AgentCredential treats a token as spent at, elsewhere on the estate.
+    assertEquals(60_000, EdgeAuth.TOKEN_MARGIN_MS);
   }
 
   // --- the patience the identity provider is given ----------------------------------------------

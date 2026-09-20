@@ -53,6 +53,9 @@ import java.util.concurrent.TimeUnit;
  * answers, which is the shape a redeploying idp takes and the only way to prove that the edge
  * answers anyway. {@link #idpDown} and {@link #idpUp} add the fourth shape, a refused connection.
  * One more client, {@link #PLATFORM_ID}, holds only the platform audience, which opens every vhost.
+ * And {@link #BRIEF_ID} is the fifth shape: commissioned exactly as the first, but issued a token
+ * with barely any life left — the credential whose acceptance the edge may not cache, because what
+ * a cache entry holds is the token it would forward.
  */
 public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
@@ -76,6 +79,22 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   static final String PLATFORM_ID = "platform-client";
 
   static final String PLATFORM_SECRET = "platform-secret";
+
+  /**
+   * A real client, commissioned exactly as {@link #CLIENT_ID} is, whose tokens are nearly over the
+   * moment they are minted — inside the edge's own re-mint margin. It is the only way to see the
+   * margin from the outside: a belief about this credential can never be cached, because the token
+   * it holds would not be worth forwarding by the time it was used.
+   */
+  static final String BRIEF_ID = "brief-client";
+
+  static final String BRIEF_SECRET = "brief-secret";
+
+  /** {@link #BRIEF_ID}'s token life, well inside {@code EdgeAuth.TOKEN_MARGIN_MS}. */
+  static final long BRIEF_TOKEN_SECONDS = 30;
+
+  /** Everyone else's, which is idp's own. */
+  private static final long TOKEN_SECONDS = 300;
 
   /** The credential the stub idp accepts a connection for and then never answers. */
   static final String SINKHOLE_ID = "sinkhole";
@@ -333,7 +352,8 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
 
   /** The {@code client_credentials} grant, per client. */
   private void grant(HttpServerRequest request, String body) {
-    List<String> audiences = audiencesFor(request.getHeader("Authorization"));
+    String authorization = request.getHeader("Authorization");
+    List<String> audiences = audiencesFor(authorization);
     if (audiences == null || !body.contains("grant_type=client_credentials")) {
       request
           .response()
@@ -347,6 +367,8 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
       // container that is being replaced does to a request that reached it a moment too early.
       return;
     }
+    long life =
+        basic(BRIEF_ID, BRIEF_SECRET).equals(authorization) ? BRIEF_TOKEN_SECONDS : TOKEN_SECONDS;
     request
         .response()
         .putHeader("Content-Type", "application/json")
@@ -354,9 +376,9 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
             new io.vertx.core.json.JsonObject()
                 .put(
                     "access_token",
-                    TestTokens.valid("http://127.0.0.1:" + idpPort + "/idp", audiences))
+                    TestTokens.validFor("http://127.0.0.1:" + idpPort + "/idp", audiences, life))
                 .put("token_type", "Bearer")
-                .put("expires_in", 300)
+                .put("expires_in", life)
                 .encode());
   }
 
@@ -366,6 +388,9 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
    */
   private static List<String> audiencesFor(String authorization) {
     if (basic(CLIENT_ID, CLIENT_SECRET).equals(authorization)) {
+      return List.of(audience("dev"), audience("prod"));
+    }
+    if (basic(BRIEF_ID, BRIEF_SECRET).equals(authorization)) {
       return List.of(audience("dev"), audience("prod"));
     }
     if (basic(OTHER_ID, OTHER_SECRET).equals(authorization)) {

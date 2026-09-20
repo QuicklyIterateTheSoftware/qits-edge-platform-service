@@ -98,7 +98,9 @@ public interface AuthConfig {
   /**
    * How long a validated HTTP Basic credential is believed without asking idp again, in
    * milliseconds — a CEILING, not a fixed life: the entry also dies with the token idp minted for
-   * it, whichever comes first.
+   * it, a minute before that token's own {@code exp} ({@link EdgeAuth#TOKEN_MARGIN_MS}), whichever
+   * comes first. The token is part of the entry because it is what the edge forwards upstream in
+   * the credential's place, and one too close to expiry to forward is an entry that has run out.
    *
    * <p>The cache is what keeps a maven, npm or git client — none of which can do docker's token
    * dance, so each resends its credential on every request — from putting one idp round trip on

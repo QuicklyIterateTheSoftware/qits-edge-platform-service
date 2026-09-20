@@ -68,10 +68,20 @@ import org.jboss.logging.Logger;
  * names it passes on every path above, next to the vhost's own audience. Its roles are the
  * permission, and the services check them.
  *
+ * <p><b>And what goes on upstream is the TOKEN, never the pair.</b> A service one hop in cannot
+ * check a secret, so a relayed {@code Basic} tells it nothing but "the edge was satisfied" — it
+ * cannot tell a CI run's credential from an agent's, and it is holding a client secret it has no
+ * business holding. So an accepted client id and secret leaves here as {@code Bearer <the token it
+ * was validated with>}, exactly as git's {@code oauth2:} pair does: the service's own OIDC
+ * mechanism validates the JWT independently and builds the roles from its claims, and the secret
+ * stops at this process.
+ *
  * <p><b>The result is cached against a HASH of the credential</b>, never the credential, for the
- * shorter of the minted token's life and {@link AuthConfig#basicCacheTtlMs()}. Without it every
- * dependency fetch would put an idp round trip on the path, which is the thing offline validation
- * exists to avoid. Refusals are not cached — see {@link #checkBasic}.
+ * shorter of the minted token's usable life and {@link AuthConfig#basicCacheTtlMs()}. Without it
+ * every dependency fetch would put an idp round trip on the path, which is the thing offline
+ * validation exists to avoid. The minted token is held with it, because a hit with nothing to
+ * forward would be a request quietly downgraded to anonymous. Refusals are not cached — see {@link
+ * #checkBasic}.
  *
  * <h2>The one gap in a gated vhost</h2>
  *
@@ -119,6 +129,14 @@ public class EdgeAuth {
   private Set<String> anonymousReadApps;
 
   /**
+   * How close to its own expiry a cached token stops being worth forwarding, in milliseconds. A
+   * token handed upstream is validated there, a moment later and against that process' clock, so a
+   * cache entry is retired while what it holds still has a working life in front of it. Sixty
+   * seconds is the margin {@code AgentCredential} uses elsewhere on this estate.
+   */
+  static final long TOKEN_MARGIN_MS = 60_000;
+
+  /**
    * Credential fingerprint to what idp said about it. Bounded and least-recently-used: the key
    * comes from a caller, so an unbounded map is a caller-sized allocation.
    */
@@ -141,11 +159,22 @@ public class EdgeAuth {
   }
 
   /**
-   * A credential idp accepted: the audiences the token it minted carried, and when this belief
-   * stops. The audiences are kept rather than a yes/no, because the demanded audience is a
+   * A credential idp accepted: the token it minted, the audiences that token carried, and when this
+   * belief stops. The audiences are kept rather than a yes/no, because the demanded audience is a
    * per-request question — one cached validation must still refuse the vhost of another tier.
+   *
+   * <p><b>The token is held because it is what travels.</b> An accepted request leaves this process
+   * carrying it, so a cache hit that had only a verdict would have to forward nothing at all —
+   * which is an accepted request arriving upstream as an anonymous one. It is a secret with a
+   * lifetime, and it is treated as one: in memory only, never logged, never written down, dropped
+   * the moment {@link #expiresAtMillis} passes, and bounded in number by {@link
+   * AuthConfig#basicCacheSize()} like every other entry.
+   *
+   * @param expiresAtMillis the shorter of {@link AuthConfig#basicCacheTtlMs()} and the token's own
+   *     remaining life less {@link #TOKEN_MARGIN_MS} — so an entry whose token is near its expiry
+   *     is simply an entry that has run out
    */
-  private record Validated(JsonArray audiences, long expiresAtMillis) {}
+  private record Validated(JsonArray audiences, String token, long expiresAtMillis) {}
 
   /**
    * The configured app labels, in the spelling {@link HostEnvironments} produces: stripped, lower
@@ -293,8 +322,9 @@ public class EdgeAuth {
                 });
       }
       // A client id and secret, sent by something that cannot do docker's token dance — maven, npm,
-      // git. Spending them at idp is the only way to know they are good.
-      return checkBasic(credential, audiences);
+      // git. Spending them at idp is the only way to know they are good — and the token that comes
+      // back is what goes on, so the secret stops here.
+      return checkBasic(request, credential, audiences);
     }
     if (header == null || !header.toLowerCase(Locale.ROOT).startsWith(BEARER)) {
       return Future.succeededFuture("no bearer token");
@@ -340,7 +370,26 @@ public class EdgeAuth {
   }
 
   /**
-   * Whether an HTTP Basic credential opens this vhost: cached belief first, then idp.
+   * Whether an HTTP Basic credential opens this vhost: cached belief first, then idp — and, when it
+   * does open it, the request's {@code Authorization} header replaced by the token it was validated
+   * with.
+   *
+   * <p><b>The rewrite is the point of this method as much as the verdict is.</b> An upstream cannot
+   * check a secret, so a relayed pair leaves it unable to tell one commissioned client from another
+   * — which is why a service that must distinguish them (qits-artifacts' publish guard) can only
+   * refuse {@code Basic} outright — and leaves a client secret in the hands of a process with no
+   * use for one. Forwarding the minted JWT instead is the move the {@code oauth2:} branch of {@link
+   * #checkCredential} already makes, for the same stated reason: the service's own OIDC mechanism
+   * validates it independently and derives the roles from its {@code groups} claim.
+   *
+   * <p><b>Which is what the cache has to hold a token for.</b> A hit that carried only a verdict
+   * would leave nothing to write, and a request that was ACCEPTED would arrive upstream with no
+   * credential at all — anonymous, silently, on exactly the path this rewrite exists to close. So
+   * the token is cached beside the verdict, under the same fingerprint, and an entry whose token is
+   * within {@link #TOKEN_MARGIN_MS} of expiry has already run out (see {@link #believeUntil}): it
+   * is dropped and the credential is spent again. Every path out of here therefore either has a
+   * live token to forward or is a refusal — a re-mint that fails refuses exactly as a cold one
+   * does, and never passes the request through bare.
    *
    * <p><b>Only the acceptance is cached.</b> A refusal is not, and briefly caching one would be
    * worse than useless: the case it would speed up is a client whose secret was just rotated, which
@@ -352,7 +401,8 @@ public class EdgeAuth {
    * on it (a validator that cannot answer must not open the door) but it is not written down as a
    * verdict about the credential.
    */
-  private Future<String> checkBasic(String credential, List<String> audiences) {
+  private Future<String> checkBasic(
+      HttpServerRequest request, String credential, List<String> audiences) {
     if (!isClientCredentials(credential)) {
       // Refused HERE, without a call. A credential that cannot be a client id and a secret has
       // nothing to ask idp about, and asking would spend the whole patience window on it during an
@@ -361,8 +411,13 @@ public class EdgeAuth {
     }
     String fingerprint = fingerprint(credential);
     Validated known = validated.get(fingerprint);
-    if (known != null && known.expiresAtMillis() > System.currentTimeMillis()) {
-      return Future.succeededFuture(refusalFor(known.audiences(), audiences));
+    if (known != null) {
+      if (known.expiresAtMillis() > System.currentTimeMillis()) {
+        return Future.succeededFuture(forward(request, known, audiences));
+      }
+      // Out of time: dropped here rather than left for the LRU bound to reach, so a spent token
+      // does not sit in memory for as long as its credential stays popular.
+      validated.remove(fingerprint, known);
     }
     return grants
         .grant("Basic " + credential)
@@ -371,9 +426,11 @@ public class EdgeAuth {
               if (grant.status() != 200) {
                 return Future.succeededFuture("the identity provider refused these credentials");
               }
+              String issued;
               SignedJwt minted;
               try {
-                minted = SignedJwt.parse(new JsonObject(grant.body()).getString("access_token"));
+                issued = new JsonObject(grant.body()).getString("access_token");
+                minted = SignedJwt.parse(issued);
               } catch (RuntimeException e) {
                 return Future.succeededFuture("the identity provider issued no usable token");
               }
@@ -391,10 +448,26 @@ public class EdgeAuth {
                         if (!minted.signatureMatches(key)) {
                           return "the minted token's signature does not verify";
                         }
-                        validated.put(fingerprint, remember(minted));
-                        return refusalFor(minted.audiences(), audiences);
+                        Validated fresh = remember(minted, issued);
+                        validated.put(fingerprint, fresh);
+                        return forward(request, fresh, audiences);
                       });
             });
+  }
+
+  /**
+   * The verdict for this vhost, and — when it is yes — the token written onto the request in the
+   * credential's place.
+   *
+   * <p>The two halves are one method so they cannot come apart: there is no way to accept a Basic
+   * credential here without replacing it, and no way to replace it without having accepted it.
+   */
+  private String forward(HttpServerRequest request, Validated accepted, List<String> audiences) {
+    String problem = refusalFor(accepted.audiences(), audiences);
+    if (problem == null) {
+      request.headers().set(HttpHeaders.AUTHORIZATION, "Bearer " + accepted.token());
+    }
+    return problem;
   }
 
   /**
@@ -409,12 +482,38 @@ public class EdgeAuth {
         : "the credential is not for " + SignedJwt.either(accepted);
   }
 
-  /** How long to believe a credential: the token's own life, capped by configuration. */
-  private Validated remember(SignedJwt minted) {
-    long now = System.currentTimeMillis();
-    long tokenLifeMs = minted.expiry() == null ? 0 : minted.expiry().toEpochMilli() - now;
+  /** What to cache about a credential idp accepted, and for how long. */
+  private Validated remember(SignedJwt minted, String token) {
     return new Validated(
-        minted.audiences(), now + Math.max(0, Math.min(config.basicCacheTtlMs(), tokenLifeMs)));
+        minted.audiences(),
+        token,
+        believeUntil(
+            System.currentTimeMillis(),
+            config.basicCacheTtlMs(),
+            minted.expiry(),
+            TOKEN_MARGIN_MS));
+  }
+
+  /**
+   * When to stop believing a credential: the token's own remaining life less the margin, capped by
+   * configuration.
+   *
+   * <p>The margin is what makes one expiry serve both halves of the entry. The verdict would
+   * happily stand until the token's last second; the TOKEN would not, because it is forwarded and
+   * validated one hop further in, a moment later, against another process' clock. Retiring the
+   * whole entry a minute early means a cache hit always has something worth forwarding, and a token
+   * too close to its end is simply a credential that has to be spent again.
+   *
+   * <p>Never negative: a token already inside the margin gives an entry that has expired before it
+   * was written, which is a credential that is validated on every request. That is the right answer
+   * for a token nobody could usefully forward, and the fresh one this call is made about is handed
+   * on regardless.
+   *
+   * <p>Package-private and static so the arithmetic can be asserted without booting an application.
+   */
+  static long believeUntil(long now, long ttlMs, Instant tokenExpiry, long marginMs) {
+    long usableMs = tokenExpiry == null ? 0 : tokenExpiry.toEpochMilli() - now - marginMs;
+    return now + Math.max(0, Math.min(ttlMs, usableMs));
   }
 
   /**
@@ -422,7 +521,15 @@ public class EdgeAuth {
    * whether idp knows it.
    *
    * <p>The credential is decoded here and NOWHERE else: this process does not log it, store it or
-   * carry it past this call, and what it relays to idp is the header exactly as it arrived.
+   * carry it past this call, and what it relays to idp is the header exactly as it arrived. It is
+   * also where the secret's travels END — an accepted pair is replaced on the request by the token
+   * it bought ({@link #checkBasic}), so no upstream ever sees it.
+   *
+   * <p><b>What IS held, and only this.</b> The fingerprint below, which is a one-way hash of the
+   * pair; and, against it, the access token idp minted — a bearer, not a secret that can be spent
+   * again, live for at most {@link AuthConfig#basicCacheTtlMs()} and in any case retired {@link
+   * #TOKEN_MARGIN_MS} before its own {@code exp}. Both live in one bounded in-memory map, neither
+   * is logged or written anywhere, and the pair itself is in none of it.
    */
   static boolean isClientCredentials(String credential) {
     if (credential == null || credential.isBlank()) {
