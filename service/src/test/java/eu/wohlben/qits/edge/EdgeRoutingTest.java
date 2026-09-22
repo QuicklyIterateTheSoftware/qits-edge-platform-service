@@ -285,6 +285,7 @@ class EdgeRoutingTest {
             "services.details",
             "daemons.details",
             "libs.details",
+            "apps.details",
             "frontends.details",
             "cli.details",
             "images.details"),
@@ -314,6 +315,85 @@ class EdgeRoutingTest {
         slots.getJsonArray("services.details").stream()
             .map(value -> ((JsonObject) value).getString("path"))
             .toList());
+  }
+
+  @Test
+  void anAppsDetailsPlacementIsAdmittedAndRendersBetweenLibsAndFrontends() {
+    // The seventh archetype slot. It is published exactly like the six before it; what makes it the
+    // seventh rather than the last is where it sits in EdgeRoutes.SLOTS, which is both the order
+    // this document renders and the order qits-deployments' spec parser reads the same words in.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-ci")
+                .put("environmentName", "dev")
+                .put("browserHost", "ci")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/ci", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    // Declared out of order on purpose: the vocabulary decides the render order,
+                    // not the order the deployment happened to write the placements in.
+                    new io.vertx.core.json.JsonArray()
+                        .add(placement("frontends.details", "Shell", 1))
+                        .add(placement("apps.details", "Docs", 1))
+                        .add(placement("libs.details", "Eventstream", 1)))));
+
+    assertEquals(
+        List.of("libs.details", "apps.details", "frontends.details"),
+        routes.navigation("dev").stream().map(EdgeRoutes.NavigationPlacement::slot).toList());
+
+    JsonObject slots =
+        new JsonObject(client().get("dev.example.com", "/main-navigation").body())
+            .getJsonObject("slots");
+    assertEquals(
+        List.of("Docs"),
+        slots.getJsonArray("apps.details").stream()
+            .map(value -> ((JsonObject) value).getString("label"))
+            .toList());
+    assertEquals(
+        "http://ci.dev.example.com",
+        slots.getJsonArray("apps.details").getJsonObject(0).getString("origin"));
+    // The key order of the document is the render order, so the new slot is drawn after the
+    // libraries and before the microfrontends — the order qits-deployments publishes in too.
+    List<String> keys = List.copyOf(slots.fieldNames());
+    assertEquals(keys.indexOf("libs.details") + 1, keys.indexOf("apps.details"), keys.toString());
+    assertEquals(
+        keys.indexOf("apps.details") + 1, keys.indexOf("frontends.details"), keys.toString());
+  }
+
+  @Test
+  void aWordOutsideTheVocabularyIsStillRefusedWholeAfterTheSeventhSlotWasAdded() {
+    // Admitting a word does not open the vocabulary. The near miss is the singular of the new one,
+    // which is exactly the typo a hand-written spec makes, and the refusal names both the word and
+    // the list so it is readable where it is logged.
+    String message =
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new EdgeRoutes.NavigationEntry("app.details", "Docs", 1))
+            .getMessage();
+    assertTrue(message.contains("`app.details` is not a navigation slot"), message);
+    assertTrue(message.contains("apps.details"), message);
+
+    // And, like every poison frame, the one carrying it changes no routes at all.
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-ci")
+                .put("environmentName", "dev")
+                .put("browserHost", "ci")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/ci", upstream("qits.edge.apps.mirror.hosts.dev"))))
+                .put(
+                    "navigation",
+                    new io.vertx.core.json.JsonArray().add(placement("app.details", "Docs", 1)))));
+
+    assertTrue(routes.navigation("dev").isEmpty());
+    assertNull(routes.serviceHost("dev", "ci"));
   }
 
   @Test

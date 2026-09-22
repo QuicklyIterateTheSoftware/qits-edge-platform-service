@@ -40,6 +40,13 @@ public class EdgeRoutes {
    * published and never drawn, which is worse than a deployment being refused for a typo. The edge
    * knows nothing about projects or repositories — a slot says WHERE the shell hangs an entry, and
    * the shell decides what hangs there.
+   *
+   * <p>The archetype slots are the same words, in the same order, as qits-deployments' {@code
+   * DeploymentSpecParser.SLOTS}: that parser refuses an unknown word at the source and this one
+   * restates the refusal a hop later, so the two lists diverging would mean a spec that passes the
+   * deployer and poisons the frame here. {@code apps.details} sits between {@code libs.details} and
+   * {@code frontends.details} because an Angular SSR application is a deployable that serves its
+   * own HTML, which puts it after the libraries and before the microfrontends.
    */
   public static final List<String> SLOTS =
       List.of(
@@ -49,6 +56,7 @@ public class EdgeRoutes {
           "services.details",
           "daemons.details",
           "libs.details",
+          "apps.details",
           "frontends.details",
           "cli.details",
           "images.details");
