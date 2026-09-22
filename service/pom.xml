@@ -48,7 +48,7 @@
              about resolution changes and neither docker/Dockerfile nor either pipeline needed a
              repair. The groupId is spelled out rather than ${project.groupId}: this repository's
              own groupId is `eu.wohlben`, and the platform's shared jars are `eu.wohlben.qits`. -->
-        <qits.userflows.version>2026.920.210236</qits.userflows.version>
+        <qits.userflows.version>2026.922.190204</qits.userflows.version>
         <!-- The recording service mock, used for ONE of the two kinds of far side this catalogue
              needs: qits-platform-idp, whose whole contribution is a canned JSON introspection
              answer plus a recording of who asked for it, which is exactly what this library is for.
