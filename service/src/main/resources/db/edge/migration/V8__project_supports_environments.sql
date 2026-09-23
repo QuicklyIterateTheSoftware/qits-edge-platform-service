@@ -1,0 +1,23 @@
+-- Whether a project has environments at all, carried alongside the slug it is keyed by.
+--
+-- qits-projects is growing projects that do not have a tier of environments under them, and the
+-- edge is the place that has to know: its host grammar spends a whole label on the environment
+-- (<slug>.<env>.<domain>, <app>.<slug>.<env>.<domain>), so a project with no environments is a
+-- project whose names cannot be read that way. Nothing reads this column yet — it is projected
+-- first, deliberately, so that the reading can land on a projection that is already caught up
+-- rather than one that starts learning the flag the day the routing changes.
+--
+-- `default true` is the compatibility rule, and it is the SAME rule twice:
+--
+--   * a HISTORICAL ROW, written before this column existed, gets true here. Every project the
+--     platform has today has environments, so true is what those rows have always meant.
+--   * a FRAME WITH NO FIELD — an older ProjectCreated replayed from the epoch, which this consumer
+--     does on every boot — is normalised to true by the subscriber before it ever reaches the
+--     upsert, for the same reason.
+--
+-- So absence means "has environments" wherever it is met, and the flag only ever says something
+-- when a publisher that knows about it says so. `not null` rather than a nullable tri-state: a null
+-- would be a third answer that every reader would then have to translate into true anyway, and one
+-- of them would forget.
+alter table edge_project
+    add column supports_environments boolean not null default true;

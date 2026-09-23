@@ -14,19 +14,22 @@ import org.jboss.logging.Logger;
  *
  * <p>A project's slug is a label in two SAN tiers the edge orders, so the set of projects is part
  * of the set of names. This listener is the only thing that moves it: {@code ProjectCreated} adds a
- * slug, {@code ProjectDeleted} tombstones one, and {@link EdgeProjects} decides which of two frames
- * for one slug is the newer.
+ * slug, {@code ProjectChanged} restates one, {@code ProjectDeleted} tombstones one, and {@link
+ * EdgeProjects} decides which of two frames for one slug is the newer.
  *
- * <p><b>Only a create asks for a certificate order.</b> A grown desired set is a name the installed
- * certificate is missing, which is an origin that does not answer until it is ordered. A SHRUNK set
- * is not: every name on the certificate still resolves and still verifies, so the wildcard for a
- * deleted project simply ages out at the next renewal. Ordering on a delete would spend one of
- * Let's Encrypt's five duplicate certificates a week to remove a name nobody is asking for.
+ * <p><b>Only a GROWN slug set asks for a certificate order</b>, which is a create and nothing else.
+ * A grown desired set is a name the installed certificate is missing, which is an origin that does
+ * not answer until it is ordered. A SHRUNK set is not: every name on the certificate still resolves
+ * and still verifies, so the wildcard for a deleted project simply ages out at the next renewal.
+ * Ordering on a delete would spend one of Let's Encrypt's five duplicate certificates a week to
+ * remove a name nobody is asking for — and a {@code ProjectChanged} that only flips {@code
+ * supportsEnvironments} would spend one to install the names that are already installed.
  */
 @ApplicationScoped
 public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
 
   static final String CREATED = "ProjectCreated";
+  static final String CHANGED = "ProjectChanged";
   static final String DELETED = "ProjectDeleted";
   static final String CONSUMER_ID = "edge-project-sans";
 
@@ -35,22 +38,37 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
   /**
    * Private wire DTO rather than a dependency on qits-projects' event jar. The contract is
    * cross-repository JSON and additions must not force the edge to wait for a Maven release, so
-   * unknown fields are ignored — {@code createdAt}, {@code deletedAt} and the project's display
-   * name among them. The time this projection orders by is the FRAME's, which every consumer sees
-   * identically, and the display name is nothing a certificate can be built from.
+   * unknown fields are ignored — {@code createdAt}, {@code changedAt}, {@code deletedAt} and the
+   * project's display name among them. The time this projection orders by is the FRAME's, which
+   * every consumer sees identically, and the display name is nothing a certificate can be built
+   * from.
    *
-   * <p><b>It holds TWO of the payload's fields, not all of them</b>, and that is what a private
+   * <p><b>It holds THREE of the payload's fields, not all of them</b>, and that is what a private
    * wire DTO is for. The publisher spells the display name {@code projectName} rather than {@code
    * name}, because a record component called {@code name} collides with the QitsEvent envelope's
    * {@code @JsonIgnore} mixin there and is silently dropped — a rule their contract test pins. A
    * copy of that field here would be a second place to get it wrong for a value this consumer has
-   * no use for, so there is none.
+   * no use for, so there is still none, even though the field names are transcribed by hand and
+   * copying it would have cost one line.
    *
-   * <p>{@code slug} is the only load-bearing field. It is a DNS label by construction on the
-   * publisher's side and is nevertheless checked here: it becomes a certificate name, and one bad
-   * name fails the whole ACME order for every other project too.
+   * <p>{@code slug} is the load-bearing one. It is a DNS label by construction on the publisher's
+   * side and is nevertheless checked here: it becomes a certificate name, and one bad name fails
+   * the whole ACME order for every other project too.
+   *
+   * <p><b>{@code supportsEnvironments} is a boxed {@code Boolean} on purpose, and the canonical
+   * constructor is where its absence is decided.</b> A {@code boolean} component would deserialise
+   * a missing key as {@code false} — and missing is the common case, because this consumer replays
+   * from the epoch and every {@code ProjectCreated} published before the field existed has no such
+   * key. That would have the edge quietly assert that every historical project has no environments,
+   * which is the opposite of the truth. Null normalises to {@link Boolean#TRUE} here rather than at
+   * each use, so there is one place to get it right and no reader downstream holding a null.
    */
-  record ProjectLifecyclePayload(String projectId, String slug) {}
+  record ProjectLifecyclePayload(String projectId, String slug, Boolean supportsEnvironments) {
+
+    ProjectLifecyclePayload {
+      supportsEnvironments = supportsEnvironments == null ? Boolean.TRUE : supportsEnvironments;
+    }
+  }
 
   @Inject EdgeProjects projects;
   @Inject EdgeCertificateManager certificates;
@@ -69,7 +87,7 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
 
   @Override
   public Set<String> signatures() {
-    return Set.of(CREATED, DELETED);
+    return Set.of(CREATED, CHANGED, DELETED);
   }
 
   /**
@@ -88,11 +106,13 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
     if (payload == null) {
       return;
     }
-    boolean present = CREATED.equals(frame.name());
+    // A change is a project that exists, exactly as a create is: the two differ only in whether the
+    // edge had heard of the slug before, which is EdgeProjects' question and not this one's.
+    boolean present = CREATED.equals(frame.name()) || CHANGED.equals(frame.name());
     if (!present && !DELETED.equals(frame.name())) {
       LOG.warnf(
-          "%s %s is neither %s nor %s; it is settled unhandled",
-          frame.name(), frame.id(), CREATED, DELETED);
+          "%s %s is none of %s, %s or %s; it is settled unhandled",
+          frame.name(), frame.id(), CREATED, CHANGED, DELETED);
       return;
     }
     String slug = payload.slug().strip().toLowerCase(Locale.ROOT);
@@ -103,6 +123,9 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
               slug,
               payload.projectId() == null ? "" : payload.projectId().strip(),
               present,
+              // A delete carries no such field, so the DTO's normalisation hands over TRUE — the
+              // neutral value a tombstone is written with. See EdgeProjects#apply.
+              payload.supportsEnvironments(),
               frame.id(),
               frame.occurredAt());
     } catch (IllegalArgumentException poison) {
@@ -115,12 +138,19 @@ public class ProjectLifecycleSubscriber implements QitsDurableEventListener {
       return;
     }
     if (!changed) {
+      // The frame was still recorded when it was the newest — a ProjectChanged that only flips
+      // supportsEnvironments lands here, having written the flag and moved no name.
+      LOG.debugf(
+          "%s %s left the served slug set unchanged; `%s` is still %s",
+          frame.name(), frame.id(), slug, present ? "served" : "absent");
       return;
     }
     LOG.infof(
         "%s the project slug `%s` from %s %s; %d slug(s) are now on the certificate",
         present ? "added" : "retired", slug, frame.name(), frame.id(), projects.slugs().size());
     if (present) {
+      // Only a GROWN set: the certificate is short a name it has to answer on, and nothing else
+      // this listener sees is. A flag-only change never reaches here, by way of `changed`.
       certificates.requestReconcile();
     }
   }

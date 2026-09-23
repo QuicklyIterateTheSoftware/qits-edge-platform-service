@@ -93,6 +93,7 @@ class EdgeSessionGateTest {
         PROJECT,
         "p-sessions",
         true,
+        true,
         java.util.UUID.randomUUID().toString(),
         java.time.Instant.now());
   }

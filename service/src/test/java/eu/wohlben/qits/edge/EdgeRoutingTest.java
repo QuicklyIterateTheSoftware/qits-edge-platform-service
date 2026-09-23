@@ -1156,7 +1156,7 @@ class EdgeRoutingTest {
     }
     projects.load(null);
     projects.apply(
-        PROJECT, "p-routing", true, java.util.UUID.randomUUID().toString(), Instant.now());
+        PROJECT, "p-routing", true, true, java.util.UUID.randomUUID().toString(), Instant.now());
   }
 
   private void clearProjection() throws java.sql.SQLException {

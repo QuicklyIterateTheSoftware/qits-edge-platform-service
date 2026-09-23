@@ -88,7 +88,55 @@ class ProjectSansTest {
     // certificate covering only the projects created after the boot.
     assertEquals("edge-project-sans", subscriber.consumerId());
     assertTrue(subscriber.replayFromEpoch());
-    assertEquals(java.util.Set.of("ProjectCreated", "ProjectDeleted"), subscriber.signatures());
+    assertEquals(
+        java.util.Set.of("ProjectCreated", "ProjectChanged", "ProjectDeleted"),
+        subscriber.signatures());
+  }
+
+  @Test
+  void aCreateCarriesSupportsEnvironmentsIntoTheProjection() {
+    // Projected ahead of any reader, so that whatever comes to read it finds a projection that has
+    // already replayed the log rather than one that starts learning the flag on the day it matters.
+    subscriber.onFrame(created("acme", "p-1", Instant.parse("2026-09-07T10:00:00Z"), false));
+    subscriber.onFrame(created("beta", "p-2", Instant.parse("2026-09-07T10:01:00Z"), true));
+
+    assertEquals(java.util.Map.of("acme", false, "beta", true), projects.projects());
+    assertFalse(projects.supportsEnvironments("acme"));
+    assertTrue(projects.supportsEnvironments("beta"));
+  }
+
+  @Test
+  void aCreateWithNoSupportsEnvironmentsKeyProjectsAsTrue() {
+    // The commonest frame this consumer will ever see: it replays from the epoch, so every
+    // ProjectCreated published before the field existed arrives without it. A primitive component
+    // on the wire DTO would read that absence as false and have the edge assert that no project on
+    // the platform has environments.
+    subscriber.onFrame(created("acme", "p-1", Instant.parse("2026-09-07T10:00:00Z"), null));
+
+    assertEquals(java.util.Map.of("acme", true), projects.projects());
+  }
+
+  @Test
+  void aChangedProjectMovesTheFlagAndOrdersNoCertificate() {
+    // The served slug set is identical either side of this frame, and the desired SAN list with it,
+    // so an order here would spend one of Let's Encrypt's five duplicate certificates a week to
+    // install exactly the names that are already installed.
+    subscriber.onFrame(created("acme", "p-1", Instant.parse("2026-09-07T10:00:00Z"), true));
+    certificates.requests.set(0);
+
+    subscriber.onFrame(changed("acme", "p-1", Instant.parse("2026-09-07T11:00:00Z"), false));
+
+    assertEquals(java.util.Set.of("acme"), projects.slugs());
+    assertFalse(projects.supportsEnvironments("acme"));
+    assertEquals(0, certificates.requests.get());
+  }
+
+  @Test
+  void anUnknownSlugSupportsEnvironments() {
+    // The same compatibility rule as the column default and the DTO's normalisation: absence means
+    // "has environments" everywhere, so a caller asking before the projection has caught up gets
+    // the answer every project had before the flag existed rather than a false claim of none.
+    assertTrue(projects.supportsEnvironments("never-heard-of-it"));
   }
 
   @Test
@@ -110,6 +158,9 @@ class ProjectSansTest {
     subscriber.onFrame(deleted("acme", "p-1", Instant.parse("2026-09-07T11:00:00Z")));
 
     assertFalse(projects.slugs().contains("acme"));
+    // And out of the flag view with it: the two are one snapshot, so a tombstone can never be a
+    // project that projects() names and slugs() does not.
+    assertTrue(projects.projects().isEmpty());
     assertEquals(0, certificates.requests.get());
   }
 
@@ -226,21 +277,55 @@ class ProjectSansTest {
   /**
    * The wire shape qits-projects publishes, unknown fields and all.
    *
-   * <p>{@code projectName} and {@code createdAt}/{@code deletedAt} are on the wire and are on no
-   * record component here, which is the tolerance this fixture pins: the publisher adds a field and
-   * the edge keeps reading its frames without waiting for a Maven release. The display name is
-   * spelled {@code projectName} rather than {@code name} on that side, and the edge's indifference
-   * to which is the point — it reads neither.
+   * <p>{@code projectName} and {@code createdAt}/{@code changedAt}/{@code deletedAt} are on the
+   * wire and are on no record component here, which is the tolerance this fixture pins: the
+   * publisher adds a field and the edge keeps reading its frames without waiting for a Maven
+   * release. The display name is spelled {@code projectName} rather than {@code name} on that side,
+   * and the edge's indifference to which is the point — it reads neither.
    */
   private static EventFrame created(String slug, String projectId, Instant at) {
-    return frame(
-        ProjectLifecycleSubscriber.CREATED,
-        at,
+    return created(slug, projectId, at, true);
+  }
+
+  /**
+   * The same, with the flag said explicitly — or, for a null, with the key left off the wire
+   * altogether, which is every {@code ProjectCreated} published before the field existed and so is
+   * most of what an epoch replay delivers.
+   */
+  private static EventFrame created(
+      String slug, String projectId, Instant at, Boolean supportsEnvironments) {
+    return lifecycle(
+        ProjectLifecycleSubscriber.CREATED, "createdAt", slug, projectId, at, supportsEnvironments);
+  }
+
+  /**
+   * A restatement of a project that already exists. Same fields as the create bar the timestamp's
+   * name, which is how qits-projects publishes it.
+   */
+  private static EventFrame changed(
+      String slug, String projectId, Instant at, Boolean supportsEnvironments) {
+    return lifecycle(
+        ProjectLifecycleSubscriber.CHANGED, "changedAt", slug, projectId, at, supportsEnvironments);
+  }
+
+  /** The body the two present-making frames share; only the timestamp's field name differs. */
+  private static EventFrame lifecycle(
+      String name,
+      String timestampField,
+      String slug,
+      String projectId,
+      Instant at,
+      Boolean supportsEnvironments) {
+    JsonObject payload =
         new JsonObject()
             .put("projectId", projectId)
             .put("slug", slug)
             .put("projectName", "The " + slug + " project")
-            .put("createdAt", at.toString()));
+            .put(timestampField, at.toString());
+    if (supportsEnvironments != null) {
+      payload.put("supportsEnvironments", supportsEnvironments);
+    }
+    return frame(name, at, payload);
   }
 
   /** The same, minus the display name: an optional field's absence is not an unreadable frame. */
