@@ -22,9 +22,10 @@ import java.util.Set;
  *
  * <p><b>It began as a certificate input and is now a ROUTING one too.</b> A project's slug is a
  * label in two of the SAN tiers the edge orders — {@code *.<slug>.<domain>} and {@code
- * *.<slug>.<env>.<domain>}, see {@link eu.wohlben.qits.edge.acme.CertificateNames} — so the edge
- * has to know the set of slugs to know the set of names. Since the grammar grew its project tiers
- * it is also read per request: {@code <slug>.<env>.<domain>} is a project's door and {@code
+ * *.<env>.<slug>.<domain>}, see {@link eu.wohlben.qits.edge.acme.CertificateNames} — so the edge
+ * has to know the set of slugs to know the set of names, and {@code supportsEnvironments} to know
+ * which of them cost the second tier. Since the grammar grew its project tiers it is also read per
+ * request: {@code <slug>.<env>.<domain>} is a project's door and {@code
  * <app>.<slug>.<env>.<domain>} is one application for one project, and only this says which middle
  * labels are slugs at all. Two consequences follow, and both are load-bearing — {@link #slugs()} is
  * on the request path and must never touch PostgreSQL, and a projection that has not caught up
@@ -39,9 +40,11 @@ import java.util.Set;
  *
  * <p><b>It carries more than presence now.</b> {@code supportsEnvironments} says whether a project
  * has a tier of environments under it at all, which is a property of the project and not of any one
- * name, so this is where it belongs. Nothing reads it yet — it is projected ahead of its reader on
- * purpose, so that whatever comes to read it finds a projection that has already replayed the log
- * rather than one that starts learning the flag on the day the behaviour changes.
+ * name, so this is where it belongs. Its first reader is the certificate: {@link #projects()} feeds
+ * {@code CertificateNames.capped}, where an env-less project costs one SAN and one that supports
+ * environments costs one per environment as well. It was projected ahead of that reader on purpose,
+ * so the flag arrived on a projection that had already replayed the log rather than one that starts
+ * learning it on the day the behaviour changes. The ROUTING readers are still to come.
  */
 @ApplicationScoped
 public class EdgeProjects {

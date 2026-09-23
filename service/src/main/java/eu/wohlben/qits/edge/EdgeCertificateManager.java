@@ -44,10 +44,10 @@ public class EdgeCertificateManager {
   /**
    * The point at which the SAN list is close enough to Let's Encrypt's hard ceiling to say so.
    *
-   * <p>Ten names of headroom, which on a two-environment edge is three more projects. The CAP
-   * itself lives in {@code CertificateNames}, which drops whole project tiers past it; this is the
-   * line that appears while there is still time to do something other than read the drop after the
-   * fact.
+   * <p>Ten names of headroom, which is ten more env-less projects and three more on a
+   * two-environment edge. The CAP itself lives in {@code CertificateNames}, which drops whole
+   * project tiers past it; this is the line that appears while there is still time to do something
+   * other than read the drop after the fact.
    */
   private static final int NAMES_WARNING_THRESHOLD = 90;
 
@@ -188,7 +188,7 @@ public class EdgeCertificateManager {
         CertificateNames.capped(
             domain,
             edge.environments(),
-            projects.slugs(),
+            projects.projects(),
             acme.additionalNames().orElseGet(List::of));
     Set<String> desired = derived.names();
     if (!derived.droppedProjects().isEmpty()) {
@@ -200,7 +200,8 @@ public class EdgeCertificateManager {
           "The edge certificate cannot carry every project: %d of %d project(s) are left off it to"
               + " stay inside Let's Encrypt's %d names, and their hosts will fail the TLS"
               + " handshake. Dropped: %s. The remedy is fewer environments on this domain or a"
-              + " second certificate; the tiers cost 1 + %d name(s) per project.",
+              + " second certificate; a project costs 1 name, and 1 + %d when it supports"
+              + " environments.",
           derived.droppedProjects().size(),
           projects.slugs().size(),
           CertificateNames.MAX_SANS,
