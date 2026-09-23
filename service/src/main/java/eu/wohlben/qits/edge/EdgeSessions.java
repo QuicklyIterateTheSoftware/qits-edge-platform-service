@@ -91,13 +91,6 @@ public class EdgeSessions {
 
   @Inject Idp idp;
 
-  /**
-   * The live project set, for the return host alone. A project slug is a label in the four-label
-   * tier, so {@code editor.<slug>.<env>.<domain>} is a browser host exactly when that slug exists —
-   * see {@link #browserHost(String, Set, List, Set)}.
-   */
-  @Inject EdgeProjects projects;
-
   @Inject Vertx vertx;
 
   private HttpClient client;
@@ -417,22 +410,14 @@ public class EdgeSessions {
    * <p>The ORIGIN is the caller's, because the page moves with its deployment. Only the return host
    * is decided here: an authority nobody listed falls back to the door rather than being reflected.
    *
-   * <p><b>The four-label tier is why the project set is read here.</b> A person logging in from
-   * {@code editor.acme.dev.example.com} must come back to the editor they were opening, and that
-   * name has two labels in front of the environment — no one-label wildcard matches it, so without
-   * this the login would succeed and land them on the door instead, with nothing anywhere saying
-   * why. idp holds an allow-list of its own for the same value; a return host this edge sends and
-   * idp does not accept has the same symptom one hop further away.
+   * <p>Every name a person can log in from is a service's own name — one label in front of the
+   * environment — so one wildcard entry covers the lot. idp holds an allow-list of its own for the
+   * same value; a return host this edge sends and idp does not accept has the same symptom one hop
+   * further away.
    */
   String loginLocation(String loginOrigin, String requestedAuthority, String uri) {
-    return loginLocation(loginOrigin, requestedAuthority, uri, projects.slugs());
-  }
-
-  /** The same, with the project set stated — so the return-host rule can be asserted directly. */
-  String loginLocation(
-      String loginOrigin, String requestedAuthority, String uri, Set<String> projects) {
     String host = authority(requestedAuthority);
-    if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts, projects)) {
+    if (host == null || !browserHost(host, browserHosts, wildcardBrowserHosts)) {
       host = authority(canonicalOrigin.getAuthority());
     }
     return (loginOrigin == null ? canonicalOrigin.toString() : loginOrigin)
@@ -476,9 +461,10 @@ public class EdgeSessions {
    *
    * <p>ONE extra label, never a suffix match. {@code *.dev.example.com} is what makes every service
    * of one environment a browser host without listing them — the names are {@code
-   * <app>.dev.example.com} and the app list is the deployment's, not this file's. A suffix check
-   * would also accept {@code evil.co.dev.example.com}, which is a different site to a browser and a
-   * return target this process must not accept.
+   * <app>.dev.example.com}, the editor's own {@code editor.dev.example.com} among them, and the app
+   * list is the deployment's, not this file's. A suffix check would also accept {@code
+   * evil.co.dev.example.com}, which is a different site to a browser and a return target this
+   * process must not accept.
    */
   static List<String> wildcardBrowserHosts(List<String> configured) {
     List<String> suffixes = new ArrayList<>();
@@ -499,30 +485,22 @@ public class EdgeSessions {
     return authority(configured.strip().substring(2));
   }
 
-  /** The configured list alone, for the one question asked before any project is known. */
-  static boolean browserHost(String host, Set<String> exact, List<String> wildcards) {
-    return browserHost(host, exact, wildcards, Set.of());
-  }
-
   /**
    * Whether this authority may receive a person after login: an exact entry, or a wildcard entry's
-   * authority with what is in front of it accounted for. The port is part of the authority on both
+   * authority with EXACTLY ONE label in front of it. The port is part of the authority on both
    * sides, so a name on another port matches nothing.
    *
-   * <p><b>One label in front, or two when the inner one is a PROJECT.</b> {@code *.dev.example.com}
-   * covers {@code ci.dev.example.com}, and it covers {@code editor.acme.dev.example.com} exactly
-   * when {@code acme} is a project this edge knows — which is the tier the web editor is served on,
-   * and a name no one-label wildcard can express. The check stays a match rather than becoming a
-   * suffix test: {@code evil.co.dev.example.com} is a different site to a browser and still matches
-   * nothing, because {@code co} is not a project. Naming the projects here is what keeps the
-   * widening exactly as wide as the grammar — the apex still comes from this list, so no {@code
-   * Host} header a caller invents can name a return target under a domain the deployment did not
-   * configure.
+   * <p><b>One label in front, and only one.</b> {@code *.dev.example.com} covers {@code
+   * ci.dev.example.com} and every other service's own name in that environment, the editor included
+   * — it is an ordinary app vhost at {@code editor.dev.example.com}, one shared container for the
+   * whole platform rather than a name per project. The check is a match rather than a suffix test,
+   * so {@code evil.co.dev.example.com} is a different site to a browser and matches nothing. The
+   * apex comes from this list, so no {@code Host} header a caller invents can name a return target
+   * under a domain the deployment did not configure.
    *
    * <p>Package-private and static so the matrix can be asserted without booting anything.
    */
-  static boolean browserHost(
-      String host, Set<String> exact, List<String> wildcards, Set<String> projects) {
+  static boolean browserHost(String host, Set<String> exact, List<String> wildcards) {
     if (host == null) {
       return false;
     }
@@ -537,11 +515,7 @@ public class EdgeSessions {
       if (leading.isEmpty()) {
         continue;
       }
-      int dot = leading.indexOf('.');
-      if (dot < 0) {
-        return true;
-      }
-      if (dot == leading.lastIndexOf('.') && projects.contains(leading.substring(dot + 1))) {
+      if (leading.indexOf('.') < 0) {
         return true;
       }
     }

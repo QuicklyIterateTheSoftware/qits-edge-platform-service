@@ -544,35 +544,33 @@ class EdgeChallengeTest {
   }
 
   @Test
-  void aWildcardEntryCoversOneLabelAndTwoOnlyWhenTheInnerOneIsAProject() {
+  void aWildcardEntryCoversExactlyOneLabel() {
     // The whole matcher, and the reason it is not a suffix test. `*.dev.wohlben.eu` is one line
     // that follows a deployment's application list — every service of an environment is its own
-    // browser host — and the editor's tier needs one label MORE than that, because a project sits
-    // between the application and the environment.
+    // browser host, the editor included, now that it is one shared container on an ordinary app
+    // vhost rather than a name per project.
     Set<String> exact = EdgeSessions.browserHosts(List.of("wohlben.eu", "dev.wohlben.eu"));
     List<String> wildcards =
         EdgeSessions.wildcardBrowserHosts(List.of("wohlben.eu", "*.dev.wohlben.eu"));
-    Set<String> projects = Set.of("acme");
 
-    assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards, projects), "an entry");
-    assertTrue(EdgeSessions.browserHost("ci.dev.wohlben.eu", exact, wildcards, projects));
+    assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards), "an entry");
+    assertTrue(EdgeSessions.browserHost("ci.dev.wohlben.eu", exact, wildcards));
     assertTrue(
-        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards, projects),
-        "the editor's own name, which no one-label wildcard can express");
-    // Two labels where the inner one is NOT a project is another site to a browser, and a return
-    // target this process must not reflect — subdomain takeover is what an open list would cost.
-    assertFalse(EdgeSessions.browserHost("evil.co.dev.wohlben.eu", exact, wildcards, projects));
+        EdgeSessions.browserHost("editor.dev.wohlben.eu", exact, wildcards),
+        "the editor, an app vhost like any other");
+    // TWO labels is another site to a browser, and a return target this process must not reflect —
+    // subdomain takeover is what an open list would cost. No project set widens this any more.
+    assertFalse(EdgeSessions.browserHost("evil.co.dev.wohlben.eu", exact, wildcards));
     assertFalse(
-        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards, Set.of()),
-        "the slug has to exist: the project set is live, and a name is only a tier while it does");
+        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards),
+        "the retired four-label editor name reads as two labels and nothing else");
+    assertFalse(EdgeSessions.browserHost("a.b.c.dev.wohlben.eu", exact, wildcards), "three");
     assertFalse(
-        EdgeSessions.browserHost("a.b.c.dev.wohlben.eu", exact, wildcards, projects), "three");
-    assertFalse(
-        EdgeSessions.browserHost("dev.wohlben.eu.evil.example", exact, wildcards, projects),
+        EdgeSessions.browserHost("dev.wohlben.eu.evil.example", exact, wildcards),
         "the entry is a suffix of this name and matches nothing");
     // The port is part of the authority on both sides, so a name on another port matches nothing.
-    assertFalse(EdgeSessions.browserHost("ci.dev.wohlben.eu:8443", exact, wildcards, projects));
-    assertFalse(EdgeSessions.browserHost(null, exact, wildcards, projects));
+    assertFalse(EdgeSessions.browserHost("ci.dev.wohlben.eu:8443", exact, wildcards));
+    assertFalse(EdgeSessions.browserHost(null, exact, wildcards));
   }
 
   @Test

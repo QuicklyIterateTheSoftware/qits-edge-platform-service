@@ -70,11 +70,10 @@ public interface SessionsConfig {
    * follows it. The port is part of the authority on both sides, so a name reached on another port
    * matches nothing.
    *
-   * <p><b>Two labels match when the inner one is a PROJECT</b>, which is the editor's tier: {@code
-   * editor.acme.dev.example.com} is covered by the same {@code *.dev.example.com} entry while
-   * {@code acme} is a project this edge knows, and {@code evil.co.dev.example.com} is covered by
-   * nothing. So no entry has to be added for the project tier, and none has to be added per
-   * project.
+   * <p><b>One label, and only one.</b> The editor is one shared container for the whole platform on
+   * an ordinary app vhost, {@code editor.dev.example.com}, so the same wildcard covers it like any
+   * other service and nothing here reads the project set. {@code evil.co.dev.example.com} is
+   * covered by nothing.
    *
    * <p><b>The default is the three names a clone actually serves</b>, which is not what it used to
    * be: {@code localhost:8080} alone covered the apex and nothing else, and the apex is the one

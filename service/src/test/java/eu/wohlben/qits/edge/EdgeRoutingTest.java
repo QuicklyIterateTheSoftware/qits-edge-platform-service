@@ -750,6 +750,30 @@ class EdgeRoutingTest {
         client().get("registry.dev.example.com", "/v2/", token("dev")).line("upstream"));
   }
 
+  // --- the editor, an ordinary app vhost --------------------------------------------------------
+
+  @Test
+  void theEditorIsReachedOnItsOwnTwoLabelNameLikeEveryOtherApp() {
+    // The editor is ONE shared container for the whole platform, so its address is the ordinary
+    // `editor.<env>.<domain>` — the environment is the SECOND label, and the two upstreams behind
+    // the `{env}-qits-workspaces` host pattern are what make that an assertion about which process
+    // answered rather than about a status code.
+    assertEquals(
+        "editor-dev",
+        client().get("editor.dev.example.com", "/editor", token("dev")).line("upstream"));
+    assertEquals(
+        "editor-prod",
+        client().get("editor.prod.example.com", "/editor", token("prod")).line("upstream"));
+  }
+
+  @Test
+  void theEditorsOwnNameDemandsTheEditorsOwnAudience() {
+    // The audience comes from the editor app entry's own pattern with the environment the NAME
+    // states filled in, so the tier's own token is the only one that opens it.
+    assertEquals(401, client().get("editor.dev.example.com", "/editor", token("prod")).status());
+    assertEquals(401, client().get("editor.prod.example.com", "/editor", token("dev")).status());
+  }
+
   // --- the project tiers -------------------------------------------------------------------------
 
   @Test

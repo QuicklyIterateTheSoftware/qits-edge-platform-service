@@ -241,9 +241,10 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // reached this address would be a resolution bug rather than a test that happened to pass.
     config.put("qits.edge.apps.registry.host-pattern", "{env}-qits-artifacts");
     config.put("qits.edge.apps.mirror.host-pattern", "{env}-qits-mirror");
-    // The third app exists for ONE reading: `editor.<project>.<env>.<domain>`, where the
-    // environment is the THIRD label. Its two upstreams are what makes "the named environment, not
-    // the default" an assertion about which process answered rather than about a status code.
+    // The third app is the editor, one shared container for the whole platform on an ordinary app
+    // vhost: `editor.<env>.<domain>`. Its two upstreams are what makes "the named environment, not
+    // the default" an assertion about which process answered rather than about a status code. It
+    // still answers on the four-label tier too, which is what those routing tests read.
     config.put("qits.edge.apps.editor.host-pattern", "{env}-qits-workspaces");
     // Every app vhost here demands the tier-scoped `{env}-qits-artifacts` audience explicitly —
     // mirroring a live deployment's GITHOST/EDITOR extras, which name a resource pattern of their
