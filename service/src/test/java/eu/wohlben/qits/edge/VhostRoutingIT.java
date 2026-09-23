@@ -36,10 +36,10 @@ import org.junit.jupiter.api.BeforeAll;
  * so the name is the only thing that differs between the two requests.
  *
  * <p><b>The third name is the one that shows a path is not a route.</b> {@code
- * mirror.dev.example.com} is a machine vhost, and it has no such path: the 404 the caller gets is
- * the MIRROR's own, generated one hop further in, not a refusal by the edge. On a path-routed proxy
- * that request would have been recognised and sent to whoever owns {@code /projects}; here nobody
- * owns a path at all.
+ * mirror.dev.acme.example.com} is a machine vhost, and it has no such path: the 404 the caller gets
+ * is the MIRROR's own, generated one hop further in, not a refusal by the edge. On a path-routed
+ * proxy that request would have been recognised and sent to whoever owns {@code /projects}; here
+ * nobody owns a path at all.
  *
  * <p><b>This is also why every label in this catalogue carries the vhost.</b> Two of the three
  * requests below are byte-identical apart from one header. A label built from the method and the
@@ -79,8 +79,8 @@ public class VhostRoutingIT {
       string a client can send that reaches a host nobody configured.
 
       The story is one person following one link and then another, and a third caller who is not a
-      person. She asks `projects.dev.example.com` for a version, and qits-projects answers. She
-      follows a link to `docs.dev.example.com` and asks for **the same path**, with the same
+      person. She asks `projects.dev.acme.example.com` for a version, and qits-projects answers. She
+      follows a link to `docs.dev.acme.example.com` and asks for **the same path**, with the same
       cookie, from the same browser — and a completely different process answers, which is a fact
       neither of the two status codes can tell you and both of the recordings can.
 

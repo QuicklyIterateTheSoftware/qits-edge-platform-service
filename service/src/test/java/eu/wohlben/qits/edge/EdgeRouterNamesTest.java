@@ -1,44 +1,43 @@
 package eu.wohlben.qits.edge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.edge.HostEnvironments.Reading;
+import eu.wohlben.qits.edge.HostEnvironments.Route;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
- * The two decisions {@code EdgeRouter} makes out of a name alone, asserted without a boot.
+ * The decisions {@code EdgeRouter} makes out of names alone, asserted without a boot.
  *
- * <p>Both are about caller input reaching an answer. Recognising the apex decides whether a request
- * is served at all, and it is a comparison against a header a client writes; the unknown-app 404
- * writes part of that header back out. Neither needs a Vert.x server to be wrong, and a
- * {@code @QuarkusTest} for either would be a restart the socket tests cannot afford — see {@code
- * EdgeRoutingTest}'s javadoc.
+ * <p>Where the stated domain comes from is the first of them: every reading hangs off it, and it is
+ * a value rather than something derived from a request. The rest are about caller input reaching an
+ * answer — the 404 bodies write a label a client chose back out. None of them needs a Vert.x server
+ * to be wrong, and a {@code @QuarkusTest} for any of them would be a restart the socket tests
+ * cannot afford — see {@code EdgeRoutingTest}'s javadoc.
  */
 class EdgeRouterNamesTest {
 
   @Test
-  void theApexIsRecognisedThroughEveryOrdinarySpellingOfIt() {
-    assertTrue(EdgeRouter.isApex("example.com", "example.com", "prod"));
-    // FIXED. A resolver writes the root dot and a client may send it; this compared a bare strip(),
-    // so `example.com.` missed the apex and was answered a 404 offering the name it was already on.
-    assertTrue(EdgeRouter.isApex("example.com.", "example.com", "prod"), "the root dot");
-    assertTrue(EdgeRouter.isApex("EXAMPLE.com", "example.com", "prod"), "letter case");
-    assertTrue(EdgeRouter.isApex("  example.com  ", "example.com", "prod"), "surrounding space");
-    // Either spelling of the canonical origin names the same apex, as EnvironmentAuthority reads
-    // it.
-    assertTrue(EdgeRouter.isApex("example.com.", "prod.example.com", "prod"));
-    // The local apex is one label and the same rule.
-    assertTrue(EdgeRouter.isApex("localhost.", "dev.localhost:8080", "dev"));
+  void theStatedDomainIsTheCertificatesWhenThereIsOne() {
+    // The edge orders the names inside qits.edge.acme.domain, so that value IS the domain the
+    // estate lives in — and it wins over a canonical origin that carries a label in front of it.
+    assertEquals(
+        "wohlben.eu", EdgeRouter.domain(Optional.of("wohlben.eu"), "https://prod.wohlben.eu"));
+    assertEquals("wohlben.eu", EdgeRouter.domain(Optional.of("  wohlben.eu  "), "wohlben.eu"));
   }
 
   @Test
-  void aNameThatIsNotTheApexIsStillNotTheApex() {
-    assertFalse(EdgeRouter.isApex("ci.example.com", "example.com", "prod"));
-    assertFalse(EdgeRouter.isApex("prod.example.com", "example.com", "prod"));
-    assertFalse(EdgeRouter.isApex("evil.com.", "example.com", "prod"));
-    assertFalse(EdgeRouter.isApex(null, "example.com", "prod"), "a request with no Host");
-    assertFalse(EdgeRouter.isApex("example.com", null, "prod"), "no canonical origin configured");
+  void aCloneWithAcmeOffFallsBackToTheCanonicalAuthority() {
+    // The local case, which is where the domain is `localhost`: no certificate, so no acme domain,
+    // and the canonical origin's authority is the same value with a port on it.
+    assertEquals("localhost", EdgeRouter.domain(Optional.empty(), "localhost:8080"));
+    assertEquals("example.com", EdgeRouter.domain(Optional.of("  "), "example.com"));
+    assertEquals(
+        "", EdgeRouter.domain(Optional.empty(), null), "and nothing configured is nothing");
   }
 
   @Test
@@ -50,15 +49,17 @@ class EdgeRouterNamesTest {
             .contains("`nosuchapp` is not an application"));
     assertTrue(
         EdgeRouter.unknownAppBody(
-                new HostEnvironments.Route("dev", null, "editor", "acme", true), apps)
+                new HostEnvironments.Route("dev", null, "editor", "acme", Reading.UNKNOWN_APP),
+                apps)
             .contains("the project `acme`"));
   }
 
   @Test
   void aLabelThatIsNotOneIsDescribedRatherThanQuotedBack() {
-    // The label is the first one of a Host header, so it is attacker input wherever it is written.
-    // `Host: .prod.example.com` produced a sentence about an empty name, and anything a header
-    // parser let through came back verbatim into a body a browser renders.
+    // The label is the leftmost one of a Host header, so it is attacker input wherever it is
+    // written. `Host: .dev.acme.example.com` produced a sentence about an empty name, and anything
+    // a
+    // header parser let through came back verbatim into a body a browser renders.
     Set<String> apps = Set.of("registry");
 
     for (String label : new String[] {"", "<script>alert(1)</script>", "a b", "-nope-", null}) {
@@ -68,5 +69,42 @@ class EdgeRouterNamesTest {
         assertFalse(body.contains(label), body);
       }
     }
+  }
+
+  @Test
+  void anUnknownProjectLabelIsDescribedRatherThanQuotedBackToo() {
+    // The same rule one tier to the right: the project label is caller input as well, and this
+    // sentence is the one a mistyped project name gets.
+    assertTrue(
+        EdgeRouter.unknownProjectBody(Route.unknownProject("prod", "nosuch"), "wohlben.eu")
+            .startsWith("`nosuch` is not a project"));
+    String laundered =
+        EdgeRouter.unknownProjectBody(Route.unknownProject("prod", null), "wohlben.eu");
+    assertTrue(laundered.startsWith("That label is not a project"), laundered);
+    assertTrue(laundered.contains("wohlben.eu"), "and it names the domain it was read from");
+  }
+
+  @Test
+  void eachDoorSaysWhichDoorItIs() {
+    assertTrue(
+        EdgeRouter.doorBody(Route.apex("prod"), "wohlben.eu")
+            .contains("<app>.<project>.wohlben.eu"),
+        "the apex offers the grammar and names no project at all");
+    assertTrue(
+        EdgeRouter.doorBody(Route.projectDoor("prod", "acme"), "wohlben.eu")
+            .contains("<app>.acme.wohlben.eu"));
+    assertTrue(
+        EdgeRouter.doorBody(Route.environmentDoor("dev", "acme"), "wohlben.eu")
+            .contains("<app>.dev.acme.wohlben.eu"));
+  }
+
+  @Test
+  void aNameOutsideTheGrammarIsToldWhichWayItIsWrong() {
+    assertTrue(
+        EdgeRouter.unreadableBody(Route.unreadable("prod", null), "wohlben.eu")
+            .contains("more labels than the grammar has"));
+    assertTrue(
+        EdgeRouter.unreadableBody(Route.unreadable("prod", "acme"), "wohlben.eu")
+            .contains("does not have an environment by that name"));
   }
 }

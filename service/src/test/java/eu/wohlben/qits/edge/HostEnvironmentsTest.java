@@ -6,459 +6,361 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.edge.HostEnvironments.Reading;
+import eu.wohlben.qits.edge.HostEnvironments.Route;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Host name to environment, the edge's whole routing decision. Plain JUnit: this is the piece worth
- * pinning without booting an application, and it is where every shape a real Host header arrives in
- * belongs.
+ * A Host name to a position in the grammar, which is the edge's whole routing decision. Plain
+ * JUnit: this is the piece worth pinning without booting an application, and it is where every
+ * shape a real Host header arrives in belongs.
+ *
+ * <p>The readings are read RIGHT TO LEFT — {@code <app>[.<env>].<project>.<domain>} — so every test
+ * below states the domain, and a name's meaning comes from where a label sits rather than from
+ * which configured set it belongs to.
  */
 class HostEnvironmentsTest {
 
-  private static final HostEnvironments TWO = HostEnvironments.of(List.of("prod", "dev"), "prod");
+  /** The estate every test here reads against: two environments, three configured app names. */
+  private static final HostEnvironments EDGE =
+      HostEnvironments.of(
+          List.of("prod", "dev"), "prod", List.of("registry", "githost", "editor"), "wohlben.eu");
+
+  /**
+   * The projection, exactly as {@code EdgeProjects.projects()} serves it: slug to whether that
+   * project has a tier of environments under it.
+   *
+   * <p>{@code qits} is the platform's own project and has none — it is deployed once — and {@code
+   * someproject} is an ordinary project that does.
+   */
+  private static final Map<String, Boolean> PROJECTS = projects();
+
+  private static Map<String, Boolean> projects() {
+    LinkedHashMap<String, Boolean> projects = new LinkedHashMap<>();
+    projects.put("qits", false);
+    projects.put("someproject", true);
+    return projects;
+  }
+
+  // --- the table, both cases ---------------------------------------------------------------------
 
   @Test
-  void anEnvironmentSubdomainNamesItsEnvironment() {
-    assertEquals("dev", TWO.resolve("dev.example.com"));
-    assertEquals("prod", TWO.resolve("prod.example.com"));
+  void theProjectDoorIsTheLabelNextToTheDomain() {
+    // Either kind of project: a door is a door whether or not environments hang under it.
+    assertEquals(Route.projectDoor("prod", "qits"), EDGE.route("qits.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.projectDoor("prod", "someproject"), EDGE.route("someproject.wohlben.eu", PROJECTS));
+    assertTrue(EDGE.route("qits.wohlben.eu", PROJECTS).toDoor());
+    assertFalse(EDGE.route("qits.wohlben.eu", PROJECTS).toApp());
   }
 
   @Test
-  void anApplicationInAnEnvironmentNamesTheEnvironment() {
-    assertEquals("dev", TWO.resolve("home.dev.example.com"));
-    assertEquals("prod", TWO.resolve("artifacts.prod.example.com"));
+  void anEnvLessProjectPutsItsAppsStraightUnderItsOwnLabel() {
+    // `qits` supports no environments, so the label in front of it is an APPLICATION and not an
+    // environment — and that application is served in the default environment, because a project
+    // deployed once is deployed once.
+    assertEquals(
+        Route.app("prod", "editor", "qits"), EDGE.route("editor.qits.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.app("prod", "registry", "qits"), EDGE.route("registry.qits.wohlben.eu", PROJECTS));
+    // `projects` is not a configured app name here, so it is the label the deployment projection is
+    // asked about — the same position, a different answer.
+    assertEquals(
+        Route.unknownApp("prod", "projects", "qits"),
+        EDGE.route("projects.qits.wohlben.eu", PROJECTS));
   }
 
   @Test
-  void theApexGoesToTheDefault() {
-    assertEquals("prod", TWO.resolve("example.com"));
-    assertEquals("prod", TWO.resolve("example.co.uk"));
+  void anEnvSupportingProjectPutsAnEnvironmentDoorUnderItsOwnLabel() {
+    assertEquals(
+        Route.environmentDoor("dev", "someproject"),
+        EDGE.route("dev.someproject.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.environmentDoor("prod", "someproject"),
+        EDGE.route("prod.someproject.wohlben.eu", PROJECTS));
+    assertTrue(EDGE.route("dev.someproject.wohlben.eu", PROJECTS).toDoor());
   }
 
   @Test
-  void anUnknownEnvironmentGoesToTheDefault() {
-    // The failure mode this prevents: a tier that was decommissioned, or a name someone mistyped,
-    // answering with a connection error instead of the platform's own page.
-    assertEquals("prod", TWO.resolve("staging.example.com"));
-    assertEquals("prod", TWO.resolve("home.staging.example.com"));
+  void anEnvSupportingProjectPutsItsAppsUnderAnEnvironment() {
+    assertEquals(
+        Route.app("dev", "registry", "someproject"),
+        EDGE.route("registry.dev.someproject.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.app("prod", "registry", "someproject"),
+        EDGE.route("registry.prod.someproject.wohlben.eu", PROJECTS));
+    // The environment comes from the NAME, so everything downstream — the audience, the upstream —
+    // resolves against dev rather than against the default.
+    assertEquals(
+        "dev",
+        EDGE.route("ci.dev.someproject.wohlben.eu", PROJECTS).environment(),
+        "from the name");
+    assertEquals(
+        Route.unknownApp("dev", "ci", "someproject"),
+        EDGE.route("ci.dev.someproject.wohlben.eu", PROJECTS));
   }
 
   @Test
-  void aDomainOfAnyDepthWorksBecauseOnlyTheLeadingLabelsAreRead() {
-    assertEquals("dev", TWO.resolve("dev.example.co.uk"));
-    assertEquals("dev", TWO.resolve("home.dev.example.co.uk"));
-    assertEquals("dev", TWO.resolve("dev.localhost"));
+  void theSameLabelMeansDifferentThingsInDifferentProjects() {
+    // The whole point of reading the env label off the PROJECTION rather than off the environment
+    // list: `dev` in front of an env-less project is an application label, and in front of an
+    // env-supporting one it is that project's dev door.
+    assertEquals(
+        Route.unknownApp("prod", "dev", "qits"), EDGE.route("dev.qits.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.environmentDoor("dev", "someproject"),
+        EDGE.route("dev.someproject.wohlben.eu", PROJECTS));
+  }
+
+  // --- the 404s ---------------------------------------------------------------------------------
+
+  @Test
+  void anUnknownProjectLabelIsFourOhFour() {
+    // At every depth the label can sit at, because it is always read at the same position.
+    for (String host :
+        List.of(
+            "nosuchproject.wohlben.eu",
+            "dev.nosuchproject.wohlben.eu",
+            "editor.dev.nosuchproject.wohlben.eu")) {
+      Route route = EDGE.route(host, PROJECTS);
+      assertEquals(Reading.UNKNOWN_PROJECT, route.reading(), host);
+      assertEquals("nosuchproject", route.project(), host);
+      assertFalse(route.toApp(), host);
+      assertFalse(route.toDoor(), host);
+    }
   }
 
   @Test
-  void aPortSuffixIsNotPartOfTheName() {
-    // A browser sends `Host: dev.example.com:8080` whenever the origin is not on the default port,
-    // and a developer's every request looks like this.
-    assertEquals("dev", TWO.resolve("dev.example.com:8080"));
-    assertEquals("dev", TWO.resolve("home.dev.example.com:443"));
-    assertEquals("prod", TWO.resolve("example.com:8080"));
+  void aNameWithNoProjectLabelIsAnOrdinaryFourOhFour() {
+    // The old grammar's spellings, every one of them. There is no short-form refusal any more: a
+    // name missing its project label is a name with a label missing, and the label that IS next to
+    // the domain is simply not a project.
+    for (String host : List.of("dev.wohlben.eu", "registry.dev.wohlben.eu", "editor.wohlben.eu")) {
+      assertEquals(Reading.UNKNOWN_PROJECT, EDGE.route(host, PROJECTS).reading(), host);
+    }
+    assertEquals("dev", EDGE.route("registry.dev.wohlben.eu", PROJECTS).project());
   }
 
   @Test
-  void caseAndSurroundingSpaceAndTheRootDotAreAllTolerated() {
-    assertEquals("dev", TWO.resolve("DEV.Example.COM"));
-    assertEquals("dev", TWO.resolve("  dev.example.com  "));
-    assertEquals("dev", TWO.resolve("dev.example.com."));
-    assertEquals("dev", TWO.resolve("Home.DEV.example.com:8080"));
+  void anUnknownProjectLabelIsEchoedOnlyWhenItIsALabel() {
+    // It came off the wire and the answer prints it, so a label that is not one is carried as null
+    // rather than spliced into a sentence.
+    assertNull(EDGE.route("..wohlben.eu", PROJECTS).project());
+    assertEquals(Reading.UNKNOWN_PROJECT, EDGE.route("..wohlben.eu", PROJECTS).reading());
   }
 
   @Test
-  void localhostGoesToTheDefault() {
-    assertEquals("prod", TWO.resolve("localhost"));
-    assertEquals("prod", TWO.resolve("localhost:8080"));
+  void anEnvironmentTheProjectDoesNotHaveIsUnreadable() {
+    assertEquals(
+        Route.unreadable("prod", "someproject"),
+        EDGE.route("registry.staging.someproject.wohlben.eu", PROJECTS));
+    // And an env-less project has NO environment tier at all, so nothing fits at that depth.
+    assertEquals(
+        Route.unreadable("prod", "qits"), EDGE.route("editor.prod.qits.wohlben.eu", PROJECTS));
   }
 
   @Test
-  void anAddressLiteralGoesToTheDefault() {
-    // How the platform is reached before DNS exists — a bootstrap curling the host's own port.
-    assertEquals("prod", TWO.resolve("127.0.0.1"));
-    assertEquals("prod", TWO.resolve("127.0.0.1:8080"));
-    assertEquals("prod", TWO.resolve("[::1]"));
-    assertEquals("prod", TWO.resolve("[::1]:8080"));
-    assertEquals("prod", TWO.resolve("::1"));
+  void aNameDeeperThanTheGrammarIsUnreadable() {
+    assertEquals(
+        Route.unreadable("prod", null),
+        EDGE.route("a.b.c.someproject.wohlben.eu", PROJECTS),
+        "four labels inside the domain is one more than the grammar has");
+  }
+
+  // --- the apex and the names that carry no position ---------------------------------------------
+
+  @Test
+  void theApexIsReadPositionally() {
+    // No rescue by the caller any more: the domain is stated, so the apex is simply the name that
+    // IS it. Every spelling a client may send of it.
+    assertEquals(Route.apex("prod"), EDGE.route("wohlben.eu", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("WOHLBEN.EU", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("wohlben.eu.", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("  wohlben.eu:8443  ", PROJECTS));
+    assertTrue(EDGE.route("wohlben.eu", PROJECTS).toDoor());
   }
 
   @Test
-  void aNumericEnvironmentNameCannotCaptureLoopback() {
-    // The reason IPv4 is recognised by SHAPE rather than left to the label comparison: a DNS label
-    // may legally be all digits, so without the check an environment called `127` would take every
-    // request that arrived at the host's own address.
-    HostEnvironments numeric = HostEnvironments.of(List.of("prod", "127"), "prod");
-    assertEquals("prod", numeric.resolve("127.0.0.1"));
-    assertEquals("127", numeric.resolve("127.example.com"));
+  void aNameOutsideTheDomainCarriesNoPositionAndServesNothing() {
+    // The labels are somebody else's grammar, so there is nothing to read — and the answer is the
+    // one a door gives: no app, no project, nothing proxied.
+    for (String host :
+        List.of("example.com", "registry.dev.example.com", "qits-platform-edge", "localhost")) {
+      assertEquals(Route.apex("prod"), EDGE.route(host, PROJECTS), host);
+    }
   }
 
   @Test
-  void aMissingHostGoesToTheDefault() {
-    assertEquals("prod", TWO.resolve(null));
-    assertEquals("prod", TWO.resolve(""));
-    assertEquals("prod", TWO.resolve("   "));
+  void anAddressLiteralAndAMissingHostAreTheSameCase() {
+    // How the platform is reached before DNS exists: a bootstrap curling the host's own port.
+    assertEquals(Route.apex("prod"), EDGE.route("127.0.0.1:8080", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("[::1]:8080", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("::1", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route(null, PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("", PROJECTS));
+    assertEquals(Route.apex("prod"), EDGE.route("   ", PROJECTS));
   }
 
   @Test
-  void theThreeLabelReadingWinsWhenAnApplicationSharesAnEnvironmentName() {
-    // `dev.prod.example.com`: application `dev` in environment `prod`, not environment `dev` in a
-    // domain that happens to start with `prod`. An application may be called anything; a domain
-    // whose first label is an environment name is a coincidence nobody arranges.
-    assertEquals("prod", TWO.resolve("dev.prod.example.com"));
-    assertEquals("dev", TWO.resolve("prod.dev.example.com"));
+  void anAddressIsNeverSplitIntoLabels() {
+    // A label may legally be all digits, so an address that fell through to the positional reading
+    // would be split against a domain it cannot be inside.
+    HostEnvironments numeric =
+        HostEnvironments.of(List.of("prod", "127"), "prod", List.of("0"), "0.1");
+    assertEquals(Route.apex("prod"), numeric.route("127.0.0.1", PROJECTS));
+  }
+
+  // --- a one-label domain, which is the local case -----------------------------------------------
+
+  @Test
+  void aLocalCloneStatesLocalhostAndReadsTheSameWay() {
+    HostEnvironments local =
+        HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("registry"), "localhost");
+    assertEquals(Route.apex("prod"), local.route("localhost:8080", PROJECTS));
+    assertEquals(Route.projectDoor("prod", "qits"), local.route("qits.localhost:8080", PROJECTS));
+    assertEquals(
+        Route.app("prod", "registry", "qits"),
+        local.route("registry.qits.localhost:8080", PROJECTS));
+    assertEquals(
+        Route.app("dev", "registry", "someproject"),
+        local.route("registry.dev.someproject.localhost:8080", PROJECTS));
+  }
+
+  // --- the wire's own spellings ------------------------------------------------------------------
+
+  @Test
+  void aHostHeaderArrivesInAnyCaseWithAnyPortAndAnyRootDot() {
+    assertEquals(
+        Route.app("dev", "editor", "someproject"),
+        EDGE.route("  EDITOR.Dev.SomeProject.Wohlben.EU.:8080  ", PROJECTS));
+    assertEquals(
+        Route.projectDoor("prod", "someproject"),
+        EDGE.route("SOMEPROJECT.wohlben.eu:443.", PROJECTS));
   }
 
   @Test
-  void aSingleEnvironmentTakesEverything() {
-    HostEnvironments one = HostEnvironments.of(List.of("prod"), "prod");
-    assertEquals("prod", one.resolve("anything.at.all.example.com"));
-    assertEquals("prod", one.resolve("prod.example.com"));
-    assertEquals(1, one.environments().size());
+  void aMultiLabelDomainIsJustAsStatable() {
+    HostEnvironments coUk =
+        HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("registry"), "example.co.uk");
+    assertEquals(Route.apex("prod"), coUk.route("example.co.uk", PROJECTS));
+    assertEquals(
+        Route.app("dev", "registry", "someproject"),
+        coUk.route("registry.dev.someproject.example.co.uk", PROJECTS));
+    // The domain is a VALUE, so nothing about it is guessed: `co.uk` is inside it, not a project.
+    assertEquals(
+        Reading.UNKNOWN_PROJECT, coUk.route("registry.dev.example.co.uk", PROJECTS).reading());
+  }
+
+  // --- the security property ---------------------------------------------------------------------
+
+  @Test
+  void anAppLabelNothingServesIsCarriedRatherThanFallingThrough() {
+    // It is NOT a fall-through: an app position is a name the edge authenticates, so a label no
+    // configuration claims is handed to the caller to join the deployment projection on — and to
+    // answer 404 when that claims it either.
+    Route route = EDGE.route("mirror.dev.someproject.wohlben.eu", PROJECTS);
+    assertEquals(Reading.UNKNOWN_APP, route.reading());
+    assertEquals("mirror", route.unknownApp());
+    assertNull(route.app());
+    assertFalse(route.toApp(), "so nothing downstream treats it as a configured vhost");
+    assertEquals("dev", route.environment(), "and the projection is asked about dev's mirror");
   }
 
   @Test
-  void anEmptyEnvironmentListIsRefusedAtConstruction() {
-    // Not a per-request 502: an edge with nothing to forward to has to say so once, at boot.
-    assertTrue(
-        assertThrows(IllegalArgumentException.class, () -> HostEnvironments.of(List.of(), "prod"))
-            .getMessage()
-            .contains("qits.edge.environments"));
+  void anAppLabelIsEchoedOnlyWhenItIsALabel() {
+    assertNull(EDGE.route(".dev.someproject.wohlben.eu", PROJECTS).unknownApp());
+    assertEquals(
+        Reading.UNKNOWN_APP, EDGE.route(".dev.someproject.wohlben.eu", PROJECTS).reading());
+  }
+
+  @Test
+  void noProjectsAtAllIsEveryNameButTheApex() {
+    // A cold projection. The project label is mandatory, so nothing below the apex reads as
+    // anything else — which is exactly what the catch-up barrier holds back.
+    assertEquals(Route.apex("prod"), EDGE.route("wohlben.eu"));
+    assertEquals(Reading.UNKNOWN_PROJECT, EDGE.route("qits.wohlben.eu").reading());
+    assertEquals(Reading.UNKNOWN_PROJECT, EDGE.route("editor.qits.wohlben.eu").reading());
+  }
+
+  // --- what configuration refuses ----------------------------------------------------------------
+
+  @Test
+  void anEnvironmentNameThatCannotBeALabelIsRefused() {
     assertThrows(
-        IllegalArgumentException.class, () -> HostEnvironments.of(List.of("  ", ""), "prod"));
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("prod env"), "prod env", "wohlben.eu"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("prod.eu"), "prod.eu", "wohlben.eu"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("-prod"), "-prod", "wohlben.eu"));
   }
 
   @Test
-  void aDefaultOutsideTheListIsRefusedAtConstruction() {
+  void anEmptyEnvironmentListIsRefused() {
     assertTrue(
         assertThrows(
                 IllegalArgumentException.class,
-                () -> HostEnvironments.of(List.of("prod"), "staging"))
+                () -> HostEnvironments.of(List.of(), "prod", "wohlben.eu"))
+            .getMessage()
+            .contains("qits.edge.environments"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("  ", ""), "prod", "wohlben.eu"));
+  }
+
+  @Test
+  void aDefaultOutsideTheListIsRefused() {
+    assertTrue(
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> HostEnvironments.of(List.of("prod"), "staging", "wohlben.eu"))
             .getMessage()
             .contains("qits.edge.default-environment"));
   }
 
-  // --- the application label ---------------------------------------------------------------------
-
-  private static final HostEnvironments APPS =
-      HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("registry", "githost"));
-
   @Test
-  void aConfiguredApplicationLabelReachesThatApplicationInThatEnvironment() {
-    assertEquals(
-        new HostEnvironments.Route("dev", "registry", null), APPS.route("registry.dev.localhost"));
-    assertEquals(
-        new HostEnvironments.Route("prod", "registry", null),
-        APPS.route("registry.prod.localhost"));
-    assertEquals(
-        new HostEnvironments.Route("dev", "githost", null),
-        APPS.route("GITHOST.dev.example.com:8080."));
-  }
-
-  @Test
-  void anEnvironmentOnlyNameStillReachesItsGateway() {
-    // The whole of today's behaviour, unchanged: no app, no rejection. A name that carries no shape
-    // at all — one label, an address, nothing — is the default environment's door, as it has always
-    // been.
-    assertEquals(new HostEnvironments.Route("dev", null, null), APPS.route("dev.localhost"));
-    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("localhost"));
-    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route("127.0.0.1:8080"));
-    assertEquals(new HostEnvironments.Route("prod", null, null), APPS.route(null));
-  }
-
-  @Test
-  void theApexIsNotToldApartHereAndIsNotServedByThisClass() {
-    // `example.com` and `nosuchapp.example.com` are the same shape read from the left, and only the
-    // configured canonical origin tells them apart. So this class answers both alike — a name that
-    // states no environment — and EdgeRouter, which knows the apex, is where the door is restored.
-    assertFalse(APPS.route("example.com").envExplicit());
-    assertEquals("prod", APPS.route("example.com").environment());
-  }
-
-  @Test
-  void anUnconfiguredApplicationLabelIsUnroutable() {
-    // It does NOT become the gateway's. The name is app-shaped, so it was aimed at a service, and
-    // the gateway is the hop that does not authenticate those.
-    HostEnvironments.Route route = APPS.route("mirror.dev.localhost");
-    assertEquals("mirror", route.unknownApp());
-    assertEquals("dev", route.environment(), "the environment is still readable, for the message");
-    assertFalse(route.toApp());
-  }
-
-  @Test
-  void anApplicationLabelWithNoEnvironmentIsNoLongerServed() {
-    // FLIPPED, and deliberately. `registry.example.com` was the default environment's registry —
-    // the environment label was optional there, because the apex is that environment's door. The
-    // project tier ended it: a middle label cannot be read as an environment in one spelling and a
-    // project in another. The long spelling is now the only spelling.
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "registry", null),
-        APPS.route("registry.example.com"));
-    assertEquals(
-        new HostEnvironments.Route("prod", "registry", null),
-        APPS.route("registry.prod.example.com"));
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "githost", null),
-        APPS.route("GITHOST.example.co.uk:8080."));
-    // The environment is still readable — it is the one the explicit spelling would carry, and the
-    // answer names it.
-    assertEquals("prod", APPS.route("registry.example.com").environment());
-  }
-
-  @Test
-  void anEnvironmentNameStillWinsOverAnApplicationOne() {
-    // Precedence is unchanged: an environment at either position is read first, so no tier can be
-    // hidden by an application whose name looks like one. `staging` is neither here, so it is a
-    // name that states no environment.
-    assertEquals(new HostEnvironments.Route("dev", null, null), APPS.route("dev.example.com"));
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "staging", null),
-        APPS.route("staging.example.com"));
-  }
-
-  @Test
-  void aNameWithNoEnvironmentCarriesItsLeadingLabelSoTheAnswerCanNameTheSpelling() {
-    // FLIPPED: this label used to be OFFERED to the router as an application in the default
-    // environment, and the router joined the deployment projection onto it. That join is gone with
-    // the fall-through it served. What the label is for now is the sentence the 404 writes.
-    assertEquals("ci", APPS.route("ci.example.com").unknownApp());
-    assertEquals("ci", APPS.route("CI.example.co.uk:8080.").unknownApp());
-    assertEquals("registry", APPS.route("registry.example.com").unknownApp());
-    assertEquals("anything", APPS.route("anything.at.all.example.com").unknownApp());
-    // And on the readings that ARE served it keeps its old meaning exactly: a label in front of a
-    // known environment that nothing configured claims.
-    assertEquals("ci", APPS.route("ci.dev.example.com").unknownApp());
-    assertTrue(APPS.route("ci.dev.example.com").envExplicit());
-    // A name with nothing in front of a domain has no label to name.
-    assertNull(APPS.route("localhost").unknownApp());
-    assertNull(APPS.route("127.0.0.1").unknownApp());
-    assertNull(APPS.route(null).unknownApp());
-  }
-
-  @Test
-  void anUnknownLabelWithNoEnvironmentIsNotServedEither() {
-    // FLIPPED. A mistyped or decommissioned name on the apex used to reach the platform's own page.
-    // It cannot any more: `ci.example.com` and `editor.acme.example.com` are the same kind of name,
-    // and the second one has to fail loudly or the editor silently opens the wrong environment.
-    assertFalse(APPS.route("ci.example.com").envExplicit());
-    assertEquals("prod", APPS.route("ci.example.com").environment(), "for the explicit spelling");
-    assertFalse(APPS.route("anything.at.all.example.com").envExplicit());
-  }
-
-  @Test
-  void anEdgeWithNoApplicationsRoutesNoAppLabel() {
-    assertEquals("registry", TWO.route("registry.dev.localhost").unknownApp());
-  }
-
-  @Test
-  void anApplicationNameThatCannotBeADnsLabelIsRefused() {
+  void anAppNameThatCannotBeALabelIsRefused() {
     assertThrows(
         IllegalArgumentException.class,
-        () -> HostEnvironments.of(List.of("prod"), "prod", List.of("my registry")));
+        () -> HostEnvironments.of(List.of("prod"), "prod", List.of("my registry"), "wohlben.eu"));
   }
 
   @Test
-  void anApplicationMayNotShareAnEnvironmentsName() {
-    // The tie-break reads the first label as an application, so an app called `dev` would swallow
-    // `dev.prod.example.com` and leave the dev environment unreachable by name. Fail at boot.
+  void anAppMayNowBeSpelledLikeAnEnvironment() {
+    // The collision the tie-breaks existed for. Positionally there is none: an app label is only
+    // ever read in front of a project or an environment, never at the environment's own position.
+    HostEnvironments colliding =
+        HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("dev"), "wohlben.eu");
+    assertEquals(
+        Route.app("prod", "dev", "qits"), colliding.route("dev.qits.wohlben.eu", PROJECTS));
+    assertEquals(
+        Route.environmentDoor("dev", "someproject"),
+        colliding.route("dev.someproject.wohlben.eu", PROJECTS));
+  }
+
+  @Test
+  void aDomainThatIsNotADnsNameIsRefused() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> HostEnvironments.of(List.of("prod"), "prod", "wohlben eu"));
     assertTrue(
         assertThrows(
                 IllegalArgumentException.class,
-                () -> HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("dev")))
+                () -> HostEnvironments.of(List.of("prod"), "prod", "  "))
             .getMessage()
-            .contains("both an environment and an application"));
-  }
-
-  // --- the project label -------------------------------------------------------------------------
-
-  /** The live set, as {@code EdgeProjects} serves it. Two, so a slug is never the only label. */
-  private static final java.util.Set<String> PROJECTS = java.util.Set.of("acme", "qits");
-
-  /** `editor` is the application served per project; `registry` and `githost` never are. */
-  private static final HostEnvironments TIERS =
-      HostEnvironments.of(List.of("prod", "dev"), "prod", List.of("registry", "githost", "editor"));
-
-  @Test
-  void aProjectInFrontOfAnEnvironmentIsThatProjectsDoor() {
-    assertEquals(
-        HostEnvironments.Route.projectDoor("dev", "acme"),
-        TIERS.route("acme.dev.example.com", PROJECTS));
-    assertEquals(
-        HostEnvironments.Route.projectDoor("prod", "qits"),
-        TIERS.route("qits.prod.example.com", PROJECTS));
-    assertTrue(TIERS.route("acme.dev.example.com", PROJECTS).toProjectDoor());
-    assertFalse(TIERS.route("acme.dev.example.com", PROJECTS).toApp());
+            .contains("the edge domain is not set"));
   }
 
   @Test
-  void anApplicationInFrontOfAProjectInFrontOfAnEnvironmentIsTheFourLabelTier() {
-    // The name this whole tier exists for, spelled as the platform spells it.
-    assertEquals(
-        new HostEnvironments.Route("dev", "editor", null, "qits", true),
-        TIERS.route("editor.qits.dev.wohlben.dev", PROJECTS));
-    // The environment comes from position 2, which is what makes the audience, the upstream and
-    // every origin the NAMED environment's rather than the default's.
-    assertEquals("dev", TIERS.route("editor.qits.dev.wohlben.dev", PROJECTS).environment());
-    assertEquals("prod", TIERS.route("editor.qits.prod.wohlben.dev", PROJECTS).environment());
-  }
-
-  @Test
-  void anUnconfiguredApplicationOnTheFourLabelTierIsOfferedToTheProjection() {
-    // `workspaces` is nobody's configured app: it is a name a DEPLOYMENT publishes, so the label is
-    // carried as unknown and the router joins the projection onto it — with the project kept, so
-    // the answer either way names the whole reading.
-    HostEnvironments.Route route = TIERS.route("workspaces.acme.dev.example.com", PROJECTS);
-    assertEquals("workspaces", route.unknownApp());
-    assertEquals("acme", route.project());
-    assertEquals("dev", route.environment());
-    assertTrue(route.envExplicit());
-    assertFalse(route.toApp());
-  }
-
-  @Test
-  void aProjectThatDoesNotExistIsJustAnotherLabel() {
-    // The set is live, and a slug nobody has created is not a tier. `nosuchproject` in the middle
-    // makes the name state no environment, exactly like any other unknown middle label.
-    assertFalse(TIERS.route("editor.nosuchproject.dev.example.com", PROJECTS).envExplicit());
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "nosuchproject", null),
-        TIERS.route("nosuchproject.example.com", PROJECTS));
-  }
-
-  @Test
-  void aServiceLabelBeatsAProjectAtPositionZero() {
-    // Both sets are keyed by a bare label and nothing stops a project being called `registry`. The
-    // configured application wins, because a vhost with an audience and anonymous reads going to a
-    // door is the worse of the two failures — and the platform refuses the collision on its side
-    // rather than relying on this.
-    assertEquals(
-        new HostEnvironments.Route("dev", "registry", null),
-        TIERS.route("registry.dev.example.com", java.util.Set.of("registry")));
-  }
-
-  @Test
-  void anEnvironmentBeatsAProjectAtPositionOne() {
-    // The platform prevents this collision, so this only decides what happens if the two ever
-    // disagree: `editor.dev.example.com` is the editor in dev, not the editor of a project called
-    // `dev` in a domain that starts with one.
-    assertEquals(
-        new HostEnvironments.Route("dev", "editor", null),
-        TIERS.route("editor.dev.example.com", java.util.Set.of("dev")));
-  }
-
-  @Test
-  void theShortSpellingsOfBothProjectTiersAreRefusedAndNameTheirLabels() {
-    // No redirect, by decision: a short name is a bookmark or a hard-coded string, and the label it
-    // is missing is the one that decides which tier the request lands in.
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "editor", "qits"),
-        TIERS.route("editor.qits.wohlben.dev", PROJECTS));
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", null, "qits"),
-        TIERS.route("qits.wohlben.dev", PROJECTS));
-    // The default environment is carried on both, because it is what the explicit spelling holds.
-    assertEquals("prod", TIERS.route("editor.qits.wohlben.dev", PROJECTS).environment());
-  }
-
-  @Test
-  void aFourLabelNameToleratesEverythingATwoLabelOneDoes() {
-    // A port, letter case, the root dot and surrounding space, at the depth a browser really sends.
-    assertEquals(
-        new HostEnvironments.Route("dev", "editor", null, "qits", true),
-        TIERS.route("  EDITOR.Qits.DEV.wohlben.dev.:8080  ", PROJECTS));
-    assertEquals(
-        HostEnvironments.Route.projectDoor("dev", "acme"),
-        TIERS.route("ACME.dev.example.co.uk:443.", PROJECTS));
-  }
-
-  @Test
-  void withNoProjectsEveryNonProjectNameReadsExactlyAsItDoesWithThem() {
-    // The regression sweep: the project set may not change the answer for a name that names no
-    // project. Whatever these are, they are the same either way.
-    for (String host :
-        List.of(
-            "dev.example.com",
-            "example.com",
-            "registry.dev.example.com",
-            "registry.prod.example.com",
-            "registry.example.com",
-            "mirror.dev.example.com",
-            "staging.example.com",
-            "anything.at.all.example.com",
-            "editor.dev.example.com",
-            "localhost",
-            "127.0.0.1:8080",
-            "dev.localhost")) {
-      assertEquals(TIERS.route(host), TIERS.route(host, PROJECTS), host);
-    }
-    // And the project readings are the only difference, in both directions.
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", "acme", null), TIERS.route("acme.example.com"));
-    assertEquals(
-        HostEnvironments.Route.shortForm("prod", null, "acme"),
-        TIERS.route("acme.example.com", PROJECTS));
-  }
-
-  @Test
-  void aNameIsProjectSensitiveExactlyWhenAnotherSlugCouldChangeItsReading() {
-    // What the router asks before it answers a project-shaped 404 while the projection is behind.
-    // The rule it has to satisfy: yes for every name some larger slug set would read differently.
-    assertTrue(
-        TIERS.projectSensitive("editor.nosuchproject.dev.example.com", PROJECTS),
-        "the four-label tier, one slug short of being served");
-    assertTrue(
-        TIERS.projectSensitive("nosuchproject.dev.example.com", PROJECTS),
-        "a would-be project door, read as an application nobody routes");
-    assertTrue(
-        TIERS.projectSensitive("editor.nosuchproject.example.com", PROJECTS),
-        "the short spelling, whose 404 names a different explicit host either way");
-
-    // And no for everything decided without the set, or already decided WITH it.
-    assertFalse(TIERS.projectSensitive("editor.acme.dev.example.com", PROJECTS), "already a tier");
-    assertFalse(TIERS.projectSensitive("acme.dev.example.com", PROJECTS), "already a door");
-    assertFalse(TIERS.projectSensitive("registry.dev.example.com", PROJECTS), "a configured app");
-    assertFalse(TIERS.projectSensitive("dev.example.com", PROJECTS), "an environment's own door");
-    assertFalse(TIERS.projectSensitive("example.com", PROJECTS), "the apex");
-    assertFalse(TIERS.projectSensitive("localhost", PROJECTS), "one label names no project");
-    assertFalse(TIERS.projectSensitive("127.0.0.1:8080", PROJECTS), "nor does an address");
-    assertFalse(TIERS.projectSensitive(null, PROJECTS), "nor a request with no Host at all");
-    assertFalse(
-        TIERS.projectSensitive("nosuchapp.localhost", PROJECTS),
-        "$app.$domain and $project.$domain answer the same explicit name — the label goes in front"
-            + " of the authority either way — so a slug arriving changes nothing a caller sees");
-
-    // DELIBERATELY CONSERVATIVE, and this is what that costs. `nosuchapp.example.com` is sensitive
-    // because a project called `example` would make it the short four-label spelling and move the
-    // name its 404 offers. Nobody will create that project; the answer is still yes, because the
-    // rule is "some slug set reads this differently" and a false no is the wrong answer served.
-    assertTrue(TIERS.projectSensitive("nosuchapp.example.com", PROJECTS));
-  }
-
-  @Test
-  void everyProjectSensitiveNameReallyDoesReadDifferentlyWithTheSlug() {
-    // The predicate and the readings, checked against each other rather than by inspection: for
-    // each of these the route with the slug is a different answer from the route without it.
-    for (String host :
-        List.of(
-            "editor.nosuchproject.dev.example.com",
-            "nosuchproject.dev.example.com",
-            "editor.nosuchproject.example.com")) {
-      java.util.Set<String> larger = java.util.Set.of("acme", "qits", "nosuchproject");
-      assertTrue(TIERS.projectSensitive(host, PROJECTS), host);
-      assertFalse(TIERS.route(host, PROJECTS).equals(TIERS.route(host, larger)), host);
-    }
-  }
-
-  @Test
-  void anEnvironmentNameThatCannotBeADnsLabelIsRefused() {
-    // The name is interpolated into a host name, so a value DNS could never resolve is a
-    // configuration error rather than a connection failure per request.
-    assertThrows(
-        IllegalArgumentException.class, () -> HostEnvironments.of(List.of("prod env"), "prod env"));
-    assertThrows(
-        IllegalArgumentException.class, () -> HostEnvironments.of(List.of("prod.eu"), "prod.eu"));
-    assertThrows(
-        IllegalArgumentException.class, () -> HostEnvironments.of(List.of("-prod"), "-prod"));
+  void theDomainIsNormalisedOnce() {
+    HostEnvironments stated =
+        HostEnvironments.of(List.of("prod"), "prod", List.of("registry"), "  Wohlben.EU.  ");
+    assertEquals("wohlben.eu", stated.domain());
+    assertEquals(Route.apex("prod"), stated.route("wohlben.eu", PROJECTS));
   }
 }

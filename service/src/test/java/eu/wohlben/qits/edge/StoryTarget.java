@@ -15,9 +15,10 @@ import java.util.Map;
  * every run, and the only symptom is a hash that never settles.
  *
  * <p><b>A vhost is the whole subject of this service</b>, so the names below are the shape a person
- * types: {@code <app>.<env>.<domain>} for one service, {@code <env>.<domain>} for the door. On this
- * process a name is not decoration — it IS the routing decision, and {@code GET /projects/api/me}
- * means one thing on one name, a different service on another and a 404 on a third.
+ * types: {@code <app>.<env>.<project>.<domain>} for one service, {@code <env>.<project>.<domain>}
+ * for the environment's door and {@code <project>.<domain>} for the project's. On this process a
+ * name is not decoration — it IS the routing decision, and {@code GET /projects/api/me} means one
+ * thing on one name, a different service on another and a 404 on a third.
  */
 public final class StoryTarget {
 
@@ -83,8 +84,19 @@ public final class StoryTarget {
 
   public static final String DOMAIN = "example.com";
 
-  /** The environment's own name, which is the door — it routes nothing and serves nothing. */
-  public static final String DOOR_HOST = ENVIRONMENT + "." + DOMAIN;
+  /**
+   * The project every name in this catalogue is inside, because every name is: the grammar is read
+   * right to left and the project label is mandatory. It supports environments, so its names carry
+   * one — {@code <app>.<env>.<project>.<domain>}. {@code StoryProfile} writes it into the launched
+   * process' projection before the process starts.
+   */
+  public static final String PROJECT = "acme";
+
+  /** The project's own name, which is a door: it routes nothing and serves nothing. */
+  public static final String PROJECT_HOST = PROJECT + "." + DOMAIN;
+
+  /** One environment of that project, which is a door of the same kind. */
+  public static final String DOOR_HOST = ENVIRONMENT + "." + PROJECT_HOST;
 
   public static final String PROJECTS_HOST = PROJECTS_APP + "." + DOOR_HOST;
 

@@ -114,7 +114,7 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
    * covered by the same wildcard, because its middle label is a project.
    */
   static final String BROWSER_HOSTS =
-      "example.com,dev.example.com,prod.example.com,*.dev.example.com";
+      "example.com,dev.acme.example.com,prod.acme.example.com,*.dev.acme.example.com";
 
   /** The edge's OWN idp client, the one it introspects browser sessions with. */
   static final String EDGE_ID = "an-edge";

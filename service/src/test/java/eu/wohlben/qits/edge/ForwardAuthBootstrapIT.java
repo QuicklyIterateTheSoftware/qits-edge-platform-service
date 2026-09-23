@@ -392,7 +392,14 @@ public class ForwardAuthBootstrapIT {
     EdgeClient.Answer door = StoryEdge.client().get(StoryTarget.DOOR_HOST, StoryTarget.DOOR_PATH);
     assertEquals(404, door.status());
     assertTrue(
-        door.body().contains("This name is the environment door and serves nothing"), door.body());
+        door.body()
+            .contains(
+                "This name is the `"
+                    + StoryTarget.ENVIRONMENT
+                    + "` environment of the `"
+                    + StoryTarget.PROJECT
+                    + "` project and serves nothing"),
+        door.body());
     assertTrue(
         door.body().contains("`<app>." + StoryTarget.DOOR_HOST + "`"),
         "the refusal must name the shape every service IS on, or it is a dead end: " + door.body());
@@ -445,7 +452,12 @@ public class ForwardAuthBootstrapIT {
     assertTrue(
         unclaimed
             .body()
-            .contains("the environment `" + StoryTarget.ENVIRONMENT + "` was read from the name"),
+            .contains(
+                "the environment `"
+                    + StoryTarget.ENVIRONMENT
+                    + "` and the project `"
+                    + StoryTarget.PROJECT
+                    + "` were read from the name"),
         unclaimed.body());
     // The same path as the first story's served read, on a name nobody claims — which is exactly
     // why the vhost is in the label and not only in the note: without it these two would be one

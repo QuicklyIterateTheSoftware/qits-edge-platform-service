@@ -111,7 +111,8 @@ class EdgeSessionGateTest {
             List.of(
                 new EdgeEndpoint(
                     "dev", "session-test-environment", "/", Upstream.parse(address, 8080)))));
-    // A flipped service, on a stub that names itself differently: `ci.dev.example.com` is a browser
+    // A flipped service, on a stub that names itself differently: `ci.dev.acme.example.com` is a
+    // browser
     // host through the wildcard above, and nothing about it is configured in qits.edge.apps.
     String ci =
         ConfigProvider.getConfig().getValue("qits.edge.apps.mirror.hosts.dev", String.class);
@@ -165,13 +166,13 @@ class EdgeSessionGateTest {
         client()
             .send(
                 HttpMethod.GET,
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/runs/7",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "http://idp.dev.example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fruns%2F7",
+        "http://idp.dev.acme.example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2Fruns%2F7",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached the service");
   }
@@ -185,7 +186,7 @@ class EdgeSessionGateTest {
         List.of(Map.<String, String>of(), session(), token("dev"))) {
       for (String path : List.of("/idp/login", "/ci/api/runs", "/v2/", "/git/x")) {
         EdgeClient.Answer answer =
-            client().send(HttpMethod.GET, "dev.example.com", path, null, credential);
+            client().send(HttpMethod.GET, "dev.acme.example.com", path, null, credential);
         assertEquals(404, answer.status(), path + " " + credential);
         assertNull(answer.line("upstream"), path + " must reach no upstream");
       }
@@ -198,7 +199,7 @@ class EdgeSessionGateTest {
     // gate refuses a caller with no session and sends them to the page they are already asking for.
     publishIdpHost();
     EdgeClient.Answer answer =
-        client().get("idp.dev.example.com", "/idp/login", Map.of("X-Qits-User", "admin"));
+        client().get("idp.dev.acme.example.com", "/idp/login", Map.of("X-Qits-User", "admin"));
     assertEquals(IDP_UPSTREAM, answer.line("upstream"));
     assertNull(answer.upstreamHeader("X-Qits-User"), "a forged identity is stripped, none written");
   }
@@ -209,7 +210,7 @@ class EdgeSessionGateTest {
     // log in again. The refused cookie does not travel — the request is not using it.
     publishIdpHost();
     EdgeClient.Answer answer =
-        client().get("idp.dev.example.com", "/idp/login", cookieHeader("no-such-session"));
+        client().get("idp.dev.acme.example.com", "/idp/login", cookieHeader("no-such-session"));
     assertEquals(IDP_UPSTREAM, answer.line("upstream"));
     assertEquals("theme=dark", answer.upstreamHeader("Cookie"));
     assertNull(answer.upstreamHeader("X-Qits-User"));
@@ -224,13 +225,13 @@ class EdgeSessionGateTest {
         client()
             .send(
                 HttpMethod.GET,
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/idp/login",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "http://idp.dev.example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fidp%2Flogin",
+        "http://idp.dev.acme.example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2Fidp%2Flogin",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached a service");
   }
@@ -245,7 +246,7 @@ class EdgeSessionGateTest {
         client()
             .send(
                 HttpMethod.GET,
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/runs/7?tab=log",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
@@ -254,7 +255,7 @@ class EdgeSessionGateTest {
     // was trying to go. Asserted character by character: a login that returns somewhere else is a
     // bug nobody files, they just re-navigate.
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.example.com&return_path=%2Fruns%2F7%3Ftab%3Dlog",
+        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2Fruns%2F7%3Ftab%3Dlog",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached the service");
   }
@@ -266,12 +267,12 @@ class EdgeSessionGateTest {
     EdgeClient.Answer answer =
         client()
             .get(
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/",
                 Map.of("Accept", "text/html,application/xhtml+xml,*/*;q=0.8"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.example.com&return_path=%2F",
+        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
         answer.headers().get("location"));
   }
 
@@ -283,7 +284,7 @@ class EdgeSessionGateTest {
     EdgeClient.Answer answer =
         client()
             .get(
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/api/runs",
                 Map.of("Sec-Fetch-Mode", "cors", "Accept", "application/json"));
     assertEquals(401, answer.status());
@@ -296,7 +297,7 @@ class EdgeSessionGateTest {
   void aMachineClientWithNoCredentialStillGetsTheChallenge() {
     // No Sec-Fetch-Mode: curl, docker, git. The realm in the challenge is what docker acts on.
     EdgeClient.Answer answer =
-        client().get("ci.dev.example.com", "/api/runs", Map.of("Accept", "application/json"));
+        client().get("ci.dev.acme.example.com", "/api/runs", Map.of("Accept", "application/json"));
     assertEquals(401, answer.status());
     assertNull(answer.line("upstream"));
     assertTrue(answer.headers().containsKey("www-authenticate"), "a machine client is challenged");
@@ -310,13 +311,13 @@ class EdgeSessionGateTest {
         client()
             .send(
                 HttpMethod.GET,
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "//evil.example.com/steal",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.example.com&return_path=%2F",
+        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
         answer.headers().get("location"));
   }
 
@@ -325,28 +326,32 @@ class EdgeSessionGateTest {
   @Test
   void aNavigationOnTheEditorsOwnNameComesBackToTheEditor() {
     // The editor is ONE shared container for the whole platform now, so its name is
-    // `editor.dev.example.com` — one label in front of the environment, which is what the single
-    // `*.dev.example.com` entry covers. A person logging in to open a file comes back to the file.
+    // `editor.dev.acme.example.com` — one label in front of the environment, which is what the
+    // single
+    // `*.dev.acme.example.com` entry covers. A person logging in to open a file comes back to the
+    // file.
     EdgeClient.Answer answer =
         client()
             .send(
                 HttpMethod.GET,
-                "editor.dev.example.com",
+                "editor.dev.acme.example.com",
                 "/editor/src/main.ts",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=editor.dev.example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
+        "https://example.com/idp/login?return_host=editor.dev.acme.example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached the editor");
   }
 
   @Test
-  void aNavigationOnTheRetiredFourLabelEditorNameFallsBackToTheCanonicalOrigin() {
-    // The widening that used to make `editor.acme.dev.example.com` a return host is gone with the
-    // tier it existed for. The name is two labels in front of the environment, no wildcard covers
-    // it, and the login sends the person to the door rather than reflecting it.
+  void theRetiredFourLabelEditorNameIsNotEvenAName() {
+    // `editor.<project>.<env>.<domain>` was the tier the editor had before the grammar was read
+    // right to left, and it is not a spelling any more: the project label sits next to the DOMAIN
+    // now, so this name's project label is `example` — which is not a project. It is refused before
+    // the session gate is reached at all, so a logged-out browser gets a 404 rather than a login it
+    // would return from onto a name that does not exist.
     EdgeClient.Answer answer =
         client()
             .send(
@@ -355,23 +360,21 @@ class EdgeSessionGateTest {
                 "/editor/src/main.ts",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
-    assertEquals(302, answer.status());
-    assertEquals(
-        "https://example.com/idp/login?return_host=example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
-        answer.headers().get("location"));
+    assertEquals(404, answer.status());
     assertNull(answer.line("upstream"), "it must not have reached the editor");
   }
 
   @Test
   void aNameNobodyListedStillFallsBackToTheDoor() {
     // The fallback for a name no entry covers: this suite lists
-    // `*.dev.example.com` and no wildcard for prod, so a prod service's own name is a return target
+    // `*.dev.acme.example.com` and no wildcard for prod, so a prod service's own name is a return
+    // target
     // this process refuses to reflect. The whole matrix of the matcher is EdgeChallengeTest's.
     EdgeClient.Answer answer =
         client()
             .send(
                 HttpMethod.GET,
-                "registry.prod.example.com",
+                "registry.prod.acme.example.com",
                 "/v2/",
                 null,
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
@@ -386,7 +389,7 @@ class EdgeSessionGateTest {
     // And the other half: the editor is a service vhost like any other once the cookie is good. The
     // upstream that answers is the NAMED environment's, which is what the second label decided.
     EdgeClient.Answer answer =
-        client().get("editor.dev.example.com", "/editor/src/main.ts", session());
+        client().get("editor.dev.acme.example.com", "/editor/src/main.ts", session());
     assertEquals("editor-dev", answer.line("upstream"));
     assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
   }
@@ -403,7 +406,7 @@ class EdgeSessionGateTest {
     spoofed.put("X-Qits-Roles", "qits:admin,qits:root");
     spoofed.put("x-qits-something-invented-later", "whatever");
 
-    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/api/runs", spoofed);
+    EdgeClient.Answer answer = client().get("ci.dev.acme.example.com", "/api/runs", spoofed);
     assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
     assertEquals(StubGateways.SESSION_USER_ID, answer.upstreamHeader("X-Qits-User-Id"));
     assertEquals("qits:admin", answer.upstreamHeader("X-Qits-Roles"));
@@ -419,7 +422,8 @@ class EdgeSessionGateTest {
     // upstream empty. The sleep is what guarantees the call happens rather than a cache hit.
     Thread.sleep(cacheTtlMs() + 400);
     EdgeClient.Answer answer =
-        client().send(HttpMethod.POST, "ci.dev.example.com", "/api/runs", "hello edge", session());
+        client()
+            .send(HttpMethod.POST, "ci.dev.acme.example.com", "/api/runs", "hello edge", session());
     assertEquals("POST", answer.line("method"));
     assertEquals("hello edge", answer.line("body"));
     assertEquals("10", answer.line("body-bytes"));
@@ -434,7 +438,7 @@ class EdgeSessionGateTest {
     String seen =
         client()
             .handshake(
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/terminal",
                 Map.of(
                     "Cookie",
@@ -456,7 +460,7 @@ class EdgeSessionGateTest {
     assertEquals(
         401,
         client()
-            .get("ci.dev.example.com", "/terminal", Map.of("Sec-Fetch-Mode", "websocket"))
+            .get("ci.dev.acme.example.com", "/terminal", Map.of("Sec-Fetch-Mode", "websocket"))
             .status());
   }
 
@@ -467,14 +471,16 @@ class EdgeSessionGateTest {
     // The one carve-out, and it is a prefix rather than an asset list: the pages need their SPA
     // files, and a list of bundle names would drift the first time one is renamed.
     publishIdpHost();
-    assertEquals(IDP_UPSTREAM, client().get("idp.dev.example.com", "/idp/login").line("upstream"));
+    assertEquals(
+        IDP_UPSTREAM, client().get("idp.dev.acme.example.com", "/idp/login").line("upstream"));
     assertEquals(
         IDP_UPSTREAM,
-        client().get("idp.dev.example.com", "/idp/assets/main-ab12cd.js").line("upstream"));
+        client().get("idp.dev.acme.example.com", "/idp/assets/main-ab12cd.js").line("upstream"));
     assertEquals(
         IDP_UPSTREAM,
         client()
-            .send(HttpMethod.POST, "idp.dev.example.com", "/idp/api/auth/login", "{}", Map.of())
+            .send(
+                HttpMethod.POST, "idp.dev.acme.example.com", "/idp/api/auth/login", "{}", Map.of())
             .line("upstream"));
   }
 
@@ -488,7 +494,7 @@ class EdgeSessionGateTest {
         "mirror-dev",
         client()
             .get(
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/api/runs",
                 basic(StubGateways.CLIENT_ID, StubGateways.CLIENT_SECRET))
             .line("upstream"));
@@ -501,13 +507,16 @@ class EdgeSessionGateTest {
     assertEquals(
         401,
         client()
-            .get("ci.dev.example.com", "/api/runs", Map.of("Authorization", "Bearer not-a-token"))
+            .get(
+                "ci.dev.acme.example.com",
+                "/api/runs",
+                Map.of("Authorization", "Bearer not-a-token"))
             .status());
     assertEquals(
         401,
         client()
             .get(
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/api/runs",
                 basic(StubGateways.OTHER_ID, StubGateways.OTHER_SECRET))
             .status());
@@ -520,7 +529,7 @@ class EdgeSessionGateTest {
     // The cookie is the credential here, so it stays: the service behind the name is an ordinary
     // qits service and the browser will make the next request with it too. The three identity
     // headers are what it reads.
-    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/runs/7", session());
+    EdgeClient.Answer answer = client().get("ci.dev.acme.example.com", "/runs/7", session());
     assertEquals("mirror-dev", answer.line("upstream"), "its own upstream, not the environment's");
     assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
     assertEquals(StubGateways.SESSION_USER_ID, answer.upstreamHeader("X-Qits-User-Id"));
@@ -533,7 +542,7 @@ class EdgeSessionGateTest {
   void aMachineCredentialStillOpensAServiceHost() {
     // CI dialing a service by its own name. A machine's identity is in its token, so nothing is
     // asserted for it.
-    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/api/runs", token("dev"));
+    EdgeClient.Answer answer = client().get("ci.dev.acme.example.com", "/api/runs", token("dev"));
     assertEquals("mirror-dev", answer.line("upstream"));
     assertNull(answer.upstreamHeader("X-Qits-User"));
   }
@@ -550,12 +559,12 @@ class EdgeSessionGateTest {
     // forward-auth service's trust in X-Qits-User and cannot depend on there being a session here.
     // A registry does not read the prefix, but this path is shared with application vhosts whose
     // services do, and a valid machine token is not licence to forge a user identity behind it.
-    assertEquals(401, client().get("registry.dev.example.com", "/v2/").status());
+    assertEquals(401, client().get("registry.dev.acme.example.com", "/v2/").status());
     EdgeClient.Answer answer =
         client()
             .send(
                 HttpMethod.GET,
-                "registry.dev.example.com",
+                "registry.dev.acme.example.com",
                 "/v2/",
                 null,
                 withToken("dev", "X-Qits-User", "whoever"));
@@ -567,7 +576,8 @@ class EdgeSessionGateTest {
 
   @Test
   void anAnonymousReadOnAnExemptedAppVhostStillPasses() {
-    assertEquals("mirror-dev", client().get("mirror.dev.example.com", "/v2/").line("upstream"));
+    assertEquals(
+        "mirror-dev", client().get("mirror.dev.acme.example.com", "/v2/").line("upstream"));
   }
 
   @Test
@@ -576,7 +586,7 @@ class EdgeSessionGateTest {
     // identifies itself with a token is not using it, so the registry never sees it.
     Map<String, String> headers = new java.util.HashMap<>(token("dev"));
     headers.put("Cookie", "theme=dark; qits-session=" + StubGateways.SESSION + "; locale=en");
-    EdgeClient.Answer answer = client().get("registry.dev.example.com", "/v2/", headers);
+    EdgeClient.Answer answer = client().get("registry.dev.acme.example.com", "/v2/", headers);
     assertEquals("registry-dev", answer.line("upstream"));
     assertEquals("theme=dark; locale=en", answer.upstreamHeader("Cookie"));
   }
@@ -590,10 +600,11 @@ class EdgeSessionGateTest {
     Thread.sleep(cacheTtlMs() + 400);
     int before = StubGateways.introspections();
     assertEquals(
-        "mirror-dev", client().get("ci.dev.example.com", "/api/one", session()).line("upstream"));
+        "mirror-dev",
+        client().get("ci.dev.acme.example.com", "/api/one", session()).line("upstream"));
     assertEquals(before + 1, StubGateways.introspections(), "the first request asks");
-    client().get("ci.dev.example.com", "/api/two", session());
-    client().get("ci.dev.example.com", "/api/three", session());
+    client().get("ci.dev.acme.example.com", "/api/two", session());
+    client().get("ci.dev.acme.example.com", "/api/three", session());
     assertEquals(before + 1, StubGateways.introspections(), "and the next two do not");
   }
 
@@ -601,7 +612,8 @@ class EdgeSessionGateTest {
   void aRevokedSessionDiesWithinTheCacheTtl() throws Exception {
     Map<String, String> revocable = cookieHeader(StubGateways.REVOCABLE_SESSION);
     assertEquals(
-        "mirror-dev", client().get("ci.dev.example.com", "/api/one", revocable).line("upstream"));
+        "mirror-dev",
+        client().get("ci.dev.acme.example.com", "/api/one", revocable).line("upstream"));
 
     StubGateways.revoke();
     // Still believed for as long as the cache says so — the plan names this lag rather than hiding
@@ -611,7 +623,7 @@ class EdgeSessionGateTest {
         client()
             .send(
                 HttpMethod.GET,
-                "ci.dev.example.com",
+                "ci.dev.acme.example.com",
                 "/api/two",
                 null,
                 withCookie(StubGateways.REVOCABLE_SESSION, "Sec-Fetch-Mode", "cors"));
@@ -630,7 +642,7 @@ class EdgeSessionGateTest {
           client()
               .send(
                   HttpMethod.GET,
-                  "ci.dev.example.com",
+                  "ci.dev.acme.example.com",
                   "/api/things",
                   null,
                   withCookie("no-such-session", "Sec-Fetch-Mode", "cors"))
@@ -644,11 +656,12 @@ class EdgeSessionGateTest {
     // The token broker's 2026-08-14 lesson, applied to people: idp is redeployed like any other
     // container, and a browser must not be logged out because it happened mid-click.
     assertEquals(
-        "mirror-dev", client().get("ci.dev.example.com", "/api/one", session()).line("upstream"));
+        "mirror-dev",
+        client().get("ci.dev.acme.example.com", "/api/one", session()).line("upstream"));
     Thread.sleep(cacheTtlMs() + 400);
     StubGateways.idpDown();
     try {
-      EdgeClient.Answer answer = client().get("ci.dev.example.com", "/api/two", session());
+      EdgeClient.Answer answer = client().get("ci.dev.acme.example.com", "/api/two", session());
       assertEquals("mirror-dev", answer.line("upstream"), "the belief stands while idp is away");
       assertEquals(StubGateways.SESSION_USER, answer.upstreamHeader("X-Qits-User"));
     } finally {
@@ -667,7 +680,7 @@ class EdgeSessionGateTest {
           client()
               .send(
                   HttpMethod.GET,
-                  "ci.dev.example.com",
+                  "ci.dev.acme.example.com",
                   "/api/things",
                   null,
                   withCookie("another-unknown-session", "Sec-Fetch-Mode", "cors"))
@@ -684,7 +697,7 @@ class EdgeSessionGateTest {
     // An orchestrator has no session and must never need one: a health probe that 302s to a login
     // page is a container that never comes up.
     io.restassured.RestAssured.given()
-        .header("Host", "dev.example.com")
+        .header("Host", "dev.acme.example.com")
         .when()
         .get("/q/health/ready")
         .then()

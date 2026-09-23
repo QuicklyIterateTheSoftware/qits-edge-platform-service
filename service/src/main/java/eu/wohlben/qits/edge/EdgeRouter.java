@@ -38,20 +38,17 @@ import org.jboss.logging.Logger;
  * owns. They are the same kind of vhost, so a request to either is gated per request rather than
  * per plane: a machine credential, then a browser session, then the reads the deployment opened.
  *
- * <p><b>The environment's own name is a door, and a door serves nothing.</b> {@code <env>.<domain>}
- * answers {@code GET /} with a redirect to the projects host and 404s every other path — see {@link
- * #door}. It routes nothing, gates nothing and proxies nothing, so a service is reachable on its
- * own name alone. A project's own name, {@code <slug>.<env>.<domain>}, is a door of the same kind.
+ * <p><b>A door serves nothing, and there are three of them.</b> The apex, a project's own name
+ * {@code <project>.<domain>}, and an environment's name inside a project {@code
+ * <env>.<project>.<domain>} each answer {@code GET /} with a redirect to the projects host and 404
+ * every other path — see {@link #door}. They route nothing, gate nothing and proxy nothing, so a
+ * service is reachable on its own name alone.
  *
- * <p><b>A project is a label too.</b> {@code <app>.<slug>.<env>.<domain>} is one application for
- * one project — the web editor is served there — and its environment is read from position 2, so
- * the audience it demands, the upstream it reaches and the origins it writes are the named
- * environment's and not the default's. {@link HostEnvironments} holds the whole grammar; what is
- * joined on here is what a deployment published, which is the one thing that class cannot know.
- *
- * <p><b>A name that states no environment is not served</b>, the apex excepted: see {@link
- * #shortForm}. The default-environment fall-through that used to answer {@code <app>.<domain>} is
- * gone, because a project label in front of it is indistinguishable from an environment label.
+ * <p><b>The grammar is read right to left and the project label is mandatory.</b> {@code
+ * <app>[.<env>].<project>.<domain>} — see {@link HostEnvironments}, which holds the whole of it.
+ * What is joined on here is what a deployment published, which is the one thing that class cannot
+ * know, and the apex is no longer rescued here at all: the domain is stated, so the reading finds
+ * it positionally like every other name.
  *
  * <p><b>Streaming is the reason for the shape.</b> {@code vertx-http-proxy} never buffers a request
  * or response body, so the platform's SSE channels, its {@code git clone}s and its OCI layer pushes
@@ -95,14 +92,25 @@ public class EdgeRouter {
   @Inject EdgeRoutes routes;
 
   /**
-   * The live project set, which is a routing input now as well as a certificate one: two of the
-   * four served spellings carry a project slug as a label, and only this knows which slugs exist.
+   * The live project projection, which is a routing input as well as a certificate one: every
+   * served name carries a project slug, and only this knows which slugs exist and which of them
+   * have a tier of environments under them.
    */
   @Inject EdgeProjects projects;
 
+  /**
+   * Where the stated domain comes from — see {@link #domain}. The certificate's domain is the same
+   * value read for the same reason: it is the one name the whole estate is inside.
+   */
+  @Inject AcmeConfig acme;
+
   @Inject DeploymentProjectionBootstrap projectionBootstrap;
 
-  /** Whether the project set above is complete — see {@link #projectsBehind}. */
+  /**
+   * Whether the project set above is complete. An unknown project label is the one reading a later
+   * frame can still change, so while this is false such a name is a retryable 503 rather than a
+   * 404.
+   */
   @Inject ProjectSansBootstrap projectSans;
 
   private HostEnvironments hostEnvironments;
@@ -196,7 +204,10 @@ public class EdgeRouter {
   void init(@Observes Router router) {
     hostEnvironments =
         HostEnvironments.of(
-            config.environments(), config.defaultEnvironment(), config.apps().keySet());
+            config.environments(),
+            config.defaultEnvironment(),
+            config.apps().keySet(),
+            domain(acme.domain(), sessions.canonicalAuthority()));
     client = vertx.createHttpClient(proxyClientOptions(5_000));
     webSocketUpgrade = new EdgeWebSocketUpgrade(client);
 
@@ -288,27 +299,25 @@ public class EdgeRouter {
       return;
     }
 
-    HostEnvironments.Route named = hostEnvironments.route(authority(request), projects.slugs());
-    if (!named.envExplicit()) {
-      // A name that states no environment. The apex is the one such name that is served — it is the
-      // default environment's door, and the canonical origin is what tells it apart from a service
-      // name with its environment left out. Everything else is answered with the spelling that
-      // works.
-      if (isApex(authority(request))) {
-        door(request, named.environment(), null);
-      } else if (projectsBehind(request)) {
+    HostEnvironments.Route named = hostEnvironments.route(authority(request), projects.projects());
+    if (named.reading() == HostEnvironments.Reading.UNKNOWN_PROJECT) {
+      // The one reading a later frame can still change, and the only one the catch-up barrier
+      // holds back: every other label is read by position, so nothing the projection learns moves
+      // it. While the barrier is up this name gets a retryable 503 rather than a 404 about a
+      // project that may well exist.
+      if (!projectSans.authoritative()) {
         projectsCatchingUp(request);
       } else {
-        shortForm(request, named);
+        unknownProject(request, named);
       }
+      return;
+    }
+    if (named.reading() == HostEnvironments.Reading.UNREADABLE) {
+      unreadable(request, named);
       return;
     }
     Target target = target(named);
     if (target == null) {
-      if (projectsBehind(request)) {
-        projectsCatchingUp(request);
-        return;
-      }
       // NOT a fall-through to the gateway. The name is app-shaped, so it was aimed at a service —
       // and no configuration and no deployment claims it. Answering here is the whole point: a
       // mistyped registry vhost must fail, not quietly reach an unauthenticated route.
@@ -326,28 +335,11 @@ public class EdgeRouter {
     }
 
     if (!target.service()) {
-      door(request, target.environment(), target.route().project());
+      door(request, target.route());
       return;
     }
 
     serviceGate(request, target);
-  }
-
-  /**
-   * Whether this name's 404 could turn into something else once the project projection catches up.
-   *
-   * <p>Two of the four served spellings carry a project slug, so a projection that is behind reads
-   * them as names nobody serves — {@code editor.acme.dev.example.com} short-form-404s at a name
-   * that also 404s, and {@code acme.dev.example.com} 404s as an unknown application. Both are the
-   * edge answering a question it cannot yet answer, so while {@link
-   * ProjectSansBootstrap#authoritative()} is false those names get a retryable 503 instead. {@link
-   * HostEnvironments#projectSensitive(String, java.util.Set)} decides which ones; everything else —
-   * a known app, a published host, the apex, an environment's own door — is untouched, and a
-   * restarted edge whose {@code edge_project} rows survived serves normally throughout.
-   */
-  private boolean projectsBehind(HttpServerRequest request) {
-    return !projectSans.authoritative()
-        && hostEnvironments.projectSensitive(authority(request), projects.slugs());
   }
 
   private void projectsCatchingUp(HttpServerRequest request) {
@@ -383,57 +375,40 @@ public class EdgeRouter {
           ? null
           : new Target(
               new HostEnvironments.Route(
-                  named.environment(), named.unknownApp(), null, named.project(), true),
+                  named.environment(),
+                  named.unknownApp(),
+                  null,
+                  named.project(),
+                  HostEnvironments.Reading.APP),
               published);
     }
-    if (named.toProjectDoor()) {
-      // The join HostEnvironments cannot make: a project's slug and a service's published name are
-      // both single labels in front of an environment, and only the projection knows the second
-      // set. A published service therefore claims the name, and the project's door is what is left
-      // when none does.
-      EdgeRoutes.ServiceHost published = routes.serviceHost(named.environment(), named.project());
-      return published == null
-          ? new Target(named, null)
-          : new Target(
-              new HostEnvironments.Route(named.environment(), named.project(), null), published);
-    }
+    // A door, and a door is never joined on: the grammar gives a published service name an APP
+    // position of its own, so nothing a deployment publishes can occupy a project's or an
+    // environment's name. That join existed because a slug and a published name used to be the same
+    // single label in front of an environment, which the project tier retired.
     return new Target(named, null);
   }
 
   /**
-   * Whether this name IS the apex, the one name that carries no environment label.
+   * The stated domain every served name is read from the right of.
    *
-   * <p>{@code example.com} and {@code ci.localhost} are the same shape and nothing in a name tells
-   * them apart, so without this the apex would be answered like any other name that states no
-   * environment: a 404 offering the spelling that works. The canonical origin is the one name a
-   * deployment always states, so it is what the apex is recognised by — and either spelling of it
-   * is read, exactly as {@link EnvironmentAuthority} reads it.
+   * <p>It cannot be derived from a host name — {@code example.co.uk} is two labels of domain and
+   * {@code localhost} is one — so it is a value this deployment already carries twice. The
+   * certificate's own domain is the first source and the honest one: the edge orders the names
+   * inside {@code qits.edge.acme.domain}, so that is by construction the domain the estate lives
+   * in. A local clone runs with ACME off and no domain at all, and there the canonical origin's
+   * authority is the same value — {@code localhost}.
+   *
+   * <p>Static so it can be asserted without a boot; see {@code EdgeRouterNamesTest}.
    */
-  private boolean isApex(String host) {
-    return isApex(host, sessions.canonicalAuthority(), hostEnvironments.defaultEnvironment());
+  static String domain(java.util.Optional<String> acmeDomain, String canonicalAuthority) {
+    String configured = acmeDomain.orElse("").strip();
+    return configured.isEmpty() ? EnvironmentAuthority.name(canonicalAuthority) : configured;
   }
 
   /**
-   * The same question without the beans, so it can be asserted without a boot — see {@code
-   * EdgeRouterNamesTest}.
-   *
-   * <p><b>The candidate is normalised the way every other consumer normalises a name.</b> It was a
-   * bare {@code strip()}, which is not the same thing: {@code Host: example.com.} — the root dot a
-   * resolver writes, and a spelling a client is entitled to send — missed the apex and fell through
-   * to a 404 offering a name the caller was already on. {@link HostEnvironments} and {@link
-   * EnvironmentAuthority} both drop the dot before they read a name; this is the third.
-   */
-  static boolean isApex(String host, String canonicalAuthority, String defaultEnvironment) {
-    if (canonicalAuthority == null || host == null) {
-      return false;
-    }
-    return EnvironmentAuthority.apex(canonicalAuthority, defaultEnvironment)
-        .equalsIgnoreCase(EnvironmentAuthority.name(host));
-  }
-
-  /**
-   * A door, which is a name that serves nothing: the environment's own name, and a project's own
-   * name inside it.
+   * A door, which is a name that serves nothing: the apex, a project's own name, and an
+   * environment's name inside a project.
    *
    * <p><b>It serves no path.</b> Every service is reached on its own name, so a route, an API, a
    * wire protocol or a login page offered here would be a second address for something that already
@@ -446,9 +421,12 @@ public class EdgeRouter {
    * else, so inventing a path for it here would be inventing qits-projects' routing table. The
    * edge's own {@code /q} and {@code /main-navigation} are answered before this.
    *
-   * @param project the project whose door this is, or null for the environment's own
+   * @param named the door's own reading — the apex, a project's name, or an environment's name
+   *     inside a project. Which of the three decides only the sentence; all three serve nothing.
    */
-  private void door(HttpServerRequest request, String environment, String project) {
+  private void door(HttpServerRequest request, HostEnvironments.Route named) {
+    String environment = named.environment();
+    String project = named.project();
     EdgeRoutes.ServiceHost projectsHost = routes.projectsHost(environment);
     boolean read = request.method() == HttpMethod.GET || request.method() == HttpMethod.HEAD;
     if (read && request.path().equals("/") && projectsHost != null) {
@@ -467,65 +445,117 @@ public class EdgeRouter {
         .setStatusCode(404)
         .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
         .end(
-            (project == null
-                    ? "This name is the environment door and serves nothing. Every service is on"
-                        + " its own name, `<app>."
-                        + authority.authority()
-                        + "`.\n"
-                    : "This name is the `"
-                        + project
-                        + "` project's door and serves nothing. Every service is on its own name,"
-                        + " `<app>."
-                        + project
-                        + "."
-                        + authority.authority()
-                        + "`.\n")
+            doorBody(named, hostEnvironments.domain())
                 + (projectsHost == null
                     ? ""
                     : "Start at " + authority.hostOrigin(projectsHost.host()) + "\n"));
   }
 
   /**
-   * What a name that states no environment is answered: a 404 naming the one that does.
+   * What a door says, which is the grammar with this name's own labels filled in.
    *
-   * <p><b>Not a redirect</b>, and that is a decision rather than an omission. A short name is a
-   * bookmark, a hard-coded string in a frontend, or a link somebody wrote down — a 302 would keep
-   * every one of them working and unfindable, while the environment label they are missing is
-   * exactly what decides which tier the request lands in. So it fails, it says what to type
-   * instead, and it says so at INFO once per request: that log line is how the callers that have
-   * not moved are found.
+   * <p>Built from the STATED domain and from labels the reading already resolved, never by splicing
+   * the {@code Host} header: a project slug printed here is one this edge knows, and the apex
+   * sentence names no caller input at all.
    *
-   * <p>The explicit name is built from {@link EnvironmentAuthority} — the same machinery every
-   * other origin here comes from — and never by splicing the {@code Host} header, which is caller
-   * input and would put whatever it held into an answer.
+   * <p>Static so the three sentences can be asserted without a boot — see {@code
+   * EdgeRouterNamesTest}.
    */
-  private void shortForm(HttpServerRequest request, HostEnvironments.Route named) {
-    EnvironmentAuthority authority = authorityOf(request);
-    String explicit;
-    if (named.project() != null) {
-      explicit =
-          named.unknownApp() == null
-              ? authority.hostOrigin(named.project())
-              : authority.projectHostOrigin(named.unknownApp(), named.project());
-    } else if (named.unknownApp() != null) {
-      explicit = authority.hostOrigin(named.unknownApp());
-    } else {
-      explicit = authority.origin();
-    }
-    LOG.infof(
-        "a name with no environment was dialled: %s %s on %s — the explicit name is %s",
-        request.method(), request.path(), authority(request), explicit);
+  static String doorBody(HostEnvironments.Route named, String domain) {
+    return switch (named.reading()) {
+      case PROJECT_DOOR ->
+          "This name is the `"
+              + named.project()
+              + "` project's door and serves nothing. Every application of it is on its own name, `"
+              + "<app>."
+              + named.project()
+              + "."
+              + domain
+              + "`.\n";
+      case ENVIRONMENT_DOOR ->
+          "This name is the `"
+              + named.environment()
+              + "` environment of the `"
+              + named.project()
+              + "` project and serves nothing. Every application in it is on its own name, `<app>."
+              + named.environment()
+              + "."
+              + named.project()
+              + "."
+              + domain
+              + "`.\n";
+      default ->
+          "This name serves nothing. Every application is inside a project, on `<app>.<project>."
+              + domain
+              + "` or `<app>.<env>.<project>."
+              + domain
+              + "`.\n";
+    };
+  }
+
+  /**
+   * What a name whose project label names no project is answered.
+   *
+   * <p>There is no refusal of its own and no redirect: a missing or mistyped project label is a
+   * name with a label wrong, which is an ordinary 404. It is answered only once {@link
+   * ProjectSansBootstrap#authoritative()} — before that the same name is a 503, because the
+   * projection may simply not have read that project yet.
+   */
+  private void unknownProject(HttpServerRequest request, HostEnvironments.Route named) {
+    LOG.infof("no such project: %s %s on %s", request.method(), request.path(), authority(request));
     request
         .response()
         .setStatusCode(404)
         .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
-        .end(
-            "This name states no environment, and the short spelling is no longer served: the"
-                + " environment label decides which tier a request reaches, and a project label in"
-                + " front of it would otherwise be indistinguishable from one.\n"
-                + "Use "
-                + explicit
-                + "\n");
+        .end(unknownProjectBody(named, hostEnvironments.domain()));
+  }
+
+  /**
+   * What a name the grammar cannot describe at all is answered: too many labels, or an environment
+   * label the named project does not have.
+   */
+  private void unreadable(HttpServerRequest request, HostEnvironments.Route named) {
+    LOG.infof(
+        "a name outside the grammar was dialled: %s %s on %s",
+        request.method(), request.path(), authority(request));
+    request
+        .response()
+        .setStatusCode(404)
+        .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
+        .end(unreadableBody(named, hostEnvironments.domain()));
+  }
+
+  /**
+   * <b>The project label came off the wire</b>, so it is echoed only when it IS a label — the same
+   * laundering {@link #unknownAppBody} does, and for the same reason: this string is written back
+   * to a caller who chose it. A {@code Host} of {@code ..example.com} would otherwise produce a
+   * sentence about an empty name, and anything smuggled past the header parser would come back
+   * verbatim.
+   */
+  static String unknownProjectBody(HostEnvironments.Route named, String domain) {
+    return (named.project() == null ? "That label" : "`" + named.project() + "`")
+        + " is not a project on this platform. Every name is read right to left — `<app>[.<env>]."
+        + "<project>."
+        + domain
+        + "` — so the label in front of `"
+        + domain
+        + "` is a project, and this one is not one.\n";
+  }
+
+  /** Why a name with a readable project label is still not a name. */
+  static String unreadableBody(HostEnvironments.Route named, String domain) {
+    return named.project() == null
+        ? "This name has more labels than the grammar has: a name is `<app>[.<env>].<project>."
+            + domain
+            + "` and nothing deeper.\n"
+        : "The `"
+            + named.project()
+            + "` project does not have an environment by that name. Its applications are on"
+            + " `<app>.<env>."
+            + named.project()
+            + "."
+            + domain
+            + "`.\n";
   }
 
   private static void redirect(HttpServerRequest request, String location) {
@@ -820,7 +850,7 @@ public class EdgeRouter {
    * proxying.
    */
   String environment(HttpServerRequest request) {
-    return hostEnvironments.route(authority(request), projects.slugs()).environment();
+    return hostEnvironments.route(authority(request), projects.projects()).environment();
   }
 
   private void unknownApp(HttpServerRequest request, HostEnvironments.Route route) {

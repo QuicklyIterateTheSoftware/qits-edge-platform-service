@@ -116,7 +116,9 @@ public class StoryProfile implements QuarkusTestProfile {
     // reader diffing a launch command should find them in it.
     Map<String, String> config = new LinkedHashMap<>();
 
-    config.put("QITS_RESOURCE_EDGE_URL", databaseUrl(EDGE_URL_PROPERTY, "edge_userflows_it"));
+    String edgeUrl = databaseUrl(EDGE_URL_PROPERTY, "edge_userflows_it");
+    seedProject(edgeUrl);
+    config.put("QITS_RESOURCE_EDGE_URL", edgeUrl);
     config.put("QITS_RESOURCE_EDGE_USERNAME", EmbeddedPg.USER);
     config.put("QITS_RESOURCE_EDGE_PASSWORD", EmbeddedPg.PASSWORD);
     config.put(
@@ -270,6 +272,54 @@ public class StoryProfile implements QuarkusTestProfile {
    * well inside the gap — so a slow machine makes the story slower and never makes it wrong.
    */
   static final long STREAM_GAP_MILLIS = 700;
+
+  /**
+   * The one project every name in this catalogue lives inside, written before the process starts.
+   *
+   * <p><b>It has to be a ROW rather than a key.</b> The grammar is read right to left and the
+   * project label is mandatory, so an edge whose projection knows no projects serves nothing at all
+   * — and that projection is loaded once, at {@code StartupEvent}, from PostgreSQL. A launched
+   * process has no qits-events to learn a project from (the bus is dark here on purpose, see the
+   * class javadoc), and a row written after it booted would be a row it never reads. So the
+   * migrations are run from this JVM first and the row is inserted behind them: the launched
+   * process then finds every migration applied, does nothing, and loads a projection that already
+   * holds {@code acme}.
+   *
+   * <p>Exactly the columns {@code EdgeProjects.apply} writes, because this stands in for the frame
+   * it would have written: present, with environments, at the epoch so any real frame would win.
+   */
+  private static synchronized void seedProject(String url) {
+    if (System.getProperty(PROJECT_SEEDED_PROPERTY) != null) {
+      return;
+    }
+    org.flywaydb.core.Flyway.configure()
+        .dataSource(url, EmbeddedPg.USER, EmbeddedPg.PASSWORD)
+        .locations("classpath:db/edge/migration")
+        .load()
+        .migrate();
+    try (java.sql.Connection connection =
+            java.sql.DriverManager.getConnection(url, EmbeddedPg.USER, EmbeddedPg.PASSWORD);
+        java.sql.PreparedStatement insert =
+            connection.prepareStatement(
+                """
+                insert into edge_project
+                  (slug, project_id, present, supports_environments, event_id, occurred_at)
+                values (?, ?, true, true, ?, ?)
+                on conflict (slug) do nothing
+                """)) {
+      insert.setString(1, StoryTarget.PROJECT);
+      insert.setString(2, "p-userflows");
+      insert.setString(3, "seeded-before-the-launch");
+      insert.setTimestamp(4, java.sql.Timestamp.from(Instant.EPOCH));
+      insert.executeUpdate();
+    } catch (java.sql.SQLException failure) {
+      throw new IllegalStateException("could not seed the story catalogue's project", failure);
+    }
+    System.setProperty(PROJECT_SEEDED_PROPERTY, "true");
+  }
+
+  /** Parked in the property table for the same reason as the urls: two classloaders, one JVM. */
+  private static final String PROJECT_SEEDED_PROPERTY = "qits.test.userflow-it.project-seeded";
 
   private static synchronized String databaseUrl(String property, String database) {
     String recorded = System.getProperty(property);

@@ -82,7 +82,7 @@ class EdgeChallengeTest {
     assertEquals(
         "prod-qits-artifacts",
         EdgeAuth.audienceFor(
-            HostEnvironments.Route.environment("prod"),
+            HostEnvironments.Route.apex("prod"),
             "{env}-qits-artifacts",
             Map.of("githost", githost)));
   }
@@ -222,7 +222,7 @@ class EdgeChallengeTest {
     // traffic. No value in this list may widen it — not even one that spells an environment name.
     assertFalse(
         EdgeAuth.anonymousRead(
-            HostEnvironments.Route.environment("dev"), HttpMethod.GET, Set.of("mirror", "dev")));
+            HostEnvironments.Route.apex("dev"), HttpMethod.GET, Set.of("mirror", "dev")));
   }
 
   @Test
