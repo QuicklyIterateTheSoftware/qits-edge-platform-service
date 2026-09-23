@@ -252,9 +252,19 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     config.put("qits.edge.apps.registry.audience-pattern", "{env}-qits-artifacts");
     config.put("qits.edge.apps.mirror.audience-pattern", "{env}-qits-artifacts");
     config.put("qits.edge.apps.editor.audience-pattern", "{env}-qits-artifacts");
-    // ONE of the two apps, which is the point: the exemption is per app label, so the suite has a
-    // vhost whose reads are open and a vhost that is not, side by side.
-    config.put("qits.edge.auth.anonymous-read-apps", "mirror");
+    // ONE of the two CONFIGURED apps, which is the point: the exemption is per app label, so the
+    // suite has a vhost whose reads are open and a vhost that is not, side by side.
+    //
+    // `landing` is the same pair again for the OTHER way a label reaches that gate. It is named
+    // here and configured NOWHERE — there is deliberately no `qits.edge.apps.landing.*` entry of
+    // any kind — so HostEnvironments can only ever answer it as an unknown app, and the only thing
+    // that can make it an app route is the deployment projection, which EdgeRouter.target()
+    // rebuilds the Route from. Adding an entry for it would quietly turn its coverage into a
+    // second copy of the `mirror` case. It mirrors the real qits-landing deployment: a public SSR
+    // page the edge knows only because a DeploymentActive said so. `ci` is projected the same way
+    // and is NOT named here, so the suite now has a projected-open name and a projected-gated name
+    // side by side, exactly as it already has for the configured pair.
+    config.put("qits.edge.auth.anonymous-read-apps", "mirror,landing");
     idpPort = bind("idp", idpServer(), 0);
     config.put("qits.idp.url", "http://127.0.0.1:" + idpPort + "/idp");
     // The three time bounds, shrunk to a suite's patience. Their SHIPPED values are pinned in

@@ -1324,6 +1324,31 @@ class EdgeRoutingTest {
                     new io.vertx.core.json.JsonArray().add(placement("system", "Overview", 1)))));
   }
 
+  /**
+   * An application the edge knows ONLY from the projection: {@code landing} has no {@code
+   * qits.edge.apps.landing} entry of any kind, so HostEnvironments can only answer its name as an
+   * unknown app, and it becomes an app route solely because {@code EdgeRouter.target()} rebuilds
+   * the Route with the projection's label as the app. That is the second of the two ways a label
+   * reaches the anonymous-read gate, and the one a public SSR landing page depends on.
+   *
+   * <p>Its endpoint points at the EDITOR stub deliberately, not mirror's. Every other exempted-read
+   * assertion in this file reads {@code mirror-dev}, so answering {@code editor-dev} here is what
+   * makes a 200 proof that the request reached the PROJECTION's own upstream rather than mirror's
+   * configured route happening to answer.
+   */
+  private void activateLanding() {
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", "qits-landing")
+                .put("environmentName", "dev")
+                .put("browserHost", "landing")
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(endpoint("/landing", upstream("qits.edge.apps.editor.hosts.dev"))))));
+  }
+
   private static JsonObject endpoint(String path, Upstream upstream) {
     return new JsonObject()
         .put("path", path)
@@ -1899,6 +1924,108 @@ class EdgeRoutingTest {
     // The exemption is applied AFTER the label resolves, so it cannot turn a typo into a route.
     // `mirro` is one letter from an app whose reads are open and is still nobody's name.
     assertEquals(404, client().get("mirro.dev.example.com", "/v2/").status());
+  }
+
+  @Test
+  void aProjectedExemptedAppVhostServesAnAnonymousGetFromItsOwnUpstream() {
+    // The second route to the same gate. `landing` is named in qits.edge.auth.anonymous-read-apps
+    // and configured nowhere, so HostEnvironments answers it as an unknown app; it reaches the
+    // exemption at all only because EdgeRouter.target() rebuilds the Route with the projection's
+    // label as the app, which is what makes toApp() true. This is the path a public SSR landing
+    // page depends on, and until now nothing exercised it. `editor-dev` rather than `mirror-dev`
+    // is the load-bearing half of the assertion: it is the projection's OWN upstream answering.
+    activateLanding();
+    EdgeClient.Answer answer = client().get("landing.dev.example.com", "/landing/");
+    assertEquals(200, answer.status());
+    assertEquals("editor-dev", answer.line("upstream"));
+  }
+
+  @Test
+  void theProjectedExemptedAppVhostIsRoutedByNothingButTheProjection() {
+    // The guard against this coverage silently degrading into a second copy of the `mirror` case:
+    // if anyone gives `landing` a qits.edge.apps entry it becomes a CONFIGURED label, the test
+    // above stops proving anything new, and this test is what fails instead.
+    assertFalse(
+        ConfigProvider.getConfig()
+            .getOptionalValue("qits.edge.apps.landing.host-pattern", String.class)
+            .isPresent(),
+        "`landing` must stay unconfigured or it is no longer the projected case");
+    assertFalse(
+        ConfigProvider.getConfig()
+            .getOptionalValue("qits.edge.apps.landing.hosts.dev", String.class)
+            .isPresent(),
+        "`landing` must stay unconfigured or it is no longer the projected case");
+
+    // And the sharpest proof that configuration is not quietly supplying the route: with the
+    // projection empty — @BeforeEach clears it — the very same anonymous read is nobody's name.
+    assertEquals(404, client().get("landing.dev.example.com", "/landing/").status());
+
+    activateLanding();
+    assertNotNull(
+        routes.serviceHost("dev", "landing"),
+        "the projection is the only thing on the estate that knows this name");
+  }
+
+  @Test
+  void aProjectedAnonymousReadArrivesWithTheReservedNamespaceEmpty() {
+    // Nobody vouched for anybody on this path, so there is no trusted identity to write — and
+    // doing nothing is exactly what would let a stranger's `X-Qits-User: admin` travel to a
+    // service that believes it. The strip cannot be conditional on there being a real identity to
+    // replace the forgery with: it is where there is none that a forgery survives. The rule is the
+    // whole `X-Qits-` prefix, not the three names the edge happens to write, so a name nobody has
+    // invented yet is stripped too.
+    activateLanding();
+    EdgeClient.Answer answer =
+        client()
+            .send(
+                HttpMethod.GET,
+                "landing.dev.example.com",
+                "/landing/",
+                null,
+                Map.of(
+                    "X-Qits-User", "admin",
+                    "X-Qits-User-Id", "00000000-0000-0000-0000-000000000000",
+                    "X-Qits-Roles", "qits:root",
+                    "X-Qits-Something-Nobody-Invented-Yet", "whatever"));
+
+    assertEquals(200, answer.status());
+    assertEquals("editor-dev", answer.line("upstream"));
+    assertNull(answer.upstreamHeader("X-Qits-User"));
+    assertNull(answer.upstreamHeader("X-Qits-User-Id"));
+    assertNull(answer.upstreamHeader("X-Qits-Roles"));
+    assertNull(answer.upstreamHeader("X-Qits-Something-Nobody-Invented-Yet"));
+  }
+
+  @Test
+  void aProjectedExemptedAppVhostStillGatesEveryWritingMethod() {
+    // The exemption is method-scoped on the projected path too: rebuilding the Route makes the
+    // label an app, it does not make the vhost open. A projected label is learned at RUNTIME from
+    // an event, so this is the half that keeps a deployment from publishing itself a writable
+    // door. Status and the absent upstream only: the challenge a projected vhost carries is built
+    // from the request authority rather than from a per-app entry it does not have, so pinning
+    // mirror's expected realm string here would assert the wrong thing.
+    activateLanding();
+    for (HttpMethod method :
+        new HttpMethod[] {HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE}) {
+      EdgeClient.Answer answer =
+          client().send(method, "landing.dev.example.com", "/landing/", "x", Map.of());
+      assertEquals(401, answer.status(), method + " must still be gated");
+      assertNull(answer.line("upstream"), method + " must not have reached the application");
+    }
+  }
+
+  @Test
+  void anotherProjectedAppThatWasNotNamedStillRefusesAnAnonymousRead() {
+    // The "one name over" property, for the dynamic path.
+    // `anAppThatWasNotNamedStillRefusesAnAnonymousRead` proves it for a configured label; this is
+    // the same property for a projected one, and it matters more here, because the projection is
+    // attacker-adjacent: a label the edge learned at runtime must never inherit the exemption of
+    // another label that happens to have been named.
+    activateLanding();
+    activateCi();
+    EdgeClient.Answer answer = client().get("ci.dev.example.com", "/ci/api/runs");
+    assertEquals(401, answer.status());
+    assertNull(answer.line("upstream"), "and it reached no upstream");
   }
 
   // --- the docker token endpoint ----------------------------------------------------------------
