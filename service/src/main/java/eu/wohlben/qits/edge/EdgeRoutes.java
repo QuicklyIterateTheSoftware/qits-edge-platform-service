@@ -33,6 +33,9 @@ import java.util.Set;
 @ApplicationScoped
 public class EdgeRoutes {
 
+  private static final org.jboss.logging.Logger LOG =
+      org.jboss.logging.Logger.getLogger(EdgeRoutes.class);
+
   /**
    * The navigation vocabulary, closed and in the order {@code /main-navigation} renders it.
    *
@@ -203,10 +206,11 @@ public class EdgeRoutes {
       Map<String, Map<String, ServiceHost>> hostsByApplication,
       Map<String, Map<String, String>> primaryPaths,
       Map<String, Map<String, String>> apiDocsPaths,
-      Map<String, List<NavigationPlacement>> navigation) {
+      Map<String, List<NavigationPlacement>> navigation,
+      Set<String> landings) {
 
     static View empty() {
-      return new View(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+      return new View(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Set.of());
     }
   }
 
@@ -225,6 +229,18 @@ public class EdgeRoutes {
     return host == null
         ? null
         : view.hostsByName().getOrDefault(environment, Map.of()).get(host.toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * The environments in which some deployment published the reserved {@link
+   * HostEnvironments#LANDING} label, which is the claim on a project's own door.
+   *
+   * <p>This is what turns a door into an application position — see {@link
+   * HostEnvironments#route(String, Map, Set)}. It is precomputed with the rest of the serving copy
+   * rather than scanned per request: every request asks it.
+   */
+  public Set<String> landingEnvironments() {
+    return view.landings();
   }
 
   /** This application's own public name in this environment, or null while it publishes none. */
@@ -497,6 +513,16 @@ public class EdgeRoutes {
   /**
    * A public name belongs to one service. The unique index is the belt; this is the refusal that
    * carries a reason, and it keeps the frame poison rather than an SQL error.
+   *
+   * <p><b>The reserved {@link HostEnvironments#LANDING} label is the one exception, and it is a LOG
+   * rather than a refusal.</b> Two deployables claiming a project's door is last-wins, because
+   * there is nothing here to compare a claimant against: the deployment frame carries an
+   * application name and no repository identity, so neither this hop nor the deployer can say which
+   * of the two is entitled to the door. Refusing would blank a project's front page over an
+   * ambiguity nobody can resolve from the frame, so the incumbent is displaced, the newest is
+   * served, and the collision is reported at ERROR with both names in it — a collision found inside
+   * a projection degrades to an answer, exactly as the certificate order drops project tiers past
+   * the SAN ceiling rather than refusing.
    */
   private static void rejectHostConflict(
       Connection connection, String environment, String application, String host)
@@ -504,6 +530,7 @@ public class EdgeRoutes {
     if (host == null) {
       return;
     }
+    String incumbent = null;
     try (PreparedStatement existing =
         connection.prepareStatement(
             "select application_name from edge_deployment_snapshot where environment_name = ? and browser_host = ? and application_name <> ?")) {
@@ -512,16 +539,30 @@ public class EdgeRoutes {
       existing.setString(3, application);
       try (ResultSet result = existing.executeQuery()) {
         if (result.next()) {
-          throw new IllegalArgumentException(
-              "The "
-                  + environment
-                  + " host `"
-                  + host
-                  + "` already belongs to "
-                  + result.getString(1)
-                  + ".");
+          incumbent = result.getString(1);
         }
       }
+    }
+    if (incumbent == null) {
+      return;
+    }
+    if (!HostEnvironments.LANDING.equals(host)) {
+      throw new IllegalArgumentException(
+          "The " + environment + " host `" + host + "` already belongs to " + incumbent + ".");
+    }
+    LOG.errorf(
+        "`%s` and `%s` both publish the reserved `%s` label in %s, so both claim that project's own"
+            + " door. Nothing in a deployment frame says which of them owns it, so the door is NOT"
+            + " blanked and NOT refused: `%s` is served from now on, and `%s` keeps its routes and"
+            + " loses its public name. One of the two has to stop declaring it.",
+        incumbent, application, host, environment, application, incumbent);
+    try (PreparedStatement displace =
+        connection.prepareStatement(
+            "update edge_deployment_snapshot set browser_host = null where environment_name = ? and browser_host = ? and application_name <> ?")) {
+      displace.setString(1, environment);
+      displace.setString(2, host);
+      displace.setString(3, application);
+      displace.executeUpdate();
     }
   }
 
@@ -644,13 +685,22 @@ public class EdgeRoutes {
             .thenComparing(NavigationPlacement::application);
     navigation.values().forEach(placements -> placements.sort(order));
 
+    Set<String> landings = new LinkedHashSet<>();
+    byName.forEach(
+        (environment, hosts) -> {
+          if (hosts.containsKey(HostEnvironments.LANDING)) {
+            landings.add(environment);
+          }
+        });
+
     return new View(
         immutable(routes),
         immutableMaps(byName),
         immutableMaps(byApplication),
         immutablePaths(primaryPaths),
         immutablePaths(apiDocsPaths),
-        immutable(navigation));
+        immutable(navigation),
+        Set.copyOf(landings));
   }
 
   private static <T> Map<String, List<T>> immutable(Map<String, List<T>> values) {
