@@ -299,7 +299,9 @@ public class EdgeRouter {
       return;
     }
 
-    HostEnvironments.Route named = hostEnvironments.route(authority(request), projects.projects());
+    HostEnvironments.Route named =
+        hostEnvironments.route(
+            authority(request), projects.projects(), routes.landingEnvironments());
     if (named.reading() == HostEnvironments.Reading.UNKNOWN_PROJECT) {
       // The one reading a later frame can still change, and the only one the catch-up barrier
       // holds back: every other label is read by position, so nothing the projection learns moves
@@ -312,7 +314,8 @@ public class EdgeRouter {
       }
       return;
     }
-    if (named.reading() == HostEnvironments.Reading.UNREADABLE) {
+    if (named.reading() == HostEnvironments.Reading.UNREADABLE
+        || named.reading() == HostEnvironments.Reading.RESERVED_LABEL) {
       unreadable(request, named);
       return;
     }
@@ -432,15 +435,23 @@ public class EdgeRouter {
    */
   private void door(HttpServerRequest request, HostEnvironments.Route named) {
     String environment = named.environment();
-    EdgeRoutes.ServiceHost projectsHost = routes.projectsHost(environment);
-    // Null when this door is inside no project — the apex, an address, a name outside the domain —
-    // and the canonical origin names none either. Every application address carries a project
-    // label now, so there is simply no name to send anybody to; see EnvironmentAuthority.
-    String projectsOrigin =
-        projectsHost == null ? null : authorityOf(request).hostOrigin(projectsHost.host());
+    String startAt;
+    if (named.reading() == HostEnvironments.Reading.PROJECT_LANDING_DOOR) {
+      // This project's root IS a deployment, and it runs one per environment like every other
+      // application — so the bare project name cannot be one of them and sends a browser to the
+      // DEFAULT environment's. EnvironmentAuthority composes that name from this same reading: the
+      // innermost door of an env-supporting project is its environment's.
+      startAt = authorityOf(request).origin();
+    } else {
+      EdgeRoutes.ServiceHost projectsHost = routes.projectsHost(environment);
+      // Null when this door is inside no project — the apex, an address, a name outside the domain
+      // — and the canonical origin names none either. Every application address carries a project
+      // label now, so there is simply no name to send anybody to; see EnvironmentAuthority.
+      startAt = projectsHost == null ? null : authorityOf(request).hostOrigin(projectsHost.host());
+    }
     boolean read = request.method() == HttpMethod.GET || request.method() == HttpMethod.HEAD;
-    if (read && request.path().equals("/") && projectsOrigin != null) {
-      redirect(request, projectsOrigin + "/");
+    if (read && request.path().equals("/") && startAt != null) {
+      redirect(request, startAt + "/");
       return;
     }
     // Once per request, at INFO: this is how anything still dialling a door is found. The door
@@ -455,7 +466,7 @@ public class EdgeRouter {
         .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
         .end(
             doorBody(named, hostEnvironments.domain())
-                + (projectsOrigin == null ? "" : "Start at " + projectsOrigin + "\n"));
+                + (startAt == null ? "" : "Start at " + startAt + "\n"));
   }
 
   /**
@@ -479,6 +490,17 @@ public class EdgeRouter {
               + "."
               + domain
               + "`.\n";
+      case PROJECT_LANDING_DOOR ->
+          "This name is the `"
+              + named.project()
+              + "` project's door, and its front page is a deployment that runs once per"
+              + " environment — so it is served at `"
+              + named.environment()
+              + "."
+              + named.project()
+              + "."
+              + domain
+              + "`, where `GET /` here sends a browser.\n";
       case ENVIRONMENT_DOOR ->
           "This name is the `"
               + named.environment()
@@ -551,6 +573,19 @@ public class EdgeRouter {
 
   /** Why a name with a readable project label is still not a name. */
   static String unreadableBody(HostEnvironments.Route named, String domain) {
+    if (named.reading() == HostEnvironments.Reading.RESERVED_LABEL) {
+      // `landing` means the project's root, which is `<project>.<domain>` — so the label is never a
+      // name of its own, whether or not a deployment published it. One thing, one address.
+      return "`"
+          + HostEnvironments.LANDING
+          + "` is not an application name: it is the label a deployment publishes to serve the `"
+          + named.project()
+          + "` project's own name, `"
+          + named.project()
+          + "."
+          + domain
+          + "`. That is where it is, and it is not also here.\n";
+    }
     return named.project() == null
         ? "This name has more labels than the grammar has: a name is `<app>[.<env>].<project>."
             + domain

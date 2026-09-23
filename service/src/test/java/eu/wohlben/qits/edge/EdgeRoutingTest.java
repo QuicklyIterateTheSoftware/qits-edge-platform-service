@@ -1218,6 +1218,168 @@ class EdgeRoutingTest {
    * last-writer-wins by {@code (occurredAt, eventId)} — so a row it left dated in the future would
    * make an ordinary create here a no-op, and the slug would simply not be there.
    */
+  // --- the reserved `landing` label, which is the project's own name ----------------------------
+
+  /**
+   * A deployable that wrote {@code host: landing}. The role of the repository behind it is no part
+   * of this — {@code -landing-app} and {@code -landing-service} publish the same label and claim
+   * the door identically — so the application name here is deliberately arbitrary.
+   */
+  private void activateLanding(String application, String environment, String path, String app) {
+    deployments.onFrame(
+        frame(
+            new JsonObject()
+                .put("applicationName", application)
+                .put("environmentName", environment)
+                .put("browserHost", HostEnvironments.LANDING)
+                .put(
+                    "endpoints",
+                    new io.vertx.core.json.JsonArray()
+                        .add(
+                            endpoint(
+                                path,
+                                upstream("qits.edge.apps." + app + ".hosts." + environment))))));
+  }
+
+  @Test
+  void anEnvLessProjectsOwnNameIsServedByItsLandingDeployment() {
+    // The door becomes the front of the product. `gizmo` is deployed once, so its landing IS
+    // `gizmo.example.com` — an ordinary deployment, reached through the ordinary gate.
+    activateProjects("prod");
+    EdgeClient.Answer door = client().get(FLAT_PROJECT + ".example.com", "/");
+    assertEquals(302, door.status(), "no landing publisher yet, so the built-in door stays");
+    assertEquals("http://projects.gizmo.example.com/", door.headers().get("location"));
+
+    activateLanding("gizmo-landing-app", "prod", "/landing", "mirror");
+
+    EdgeClient.Answer served = client().get(FLAT_PROJECT + ".example.com", "/", token("prod"));
+    assertEquals(200, served.status(), served.body());
+    assertEquals("mirror-prod", served.line("upstream"));
+  }
+
+  @Test
+  void anEnvSupportingProjectsEnvironmentDoorIsServedByThatEnvironmentsLanding() {
+    // One landing per tier, like every other application. `dev` has none here, so it is still the
+    // door it was — which is the whole of the join: published, or not.
+    activateProjects("dev");
+    activateLanding("acme-landing-service", "prod", "/landing", "mirror");
+
+    EdgeClient.Answer served = client().get("prod." + PROJECT + ".example.com", "/", token("prod"));
+    assertEquals(200, served.status(), served.body());
+    assertEquals("mirror-prod", served.line("upstream"));
+
+    EdgeClient.Answer door = client().get("dev." + PROJECT + ".example.com", "/");
+    assertEquals(302, door.status());
+    assertEquals("http://projects.dev.acme.example.com/", door.headers().get("location"));
+  }
+
+  @Test
+  void anEnvSupportingProjectsBareNameRedirectsToTheDefaultEnvironmentsLanding() {
+    // It cannot serve one itself — there are as many landings as environments and this name states
+    // none — so it stays a door, and the door now opens onto the project's own front page rather
+    // than onto the platform's.
+    activateProjects("prod");
+    activateLanding("acme-landing-app", "prod", "/landing", "mirror");
+
+    EdgeClient.Answer answer = client().get(PROJECT + ".example.com", "/");
+    assertEquals(302, answer.status());
+    assertEquals("http://prod.acme.example.com/", answer.headers().get("location"));
+    assertNull(answer.line("upstream"), "the bare name serves nothing itself");
+
+    // Every other path on it is the 404 a door has always been, and it names where the page is.
+    EdgeClient.Answer deep = client().get(PROJECT + ".example.com", "/deep/link");
+    assertEquals(404, deep.status());
+    assertTrue(deep.body().contains("prod.acme.example.com"), deep.body());
+  }
+
+  @Test
+  void aProjectWithNoLandingPublisherStillGetsTheBuiltInRedirect() {
+    // Nothing published it, so nothing changed: the door sends a visitor to the projects host.
+    activateProjects("prod");
+    activateProjects("dev");
+    assertEquals(
+        "http://projects.prod.acme.example.com/",
+        client().get(PROJECT + ".example.com", "/").headers().get("location"));
+    assertEquals(
+        "http://projects.dev.acme.example.com/",
+        client().get("dev." + PROJECT + ".example.com", "/").headers().get("location"));
+    assertEquals(
+        "http://projects.gizmo.example.com/",
+        client().get(FLAT_PROJECT + ".example.com", "/").headers().get("location"));
+  }
+
+  @Test
+  void theReservedLabelIsNotASecondAddressForTheDoorItServes() {
+    // One thing, one address. `landing.…` would be a second origin and a second cookie scope for a
+    // page that already has one, so it is a 404 that reaches nothing — published or not.
+    activateLanding("gizmo-landing-app", "prod", "/landing", "mirror");
+    for (String host :
+        List.of(
+            "landing." + FLAT_PROJECT + ".example.com",
+            "landing.prod." + PROJECT + ".example.com",
+            "landing.dev." + PROJECT + ".example.com")) {
+      EdgeClient.Answer answer = client().get(host, "/");
+      assertEquals(404, answer.status(), host);
+      assertNull(answer.line("upstream"), host + " must reach no upstream");
+      assertTrue(answer.body().contains("is not an application name"), answer.body());
+    }
+  }
+
+  @Test
+  void twoLandingPublishersAreLoggedAtErrorAndTheNewestIsServed() throws Exception {
+    // Last-wins, and it cannot be anything else: a deployment frame carries an application name and
+    // no repository identity, so there is nothing here to compare a claimant against. Refusing
+    // would blank a project's front page over an ambiguity nobody can resolve from the frame, so
+    // the newest is served and the collision is reported.
+    java.util.List<java.util.logging.LogRecord> errors = new java.util.ArrayList<>();
+    java.util.logging.Handler capture =
+        new java.util.logging.Handler() {
+          @Override
+          public void publish(java.util.logging.LogRecord record) {
+            if (record.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue()) {
+              errors.add(record);
+            }
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    java.util.logging.Logger logger =
+        java.util.logging.Logger.getLogger(EdgeRoutes.class.getName());
+    logger.addHandler(capture);
+    try {
+      activateLanding("gizmo-landing-app", "prod", "/first-landing", "mirror");
+      activateLanding("gizmo-landing-service", "prod", "/second-landing", "registry");
+
+      // Served, not blanked and not refused: the most recent claimant answers the door.
+      EdgeClient.Answer served = client().get(FLAT_PROJECT + ".example.com", "/", token("prod"));
+      assertEquals(200, served.status(), served.body());
+      assertEquals("registry-prod", served.line("upstream"));
+
+      // The displaced one is not rolled back — it keeps its routes and loses only the public name.
+      assertNull(routes.applicationHost("prod", "gizmo-landing-app"));
+      assertEquals("/first-landing", routes.primaryPath("prod", "gizmo-landing-app"));
+
+      String logged =
+          errors.stream()
+              .map(
+                  record ->
+                      record.getMessage() + " " + java.util.Arrays.toString(record.getParameters()))
+              .filter(message -> message.contains(HostEnvironments.LANDING))
+              .findFirst()
+              .orElse(null);
+      assertNotNull(logged, "the collision must be reported at ERROR: " + errors);
+      assertTrue(logged.contains("gizmo-landing-app"), logged);
+      assertTrue(logged.contains("gizmo-landing-service"), logged);
+      assertTrue(logged.contains("prod"), logged);
+    } finally {
+      logger.removeHandler(capture);
+    }
+  }
+
   private void publishProject() throws java.sql.SQLException {
     try (java.sql.Connection connection = edgeDataSource.getConnection();
         java.sql.PreparedStatement delete =
@@ -1407,8 +1569,8 @@ class EdgeRoutingTest {
   }
 
   /**
-   * An application the edge knows ONLY from the projection: {@code landing} has no {@code
-   * qits.edge.apps.landing} entry of any kind, so HostEnvironments can only answer its name as an
+   * An application the edge knows ONLY from the projection: {@code brochure} has no {@code
+   * qits.edge.apps.brochure} entry of any kind, so HostEnvironments can only answer its name as an
    * unknown app, and it becomes an app route solely because {@code EdgeRouter.target()} rebuilds
    * the Route with the projection's label as the app. That is the second of the two ways a label
    * reaches the anonymous-read gate, and the one a public SSR landing page depends on.
@@ -1418,17 +1580,17 @@ class EdgeRoutingTest {
    * makes a 200 proof that the request reached the PROJECTION's own upstream rather than mirror's
    * configured route happening to answer.
    */
-  private void activateLanding() {
+  private void activateBrochure() {
     deployments.onFrame(
         frame(
             new JsonObject()
-                .put("applicationName", "qits-landing")
+                .put("applicationName", "qits-brochure")
                 .put("environmentName", "dev")
-                .put("browserHost", "landing")
+                .put("browserHost", "brochure")
                 .put(
                     "endpoints",
                     new io.vertx.core.json.JsonArray()
-                        .add(endpoint("/landing", upstream("qits.edge.apps.editor.hosts.dev"))))));
+                        .add(endpoint("/brochure", upstream("qits.edge.apps.editor.hosts.dev"))))));
   }
 
   private static JsonObject endpoint(String path, Upstream upstream) {
@@ -2036,14 +2198,14 @@ class EdgeRoutingTest {
 
   @Test
   void aProjectedExemptedAppVhostServesAnAnonymousGetFromItsOwnUpstream() {
-    // The second route to the same gate. `landing` is named in qits.edge.auth.anonymous-read-apps
+    // The second route to the same gate. `brochure` is named in qits.edge.auth.anonymous-read-apps
     // and configured nowhere, so HostEnvironments answers it as an unknown app; it reaches the
     // exemption at all only because EdgeRouter.target() rebuilds the Route with the projection's
     // label as the app, which is what makes toApp() true. This is the path a public SSR landing
     // page depends on, and until now nothing exercised it. `editor-dev` rather than `mirror-dev`
     // is the load-bearing half of the assertion: it is the projection's OWN upstream answering.
-    activateLanding();
-    EdgeClient.Answer answer = client().get("landing.dev.acme.example.com", "/landing/");
+    activateBrochure();
+    EdgeClient.Answer answer = client().get("brochure.dev.acme.example.com", "/brochure/");
     assertEquals(200, answer.status());
     assertEquals("editor-dev", answer.line("upstream"));
   }
@@ -2051,26 +2213,26 @@ class EdgeRoutingTest {
   @Test
   void theProjectedExemptedAppVhostIsRoutedByNothingButTheProjection() {
     // The guard against this coverage silently degrading into a second copy of the `mirror` case:
-    // if anyone gives `landing` a qits.edge.apps entry it becomes a CONFIGURED label, the test
+    // if anyone gives `brochure` a qits.edge.apps entry it becomes a CONFIGURED label, the test
     // above stops proving anything new, and this test is what fails instead.
     assertFalse(
         ConfigProvider.getConfig()
-            .getOptionalValue("qits.edge.apps.landing.host-pattern", String.class)
+            .getOptionalValue("qits.edge.apps.brochure.host-pattern", String.class)
             .isPresent(),
-        "`landing` must stay unconfigured or it is no longer the projected case");
+        "`brochure` must stay unconfigured or it is no longer the projected case");
     assertFalse(
         ConfigProvider.getConfig()
-            .getOptionalValue("qits.edge.apps.landing.hosts.dev", String.class)
+            .getOptionalValue("qits.edge.apps.brochure.hosts.dev", String.class)
             .isPresent(),
-        "`landing` must stay unconfigured or it is no longer the projected case");
+        "`brochure` must stay unconfigured or it is no longer the projected case");
 
     // And the sharpest proof that configuration is not quietly supplying the route: with the
     // projection empty — @BeforeEach clears it — the very same anonymous read is nobody's name.
-    assertEquals(404, client().get("landing.dev.acme.example.com", "/landing/").status());
+    assertEquals(404, client().get("brochure.dev.acme.example.com", "/brochure/").status());
 
-    activateLanding();
+    activateBrochure();
     assertNotNull(
-        routes.serviceHost("dev", "landing"),
+        routes.serviceHost("dev", "brochure"),
         "the projection is the only thing on the estate that knows this name");
   }
 
@@ -2082,13 +2244,13 @@ class EdgeRoutingTest {
     // replace the forgery with: it is where there is none that a forgery survives. The rule is the
     // whole `X-Qits-` prefix, not the three names the edge happens to write, so a name nobody has
     // invented yet is stripped too.
-    activateLanding();
+    activateBrochure();
     EdgeClient.Answer answer =
         client()
             .send(
                 HttpMethod.GET,
-                "landing.dev.acme.example.com",
-                "/landing/",
+                "brochure.dev.acme.example.com",
+                "/brochure/",
                 null,
                 Map.of(
                     "X-Qits-User", "admin",
@@ -2112,11 +2274,11 @@ class EdgeRoutingTest {
     // door. Status and the absent upstream only: the challenge a projected vhost carries is built
     // from the request authority rather than from a per-app entry it does not have, so pinning
     // mirror's expected realm string here would assert the wrong thing.
-    activateLanding();
+    activateBrochure();
     for (HttpMethod method :
         new HttpMethod[] {HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE}) {
       EdgeClient.Answer answer =
-          client().send(method, "landing.dev.acme.example.com", "/landing/", "x", Map.of());
+          client().send(method, "brochure.dev.acme.example.com", "/brochure/", "x", Map.of());
       assertEquals(401, answer.status(), method + " must still be gated");
       assertNull(answer.line("upstream"), method + " must not have reached the application");
     }
@@ -2129,7 +2291,7 @@ class EdgeRoutingTest {
     // the same property for a projected one, and it matters more here, because the projection is
     // attacker-adjacent: a label the edge learned at runtime must never inherit the exemption of
     // another label that happens to have been named.
-    activateLanding();
+    activateBrochure();
     activateCi();
     EdgeClient.Answer answer = client().get("ci.dev.acme.example.com", "/ci/api/runs");
     assertEquals(401, answer.status());

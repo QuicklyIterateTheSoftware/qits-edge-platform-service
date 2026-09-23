@@ -50,6 +50,28 @@ import java.util.Set;
  * header are the same case, and the same answer — that is how the platform is reached before DNS
  * exists.
  *
+ * <p><b>{@code landing} is a reserved label: it means THIS PROJECT'S ROOT.</b> A deployable writes
+ * {@code host: landing} in its {@code .config/qits/deployments.yml} and the deployment it publishes
+ * answers the project's own door — {@code <project>.<domain>} — rather than a name of its own. The
+ * door is the front of the product, and what answers there is an ordinary deployment.
+ *
+ * <p>Three consequences, and all three are positional:
+ *
+ * <ul>
+ *   <li>a project door whose environment has a landing publisher is an APPLICATION position, not a
+ *       door. The label is joined on exactly as an app label is — see {@code landingEnvironments}
+ *       below and {@code EdgeRouter.target}, which resolves it against the same projection.
+ *   <li>{@code landing.<project>.<domain>} is NOT a second address for it. A reserved label at an
+ *       app position is {@link Reading#RESERVED_LABEL}, which is a 404: a thing that already has an
+ *       address does not get a second origin, a second cookie scope and a second thing to keep in
+ *       step.
+ *   <li>where nothing published it, the door is a door and the built-in redirect stays.
+ * </ul>
+ *
+ * <p>Nothing here asks what KIND of repository published the name. {@code <project>-landing-app}
+ * and {@code <project>-landing-service} claim the door identically, because both publish the same
+ * label and the label is all that reaches the wire — the convention is held by naming and review.
+ *
  * <p><b>An app label is refused when nothing serves it.</b> The last two readings above are aimed
  * at a service, and services are the names the edge authenticates. A fall-through would hand
  * exactly those requests to a hop that does not authenticate them, so an unconfigured app label is
@@ -72,6 +94,16 @@ import java.util.Set;
 public final class HostEnvironments {
 
   /**
+   * The reserved host label that means "this project's root": a deployment publishing it answers
+   * {@code <project>.<domain>} rather than a name of its own.
+   *
+   * <p>It is DECLARED, in a deployable's {@code host:}, and that is the whole of the claim. The
+   * repository's role — {@code <project>-landing-app}, {@code <project>-landing-service} — reaches
+   * nothing on the wire, so nothing here can ask about it and nothing here does.
+   */
+  public static final String LANDING = "landing";
+
+  /**
    * Which of the grammar's positions a name landed on. It is the whole answer: {@code EdgeRouter}
    * switches on it rather than inferring the reading from which components happen to be null.
    */
@@ -86,6 +118,14 @@ public final class HostEnvironments {
 
     /** {@code <project>.<domain>} — a project's own door, which also serves nothing. */
     PROJECT_DOOR,
+
+    /**
+     * {@code <project>.<domain>} in a project that has environments and whose DEFAULT environment
+     * has a landing publisher. Each environment runs its own landing, like every other application,
+     * so the bare project name cannot serve one of them — it is a door that sends {@code GET /} to
+     * the default environment's instead of to the platform's own front page.
+     */
+    PROJECT_LANDING_DOOR,
 
     /**
      * {@code <env>.<project>.<domain>} — one environment's door inside a project that has
@@ -107,6 +147,13 @@ public final class HostEnvironments {
      * change, so it is the one held behind the project catch-up barrier.
      */
     UNKNOWN_PROJECT,
+
+    /**
+     * A reserved label at an app position: {@code landing.<project>.<domain>}. The label means the
+     * project's root, which already has an address, so it is never a second one — a 404 no
+     * projection can rescue, whether or not anything published it.
+     */
+    RESERVED_LABEL,
 
     /**
      * A name the grammar does not describe at all: too many labels, or an environment label a
@@ -158,6 +205,14 @@ public final class HostEnvironments {
       return new Route(environment, null, null, project, Reading.PROJECT_DOOR);
     }
 
+    static Route projectLandingDoor(String environment, String project) {
+      return new Route(environment, null, null, project, Reading.PROJECT_LANDING_DOOR);
+    }
+
+    static Route reservedLabel(String environment, String project) {
+      return new Route(environment, null, null, project, Reading.RESERVED_LABEL);
+    }
+
     static Route environmentDoor(String environment, String project) {
       return new Route(environment, null, null, project, Reading.ENVIRONMENT_DOOR);
     }
@@ -188,11 +243,13 @@ public final class HostEnvironments {
 
     /**
      * Whether this name is a door: the apex, a project's own name, or an environment's name inside
-     * a project. A door routes nothing and serves nothing.
+     * a project. A door routes nothing and serves nothing — it only ever answers {@code GET /} with
+     * a redirect to somewhere that does.
      */
     public boolean toDoor() {
       return reading == Reading.APEX
           || reading == Reading.PROJECT_DOOR
+          || reading == Reading.PROJECT_LANDING_DOOR
           || reading == Reading.ENVIRONMENT_DOOR;
     }
   }
@@ -335,16 +392,35 @@ public final class HostEnvironments {
   }
 
   /**
-   * Where a Host name goes, in full.
+   * Where a Host name goes for a caller that has not read the deployment projection: no project
+   * door is claimed, so every one of them is the built-in door. It is what {@code
+   * EnvironmentAuthority} composes against, where only the position matters and never who serves
+   * it.
    *
-   * @param host a Host header or HTTP/2 {@code :authority} value; a port suffix, a trailing dot and
-   *     letter case are all tolerated, and {@code null} is the same as a name outside the domain
    * @param projects the projects that exist right now, slug to whether that project has a tier of
    *     environments under it — {@code EdgeProjects.projects()}. A parameter rather than state
    *     because it moves with the event stream while this object is built once, at boot, from
    *     configuration that does not.
    */
   public Route route(String host, Map<String, Boolean> projects) {
+    return route(host, projects, Set.of());
+  }
+
+  /**
+   * Where a Host name goes, in full.
+   *
+   * @param host a Host header or HTTP/2 {@code :authority} value; a port suffix, a trailing dot and
+   *     letter case are all tolerated, and {@code null} is the same as a name outside the domain
+   * @param projects the projects that exist right now, slug to whether that project has a tier of
+   *     environments under it — {@code EdgeProjects.projects()}
+   * @param landingEnvironments the environments in which some deployment published the reserved
+   *     {@link #LANDING} label — {@code EdgeRoutes.landingEnvironments()}. This is THE JOIN: a
+   *     project door is a door until a deployment claims it, exactly as an app label is a 404 until
+   *     one does, and it is the same projection answering both. A per-call parameter for the same
+   *     reason {@code projects} is: it moves with the event stream while this object is built once
+   *     at boot.
+   */
+  public Route route(String host, Map<String, Boolean> projects, Set<String> landingEnvironments) {
     String name = normalise(host);
     if (name.isEmpty() || isAddressLiteral(name) || name.equals(domain)) {
       return Route.apex(defaultEnvironment);
@@ -368,7 +444,16 @@ public final class HostEnvironments {
     }
     boolean supportsEnvironments = projects.get(project) == null || projects.get(project);
     if (labels.length == 1) {
-      return Route.projectDoor(defaultEnvironment, project);
+      if (!landingEnvironments.contains(defaultEnvironment)) {
+        // Nothing published the reserved label, so the door is the built-in one.
+        return Route.projectDoor(defaultEnvironment, project);
+      }
+      // An env-less project is deployed once, so its landing IS this name and serves it directly.
+      // An env-supporting one runs a landing per tier, like every other application, so the bare
+      // name is a door that sends a browser to the default environment's.
+      return supportsEnvironments
+          ? Route.projectLandingDoor(defaultEnvironment, project)
+          : landingRoute(defaultEnvironment, project);
     }
     if (labels.length == 2) {
       if (!supportsEnvironments) {
@@ -377,9 +462,14 @@ public final class HostEnvironments {
         // is deployed once, not once per environment.
         return appRoute(defaultEnvironment, labels[0], project);
       }
-      return environments.contains(labels[0])
-          ? Route.environmentDoor(labels[0], project)
-          : Route.unreadable(defaultEnvironment, project);
+      if (!environments.contains(labels[0])) {
+        return Route.unreadable(defaultEnvironment, project);
+      }
+      // This environment's own door, which that environment's landing deployment serves when there
+      // is one.
+      return landingEnvironments.contains(labels[0])
+          ? landingRoute(labels[0], project)
+          : Route.environmentDoor(labels[0], project);
     }
     // Three labels: <app>.<env>.<project>.
     if (!supportsEnvironments || !environments.contains(labels[1])) {
@@ -393,9 +483,27 @@ public final class HostEnvironments {
    * deployment-projection join the caller makes before it answers 404.
    */
   private Route appRoute(String environment, String label, String project) {
+    if (LANDING.equals(label)) {
+      // The reserved label at an app position. It is not a second address for the deployment that
+      // claimed the door, and it is not an app label either — it is a name that means a place the
+      // grammar already spells another way, so it is answered as a name outside the grammar is.
+      return Route.reservedLabel(environment, project);
+    }
     return apps.contains(label)
         ? Route.app(environment, label, project)
         : Route.unknownApp(environment, leading(label), project);
+  }
+
+  /**
+   * A door position a landing deployment claimed. It is carried as the label the deployment
+   * projection is asked about — the SAME position an unconfigured app label lands on — so {@code
+   * EdgeRouter.target} resolves it through the one join it already makes rather than through a
+   * second mechanism of its own. A claim that has been withdrawn between the two reads of the
+   * projection is answered exactly as any unclaimed label is, with a 404 that the next request no
+   * longer gets.
+   */
+  private static Route landingRoute(String environment, String project) {
+    return Route.unknownApp(environment, LANDING, project);
   }
 
   /** A label that is written into an answer, when it is one at all: it comes off the wire. */

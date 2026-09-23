@@ -11,6 +11,7 @@ import eu.wohlben.qits.edge.HostEnvironments.Route;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -362,5 +363,104 @@ class HostEnvironmentsTest {
         HostEnvironments.of(List.of("prod"), "prod", List.of("registry"), "  Wohlben.EU.  ");
     assertEquals("wohlben.eu", stated.domain());
     assertEquals(Route.apex("prod"), stated.route("wohlben.eu", PROJECTS));
+  }
+
+  // --- the reserved `landing` label
+  // ---------------------------------------------------------------
+
+  /** The environments in which something published the reserved label. Both, or neither. */
+  private static final Set<String> EVERYWHERE = Set.of("prod", "dev");
+
+  private static final Set<String> NOWHERE = Set.of();
+
+  @Test
+  void anEnvLessProjectsOwnNameIsServedByItsLandingDeployment() {
+    // The door is the front of the product: `qits` is deployed once, so its landing IS this name.
+    // It is carried as the label the deployment projection is asked about — the same position an
+    // unconfigured app label lands on, resolved by the same join.
+    assertEquals(
+        Route.unknownApp("prod", "landing", "qits"),
+        EDGE.route("qits.wohlben.eu", PROJECTS, EVERYWHERE));
+    assertFalse(EDGE.route("qits.wohlben.eu", PROJECTS, EVERYWHERE).toDoor());
+  }
+
+  @Test
+  void anEnvSupportingProjectsEnvironmentDoorIsServedByThatEnvironmentsLanding() {
+    // One landing per tier, like every other application: the dev name is served by dev's.
+    assertEquals(
+        Route.unknownApp("dev", "landing", "someproject"),
+        EDGE.route("dev.someproject.wohlben.eu", PROJECTS, EVERYWHERE));
+    assertEquals(
+        Route.unknownApp("prod", "landing", "someproject"),
+        EDGE.route("prod.someproject.wohlben.eu", PROJECTS, EVERYWHERE));
+    // And only where one is published. An environment whose landing is not deployed is the door it
+    // always was, which is what makes this a join rather than a rule.
+    assertEquals(
+        Route.environmentDoor("dev", "someproject"),
+        EDGE.route("dev.someproject.wohlben.eu", PROJECTS, Set.of("prod")));
+  }
+
+  @Test
+  void anEnvSupportingProjectsBareNameIsADoorOntoTheDefaultEnvironmentsLanding() {
+    // It cannot serve one itself: there are as many landings as environments and this name states
+    // none. So it stays a door, and the door's `GET /` goes to the DEFAULT environment's.
+    assertEquals(
+        Route.projectLandingDoor("prod", "someproject"),
+        EDGE.route("someproject.wohlben.eu", PROJECTS, EVERYWHERE));
+    assertTrue(EDGE.route("someproject.wohlben.eu", PROJECTS, EVERYWHERE).toDoor());
+    assertFalse(EDGE.route("someproject.wohlben.eu", PROJECTS, EVERYWHERE).toApp());
+    // The DEFAULT environment's, and no other: a landing deployed only in dev leaves the bare name
+    // with nothing of this project to send anybody to, so the built-in door redirect stays.
+    assertEquals(
+        Route.projectDoor("prod", "someproject"),
+        EDGE.route("someproject.wohlben.eu", PROJECTS, Set.of("dev")));
+  }
+
+  @Test
+  void aProjectWithNoLandingPublisherKeepsTheBuiltInDoor() {
+    assertEquals(
+        Route.projectDoor("prod", "qits"), EDGE.route("qits.wohlben.eu", PROJECTS, NOWHERE));
+    assertEquals(
+        Route.projectDoor("prod", "someproject"),
+        EDGE.route("someproject.wohlben.eu", PROJECTS, NOWHERE));
+    assertEquals(
+        Route.environmentDoor("dev", "someproject"),
+        EDGE.route("dev.someproject.wohlben.eu", PROJECTS, NOWHERE));
+    // The two-argument reading is that case spelled once: nothing published, so nothing is claimed.
+    assertEquals(
+        EDGE.route("someproject.wohlben.eu", PROJECTS),
+        EDGE.route("someproject.wohlben.eu", PROJECTS, NOWHERE));
+  }
+
+  @Test
+  void theReservedLabelIsNeverASecondAddressForTheDoorItServes() {
+    // `landing` means this project's root, and the root has an address already. At every app
+    // position, in either kind of project, and whether or not anything published it — the label is
+    // reserved by the grammar rather than by who happens to hold it.
+    for (Set<String> published : List.of(EVERYWHERE, NOWHERE)) {
+      assertEquals(
+          Route.reservedLabel("prod", "qits"),
+          EDGE.route("landing.qits.wohlben.eu", PROJECTS, published));
+      assertEquals(
+          Route.reservedLabel("dev", "someproject"),
+          EDGE.route("landing.dev.someproject.wohlben.eu", PROJECTS, published));
+      Route route = EDGE.route("landing.qits.wohlben.eu", PROJECTS, published);
+      assertFalse(route.toApp());
+      assertFalse(route.toDoor());
+      assertNull(route.app());
+      assertNull(route.unknownApp(), "it is not offered to the projection either");
+    }
+  }
+
+  @Test
+  void theReservedLabelIsReadAtAnAppPositionOnly() {
+    // A project may be CALLED landing — that is a different position, and positions do not collide.
+    Map<String, Boolean> projects = projects();
+    projects.put("landing", true);
+    assertEquals(
+        Route.projectDoor("prod", "landing"), EDGE.route("landing.wohlben.eu", projects, NOWHERE));
+    assertEquals(
+        Route.environmentDoor("dev", "landing"),
+        EDGE.route("dev.landing.wohlben.eu", projects, NOWHERE));
   }
 }

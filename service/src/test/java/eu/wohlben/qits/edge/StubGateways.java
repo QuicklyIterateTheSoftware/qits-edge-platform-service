@@ -256,16 +256,20 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // ONE of the two CONFIGURED apps, which is the point: the exemption is per app label, so the
     // suite has a vhost whose reads are open and a vhost that is not, side by side.
     //
-    // `landing` is the same pair again for the OTHER way a label reaches that gate. It is named
-    // here and configured NOWHERE — there is deliberately no `qits.edge.apps.landing.*` entry of
+    // `brochure` is the same pair again for the OTHER way a label reaches that gate. It is named
+    // here and configured NOWHERE — there is deliberately no `qits.edge.apps.brochure.*` entry of
     // any kind — so HostEnvironments can only ever answer it as an unknown app, and the only thing
     // that can make it an app route is the deployment projection, which EdgeRouter.target()
     // rebuilds the Route from. Adding an entry for it would quietly turn its coverage into a
-    // second copy of the `mirror` case. It mirrors the real qits-landing deployment: a public SSR
-    // page the edge knows only because a DeploymentActive said so. `ci` is projected the same way
-    // and is NOT named here, so the suite now has a projected-open name and a projected-gated name
-    // side by side, exactly as it already has for the configured pair.
-    config.put("qits.edge.auth.anonymous-read-apps", "mirror,landing");
+    // second copy of the `mirror` case. It stands for any public SSR page the edge knows only
+    // because a DeploymentActive said so. `ci` is projected the same way and is NOT named here, so
+    // the suite has a projected-open name and a projected-gated name side by side, exactly as it
+    // already has for the configured pair.
+    //
+    // It is deliberately NOT called `landing`: that label is reserved for a project's own root and
+    // is a 404 at every app position, so a fixture spelled that way would be testing the reserved
+    // reading rather than the projected one. See HostEnvironments.LANDING.
+    config.put("qits.edge.auth.anonymous-read-apps", "mirror,brochure");
     idpPort = bind("idp", idpServer(), 0);
     config.put("qits.idp.url", "http://127.0.0.1:" + idpPort + "/idp");
     // The three time bounds, shrunk to a suite's patience. Their SHIPPED values are pinned in
