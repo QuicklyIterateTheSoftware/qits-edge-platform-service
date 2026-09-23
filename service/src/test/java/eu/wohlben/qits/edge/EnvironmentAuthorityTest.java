@@ -1,170 +1,196 @@
 package eu.wohlben.qits.edge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
  * The origins one request's own name yields, without booting anything — the other half of {@code
  * HostEnvironmentsTest}. What is asserted here is written into a {@code Location} header and into
  * every entry of {@code /main-navigation}, so a wrong answer is a link the browser cannot follow.
+ *
+ * <p>The composition is the reading spelled forwards: {@code <app>[.<env>].<project>.<domain>}, and
+ * the env label is there exactly when the project supports environments. Both spellings are
+ * asserted for the SAME project below, because that is what the platform's own project does when a
+ * {@code ProjectChanged} frame flips its flag.
  */
 class EnvironmentAuthorityTest {
 
-  private static final List<String> ENVIRONMENTS = List.of("prod", "dev");
+  private static final String DOMAIN = "example.com";
 
-  /** The live set, as {@code EdgeProjects} serves it — the middle label of the four-label tier. */
-  private static final List<String> PROJECTS = List.of("acme", "qits");
+  /** Two environments and a default that is the other one, as the platform's own edge has. */
+  private static final HostEnvironments HOSTS =
+      HostEnvironments.of(List.of("prod", "dev"), "prod", Set.of("ci", "projects"), DOMAIN);
 
-  @Test
-  void anEnvironmentsOwnNameIsTheAuthorityItself() {
-    assertEquals("http://dev.example.com", of("dev.example.com").origin());
-    assertEquals("http://ci.dev.example.com", of("dev.example.com").hostOrigin("ci"));
-  }
+  /** The live projection: one project with a tier of environments, one without. */
+  private static final Map<String, Boolean> PROJECTS = projects("acme", true, "qits", false);
 
   @Test
-  void anApplicationsNameLosesItsFirstLabel() {
-    // Which is what lets the navigation document be identical on every vhost: the environment is
-    // the same place whichever of its services was asked.
-    assertEquals("http://dev.example.com", of("ci.dev.example.com").origin());
+  void anAppOfAnEnvSupportingProjectComposesOnItsEnvironmentsDoor() {
+    // `<app>.<env>.<project>.<domain>`, and the authority is everything behind the app label — so
+    // one label in front of it is another application of the same project, in the same environment.
+    assertEquals("http://dev.acme.example.com", of("ci.dev.acme.example.com").origin());
     assertEquals(
-        "http://registry.dev.example.com", of("ci.dev.example.com").hostOrigin("registry"));
+        "http://projects.dev.acme.example.com",
+        of("ci.dev.acme.example.com").hostOrigin("projects"));
+    assertEquals("acme", of("ci.dev.acme.example.com").project());
   }
 
   @Test
-  void theTieBreakIsTheSameAsTheRoutersOwn() {
-    // `dev.prod.example.com` reads as application `dev` in environment `prod`, exactly as
-    // HostEnvironments reads it, so its origins are prod's.
-    assertEquals("http://prod.example.com", of("dev.prod.example.com").origin());
+  void anAppOfAnEnvLessProjectHasNoEnvironmentLabelAtAll() {
+    // The whole difference, and it is not a special case: an env-less project holds its
+    // applications directly, so the innermost door is the project's own name.
+    assertEquals("http://qits.example.com", of("projects.qits.example.com").origin());
+    assertEquals("http://ci.qits.example.com", of("projects.qits.example.com").hostOrigin("ci"));
+    assertEquals("qits", of("projects.qits.example.com").project());
   }
 
   @Test
-  void theDefaultEnvironmentKeepsItsLabelLikeEveryOther() {
-    // FLIPPED. The default environment's authority used to be the apex, because the apex is its
-    // door — `ci.example.com` was where its ci service was. The project tier ended that spelling:
-    // with a project label in the middle, the short and long forms would need the same label read
-    // two ways. So there is one authority per environment now, and it carries the label.
-    assertEquals("http://prod.example.com", of("prod.example.com").origin());
-    assertEquals("http://ci.prod.example.com", of("prod.example.com").hostOrigin("ci"));
-    assertEquals("http://prod.example.com", of("ci.prod.example.com").origin());
-    assertEquals("http://ci.prod.example.com", of("ci.prod.example.com").hostOrigin("ci"));
-  }
-
-  @Test
-  void aProjectIsALabelInTheAuthorityAndTheApexIsWhatIsLeftAfterThree() {
-    // The name the four-label tier is for. Without this reading the editor's own host would fall
-    // through to the canonical origin and claim the DEFAULT environment — the navigation document
-    // would render dev's tree against prod's origins, which is the bug this exists to prevent.
-    assertEquals("http://dev.example.com", of("editor.acme.dev.example.com").origin());
-    assertEquals("http://ci.dev.example.com", of("editor.acme.dev.example.com").hostOrigin("ci"));
-    assertEquals("http://prod.example.com", of("editor.qits.prod.example.com").origin());
-    // A project's own door is one label in front of the environment, like a service's name.
-    assertEquals("http://dev.example.com", of("acme.dev.example.com").origin());
-    // And a middle label nobody created is not a project, so the name says nothing and falls back.
-    assertEquals("http://prod.example.com", of("editor.nosuchproject.dev.example.com").origin());
-  }
-
-  @Test
-  void aProjectHostOriginIsTwoLabelsInFrontOfTheEnvironment() {
-    // What `projectOrigin` in the navigation document is for: the client prefixes `editor.<slug>.`
-    // onto the authority, and this is the same name written here.
+  void oneProjectComposesBothShapesAccordingToItsFlag() {
+    // The platform's own project, on both sides of the day its flag flips. Nothing is hard-coded
+    // for it: the same slug composes `<app>.<env>.qits.<domain>` while it supports environments and
+    // `<app>.qits.<domain>` afterwards, from the projection alone.
+    Map<String, Boolean> tiered = projects("qits", true);
     assertEquals(
-        "http://editor.acme.dev.example.com",
-        of("dev.example.com").projectHostOrigin("editor", "acme"));
+        "http://projects.dev.qits.example.com",
+        EnvironmentAuthority.of(
+                "ci.dev.qits.example.com", null, "http", HOSTS, tiered, "example.com")
+            .hostOrigin("projects"));
+    Map<String, Boolean> flat = projects("qits", false);
     assertEquals(
-        "http://editor.acme.prod.example.com",
-        of("example.com").projectHostOrigin("editor", "acme"));
+        "http://projects.qits.example.com",
+        EnvironmentAuthority.of("ci.qits.example.com", null, "http", HOSTS, flat, "example.com")
+            .hostOrigin("projects"));
+    // A project the projection carries with no answer at all is one that HAS environments — the
+    // same compatibility rule HostEnvironments reads it by, so the two cannot disagree.
+    Map<String, Boolean> unstated = new LinkedHashMap<>();
+    unstated.put("qits", null);
     assertEquals(
-        "http://editor.acme.dev.localhost:8080",
-        local("dev.localhost:8080").projectHostOrigin("editor", "acme"));
+        "http://dev.qits.example.com",
+        EnvironmentAuthority.of(
+                "ci.dev.qits.example.com", null, "http", HOSTS, unstated, "example.com")
+            .origin());
   }
 
   @Test
-  void everyOtherEnvironmentKeepsItsLabel() {
-    assertEquals("http://dev.example.com", of("dev.example.com").origin());
-    assertEquals("http://ci.dev.example.com", of("ci.dev.example.com").hostOrigin("ci"));
+  void anEnvironmentDoorIsTheAuthorityItself() {
+    assertEquals("http://dev.acme.example.com", of("dev.acme.example.com").origin());
+    assertEquals("http://ci.dev.acme.example.com", of("dev.acme.example.com").hostOrigin("ci"));
+  }
+
+  @Test
+  void aProjectDoorComposesTheDefaultEnvironmentWhenTheProjectHasThem() {
+    // The name states a project and no environment, so the environment is the default — the same
+    // answer HostEnvironments gives that name, which is what keeps the door's redirect on a name
+    // the router serves.
+    assertEquals("http://prod.acme.example.com", of("acme.example.com").origin());
+    assertEquals(
+        "http://projects.prod.acme.example.com", of("acme.example.com").hostOrigin("projects"));
+    // And with no environments there is nothing to default: the door IS the authority.
+    assertEquals("http://qits.example.com", of("qits.example.com").origin());
+  }
+
+  @Test
+  void theNavigationDocumentIsTheSameOnEveryNameOfOnePlace() {
+    // Which is what lets a shell be served from any application of a project: the place is the
+    // same place whichever of its services was asked.
+    for (String host :
+        List.of(
+            "dev.acme.example.com", "ci.dev.acme.example.com", "nosuchapp.dev.acme.example.com")) {
+      assertEquals("http://dev.acme.example.com", of(host).origin(), host);
+      assertEquals("http://ci.dev.acme.example.com", of(host).hostOrigin("ci"), host);
+    }
+  }
+
+  @Test
+  void aNameInsideNoProjectComposesNoApplicationNameAtAll() {
+    // The apex, an address, a name outside the domain and a name whose project label names no
+    // project. Every application address carries a project label now, so there is no name to
+    // compose — and the honest answer is none, not one that 404s a hop later. `origin` stays the
+    // canonical origin, which is a door like the name that was asked.
+    for (String host :
+        List.of(
+            "example.com",
+            "example.com.",
+            "127.0.0.1",
+            "[::1]:8080",
+            "somewhere-else.test",
+            "dev.nosuchproject.example.com")) {
+      assertEquals("http://example.com", of(host).origin(), host);
+      assertNull(of(host).hostOrigin("projects"), host);
+      assertNull(of(host).project(), host);
+    }
+    assertEquals("http://example.com", of(null).origin(), "no Host header at all");
+    assertNull(of(null).hostOrigin("projects"));
+  }
+
+  @Test
+  void theCanonicalOriginIsReadByTheSameGrammarAndIsWhatGivesTheApexAFrontDoor() {
+    // The one name a deployment states about itself. Stated as the platform project's own door, it
+    // is what the apex composes on — which is how `https://wohlben.eu` can still send a visitor to
+    // a name that exists. Stated as the bare apex it names no project, and nothing composes.
+    assertEquals(
+        "http://projects.qits.example.com",
+        EnvironmentAuthority.of("example.com", null, "http", HOSTS, PROJECTS, "qits.example.com")
+            .hostOrigin("projects"),
+        "an env-less project's door");
+    assertEquals(
+        "http://projects.prod.acme.example.com",
+        EnvironmentAuthority.of("example.com", null, "http", HOSTS, PROJECTS, "acme.example.com")
+            .hostOrigin("projects"),
+        "an env-supporting project's door, in the default environment");
+    assertEquals(
+        "http://projects.dev.acme.example.com",
+        EnvironmentAuthority.of("127.0.0.1", null, "http", HOSTS, PROJECTS, "dev.acme.example.com")
+            .hostOrigin("projects"),
+        "a canonical origin that states an environment keeps it");
+    assertNull(
+        EnvironmentAuthority.of("example.com", null, "http", HOSTS, PROJECTS, "example.com")
+            .hostOrigin("projects"),
+        "the bare apex names no project, so the apex composes nothing");
   }
 
   @Test
   void thePortIsPartOfTheAnswer() {
     // A developer's whole platform is one port, so an origin without it names nothing.
-    assertEquals("http://dev.localhost:8080", of("dev.localhost:8080").origin());
-    assertEquals("http://ci.dev.localhost:8080", of("ci.dev.localhost:8080").hostOrigin("ci"));
+    assertEquals("http://dev.acme.localhost:8080", local("ci.dev.acme.localhost:8080").origin());
+    assertEquals(
+        "http://ci.dev.acme.localhost:8080", local("dev.acme.localhost:8080").hostOrigin("ci"));
+    assertEquals("http://qits.localhost:8080", local("projects.qits.localhost:8080").origin());
+    // Reached on the bare apex, or on nothing at all, it is the canonical origin's own port.
+    assertEquals("http://localhost:8080", local("localhost").origin());
+    assertEquals("http://localhost:8080", local(null).origin());
   }
 
   @Test
   void aTrailingDotAndLetterCaseAreTolerated() {
-    assertEquals("http://dev.example.com", of("DEV.Example.COM.").origin());
-  }
-
-  @Test
-  void theApexAnAddressAndAnUnknownNameFallBackToTheCanonicalOrigin() {
-    // None of them says which environment it is, so the answer is the configured apex with the
-    // default environment in front. The apex ITSELF is still the door — it is simply not a name
-    // anything derives, and a request that arrives on it is answered a name that carries a label.
-    assertEquals("http://prod.example.com", of("example.com").origin());
-    assertEquals("http://prod.example.com", of("staging.example.com").origin());
-    assertEquals("http://prod.example.com", of("127.0.0.1").origin());
-    assertEquals("http://prod.example.com", of("[::1]:8080").origin());
-    assertEquals("http://prod.example.com", of(null).origin());
-  }
-
-  @Test
-  void theCanonicalOriginKeepsItsOwnPortAndIsReadEitherWayItIsSpelled() {
-    // A single-label apex is now the same rule rather than an exception to one: `localhost` names
-    // every environment at once, and so does every other apex's authority now.
-    assertEquals(
-        "http://prod.localhost:8080",
-        EnvironmentAuthority.of(
-                null, null, "http", ENVIRONMENTS, "prod", PROJECTS, "localhost:8080")
-            .origin());
-    // And a canonical origin that already carries the default environment's label is read as the
-    // same apex, so a deployment cannot get `prod.prod.example.com` by spelling its origin either
-    // way.
-    assertEquals(
-        "http://prod.example.com",
-        EnvironmentAuthority.of(
-                "example.com", null, "http", ENVIRONMENTS, "prod", PROJECTS, "prod.example.com")
-            .origin());
-    assertEquals(
-        "example.com", EnvironmentAuthority.apex("prod.example.com", "prod"), "either spelling");
-    assertEquals("example.com", EnvironmentAuthority.apex("example.com", "prod"));
-    assertEquals(
-        "localhost",
-        EnvironmentAuthority.apex("dev.localhost:8080", "dev"),
-        "the label comes off a single-label apex too — the authority puts it straight back on");
-  }
-
-  @Test
-  void aDevelopersWholePlatformIsOnePortAndOneLabelApex() {
-    assertEquals("http://dev.localhost:8080", local("dev.localhost:8080").origin());
-    assertEquals("http://ci.dev.localhost:8080", local("ci.dev.localhost:8080").hostOrigin("ci"));
-    // Reached on the bare apex, or on nothing at all, it is the canonical origin's own port.
-    assertEquals("http://dev.localhost:8080", local("localhost:8080").origin());
-    assertEquals("http://dev.localhost:8080", local(null).origin());
+    assertEquals("http://dev.acme.example.com", of("CI.Dev.ACME.Example.COM.").origin());
   }
 
   @Test
   void aNameThatEndsAtTheLabelItWasReadForFallsBackInsteadOfThrowing() {
-    // Each of these MATCHES one of the readings above and then stops: there is no apex behind the
-    // label, so there is no origin to derive. They used to be a substring past the end of the
-    // string — an unauthenticated 500 on `/main-navigation` and on the door's own redirect, from a
-    // Host header anybody can send. The answer is the one an unusable name already got.
-    assertEquals("http://prod.example.com", of("prod").origin(), "an environment and nothing else");
-    assertEquals("http://prod.example.com", of("ci.dev").origin(), "$app.$env with no domain");
-    assertEquals("http://prod.example.com", of("acme.dev").origin(), "$project.$env, the same");
-    assertEquals(
-        "http://prod.example.com",
-        of("editor.acme.dev").origin(),
-        "the four-label reading, three labels long");
-    // The port a request carried is still the port its answer is written on, whichever arm
-    // answered.
-    assertEquals("http://dev.localhost:8080", local("ci.dev").origin());
-    // And the readings that DO have something behind them are untouched by the guard: `dev.dev` is
-    // environment `dev` under an apex spelled `dev`, which the first reading cannot serve and the
-    // third one can.
-    assertEquals("http://dev.dev", of("dev.dev").origin());
+    // A Host header is caller input, and these are names that stop before the domain does. There is
+    // no position to read, so there is no origin to derive: they are the apex reading, and the
+    // answer is the one an unusable name already gets. They used to be a substring past the end of
+    // the string — an unauthenticated 500 on `/main-navigation` and on the door's own redirect.
+    for (String host : List.of("prod", "ci.dev", "acme.dev", "ci.dev.acme", "example", "com")) {
+      assertEquals("http://example.com", of(host).origin(), host);
+      assertNull(of(host).hostOrigin("ci"), host);
+    }
+  }
+
+  @Test
+  void aNameTheGrammarCannotDescribeStillNamesItsProjectsDoor() {
+    // Too many labels names no project at all. An environment the project does not have names one,
+    // so its 404 can still say where to start — the default environment of the project it named.
+    assertEquals("http://example.com", of("a.b.c.acme.example.com").origin());
+    assertNull(of("a.b.c.acme.example.com").hostOrigin("projects"));
+    assertEquals("http://prod.acme.example.com", of("ci.staging.acme.example.com").origin());
   }
 
   @Test
@@ -172,49 +198,47 @@ class EnvironmentAuthorityTest {
     // A TLS terminator in front of the edge is the only hop that knows the answer, and the header
     // is a list with the outermost hop first.
     assertEquals(
-        "https://dev.example.com",
-        EnvironmentAuthority.of(
-                "dev.example.com", "https", "http", ENVIRONMENTS, "prod", PROJECTS, "example.com")
+        "https://dev.acme.example.com",
+        EnvironmentAuthority.of("ci.dev.acme.example.com", "https", "http", HOSTS, PROJECTS, DOMAIN)
             .origin());
     assertEquals(
-        "https://dev.example.com",
+        "https://ci.qits.example.com",
         EnvironmentAuthority.of(
-                "dev.example.com",
-                "https, http",
-                "http",
-                ENVIRONMENTS,
-                "prod",
-                PROJECTS,
-                "example.com")
-            .origin());
+                "projects.qits.example.com", "https, http", "http", HOSTS, PROJECTS, DOMAIN)
+            .hostOrigin("ci"));
     assertEquals(
-        "http://dev.example.com",
+        "http://dev.acme.example.com",
         EnvironmentAuthority.of(
-                "dev.example.com", "gopher", "http", ENVIRONMENTS, "prod", PROJECTS, "example.com")
+                "ci.dev.acme.example.com", "gopher", "http", HOSTS, PROJECTS, DOMAIN)
             .origin(),
         "a value that is not a scheme is not believed");
-    // The scheme reaches the project tier's origins too — they are built from the same two halves.
     assertEquals(
-        "https://editor.acme.dev.example.com",
-        EnvironmentAuthority.of(
-                "editor.acme.dev.example.com",
-                "https",
-                "http",
-                ENVIRONMENTS,
-                "prod",
-                PROJECTS,
-                "example.com")
-            .projectHostOrigin("editor", "acme"));
+        "https://dev.acme.example.com",
+        EnvironmentAuthority.of("ci.dev.acme.example.com", null, "HTTPS", HOSTS, PROJECTS, DOMAIN)
+            .origin(),
+        "and with nothing forwarded it is the scheme this process was reached over");
   }
 
   private static EnvironmentAuthority of(String host) {
-    return EnvironmentAuthority.of(
-        host, null, "http", ENVIRONMENTS, "prod", PROJECTS, "example.com");
+    return EnvironmentAuthority.of(host, null, "http", HOSTS, PROJECTS, DOMAIN);
   }
 
-  /** A developer's platform: one environment, and it is the default, on a single-label apex. */
+  /** A developer's platform: one environment, and it is the default, on a single-label domain. */
   private static EnvironmentAuthority local(String host) {
     return EnvironmentAuthority.of(
-        host, null, "http", List.of("dev"), "dev", PROJECTS, "dev.localhost:8080");
+        host,
+        null,
+        "http",
+        HostEnvironments.of(List.of("dev"), "dev", Set.of("ci", "projects"), "localhost"),
+        PROJECTS,
+        "localhost:8080");
+  }
+
+  private static Map<String, Boolean> projects(Object... slugsAndFlags) {
+    Map<String, Boolean> projects = new LinkedHashMap<>();
+    for (int i = 0; i < slugsAndFlags.length; i += 2) {
+      projects.put((String) slugsAndFlags[i], (Boolean) slugsAndFlags[i + 1]);
+    }
+    return projects;
   }
 }

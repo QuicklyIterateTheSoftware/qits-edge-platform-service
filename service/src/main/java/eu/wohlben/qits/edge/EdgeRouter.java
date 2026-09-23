@@ -421,16 +421,26 @@ public class EdgeRouter {
    * else, so inventing a path for it here would be inventing qits-projects' routing table. The
    * edge's own {@code /q} and {@code /main-navigation} are answered before this.
    *
+   * <p><b>A door inside no project has nowhere to send anybody.</b> qits-projects is reached at
+   * {@code projects.<project>.<domain>} like every other application, so composing that name needs
+   * a project label — and the apex, an address literal and a name outside the domain carry none.
+   * When the canonical origin supplies none either, this answers the 404 with the grammar and no
+   * {@code Start at} line, rather than redirecting to a name that would 404 one hop later.
+   *
    * @param named the door's own reading — the apex, a project's name, or an environment's name
    *     inside a project. Which of the three decides only the sentence; all three serve nothing.
    */
   private void door(HttpServerRequest request, HostEnvironments.Route named) {
     String environment = named.environment();
-    String project = named.project();
     EdgeRoutes.ServiceHost projectsHost = routes.projectsHost(environment);
+    // Null when this door is inside no project — the apex, an address, a name outside the domain —
+    // and the canonical origin names none either. Every application address carries a project
+    // label now, so there is simply no name to send anybody to; see EnvironmentAuthority.
+    String projectsOrigin =
+        projectsHost == null ? null : authorityOf(request).hostOrigin(projectsHost.host());
     boolean read = request.method() == HttpMethod.GET || request.method() == HttpMethod.HEAD;
-    if (read && request.path().equals("/") && projectsHost != null) {
-      redirect(request, authorityOf(request).hostOrigin(projectsHost.host()) + "/");
+    if (read && request.path().equals("/") && projectsOrigin != null) {
+      redirect(request, projectsOrigin + "/");
       return;
     }
     // Once per request, at INFO: this is how anything still dialling a door is found. The door
@@ -439,16 +449,13 @@ public class EdgeRouter {
     LOG.infof(
         "the door serves nothing: %s %s on %s",
         request.method(), request.path(), authority(request));
-    EnvironmentAuthority authority = authorityOf(request);
     request
         .response()
         .setStatusCode(404)
         .putHeader(HttpHeaders.CONTENT_TYPE, "text/plain; charset=utf-8")
         .end(
             doorBody(named, hostEnvironments.domain())
-                + (projectsHost == null
-                    ? ""
-                    : "Start at " + authority.hostOrigin(projectsHost.host()) + "\n"));
+                + (projectsOrigin == null ? "" : "Start at " + projectsOrigin + "\n"));
   }
 
   /**
@@ -577,9 +584,8 @@ public class EdgeRouter {
         authorityWithPort(request),
         request.getHeader(EdgeHeaders.PROTO),
         request.scheme(),
-        hostEnvironments.environments(),
-        hostEnvironments.defaultEnvironment(),
-        projects.slugs(),
+        hostEnvironments,
+        projects.projects(),
         sessions.canonicalAuthority());
   }
 
@@ -709,10 +715,12 @@ public class EdgeRouter {
    * written against this request's own environment origin.
    *
    * <p><b>The login moved off the door with every other service.</b> idp publishes {@code idp}, so
-   * the page is at {@code https://idp.example.com/idp/login}. The canonical origin cannot follow
-   * it: it is also the authority the default environment's names are derived from — see {@link
-   * #canonicalApex} and {@link EnvironmentAuthority} — so it stays the door and is only the
-   * fallback here.
+   * the page is at {@code https://idp.<env>.<project>.<domain>/idp/login}. The canonical origin
+   * cannot follow it: it is also the origin a name that names no project falls back to — see {@link
+   * EnvironmentAuthority} — so it stays the door and is only the fallback here.
+   *
+   * <p>It is null, and the canonical origin answers, when the name this request arrived on is
+   * inside no project: there is then no application address to compose at all.
    *
    * <p>idp is a PLATFORM service, deployed once. So an environment that owns no route for the login
    * path asks the default environment before giving up.

@@ -34,13 +34,19 @@ import java.util.List;
  * serves nothing else.
  *
  * <p><b>{@code projectOrigin} is the origin a per-project name is built on</b>: prefix {@code
- * <app>.<slug>.} onto its authority and that is where that application serves that project, {@code
- * https://editor.acme.dev.example.com}. It is equal to {@code origin} — every environment's
- * authority carries its own label now, so there is one origin per environment and not two — and it
- * is published anyway, because it is the FIELD that is the contract rather than the value. It
- * exists because the client side derived this name itself twice and shipped two domain-derivation
- * bugs doing it (editor-origin.ts): the server states the authority, and the client's whole job is
- * to put {@code editor.<slug>.} in front of it.
+ * <app>.} onto its authority and that is where that application serves this project, {@code
+ * https://editor.dev.acme.example.com}. ONE label — the project label is inside the authority
+ * already, because a name is read right to left and every address this edge composes is inside a
+ * project. It is equal to {@code origin} and is published anyway, because it is the FIELD that is
+ * the contract rather than the value. It exists because the client side derived this name itself
+ * twice and shipped two domain-derivation bugs doing it (editor-origin.ts): the server states the
+ * authority, and the client's whole job is to put {@code editor.} in front of it.
+ *
+ * <p><b>An entry's origin is null on a name that is inside no project</b> — the apex, an address
+ * literal, a name outside the domain — because an application address needs a project label and
+ * such a name carries none; a link that would 404 is worse than an absent one. {@code origin} and
+ * {@code projectOrigin} are then the canonical origin, which is a door like the name asked on. No
+ * shell reads the document there: every one of those names is a door, and a door serves no SPA.
  *
  * <p>{@code applications} is per-application metadata rather than a placement: one object per
  * application that published an api-docs path, keyed by application name. The path is served on the

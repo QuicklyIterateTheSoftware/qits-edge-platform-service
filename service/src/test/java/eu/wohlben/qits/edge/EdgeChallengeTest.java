@@ -394,12 +394,14 @@ class EdgeChallengeTest {
     // here rather than left to a deployment to keep in step.
     assertEquals("qits-session", sessionDefault("cookieName"));
     assertEquals("http://localhost:8080", sessionDefault("canonicalOrigin"));
-    // The three names a clone serves, not one. `localhost:8080` alone covered the APEX — the one
-    // name no service is on — so with the environment label no longer optional, a login started on
-    // `ci.prod.localhost:8080` had nowhere to return to. The canonical origin stays in the list
-    // because startup refuses a list without it.
+    // The names a clone serves, which are read right to left now: every one of them is inside the
+    // platform's own project, `qits`. Both of its shapes are listed, because which one it serves is
+    // its `supportsEnvironments` flag and that is live data rather than configuration — `*.qits`
+    // while it has no environments, `*.prod.qits` while it has. The canonical origin stays in the
+    // list because startup refuses a list without it.
     assertEquals(
-        "localhost:8080,prod.localhost:8080,*.prod.localhost:8080", sessionDefault("browserHosts"));
+        "localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080",
+        sessionDefault("browserHosts"));
     assertEquals("/idp/login", sessionDefault("loginPath"));
     assertEquals("/idp/", sessionDefault("anonymousPrefixes"));
     assertEquals("30000", sessionDefault("cacheTtlMs"));
@@ -545,31 +547,42 @@ class EdgeChallengeTest {
 
   @Test
   void aWildcardEntryCoversExactlyOneLabel() {
-    // The whole matcher, and the reason it is not a suffix test. `*.dev.wohlben.eu` is one line
-    // that follows a deployment's application list — every service of an environment is its own
-    // browser host, the editor included, now that it is one shared container on an ordinary app
-    // vhost rather than a name per project.
-    Set<String> exact = EdgeSessions.browserHosts(List.of("wohlben.eu", "dev.wohlben.eu"));
+    // The whole matcher, and the reason it is not a suffix test. The names are read right to left —
+    // `<app>[.<env>].<project>.<domain>` — so a wildcard sits in front of a project's innermost
+    // door and covers that project's applications without listing them: `*.dev.acme.wohlben.eu` for
+    // an env-supporting project, `*.qits.wohlben.eu` for an env-less one.
+    Set<String> exact =
+        EdgeSessions.browserHosts(List.of("wohlben.eu", "dev.acme.wohlben.eu", "qits.wohlben.eu"));
     List<String> wildcards =
-        EdgeSessions.wildcardBrowserHosts(List.of("wohlben.eu", "*.dev.wohlben.eu"));
+        EdgeSessions.wildcardBrowserHosts(
+            List.of("wohlben.eu", "*.dev.acme.wohlben.eu", "*.qits.wohlben.eu"));
 
     assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards), "an entry");
-    assertTrue(EdgeSessions.browserHost("ci.dev.wohlben.eu", exact, wildcards));
+    assertTrue(EdgeSessions.browserHost("dev.acme.wohlben.eu", exact, wildcards), "and another");
     assertTrue(
-        EdgeSessions.browserHost("editor.dev.wohlben.eu", exact, wildcards),
+        EdgeSessions.browserHost("ci.dev.acme.wohlben.eu", exact, wildcards),
+        "an app of an env-supporting project");
+    assertTrue(
+        EdgeSessions.browserHost("editor.dev.acme.wohlben.eu", exact, wildcards),
         "the editor, an app vhost like any other");
+    assertTrue(
+        EdgeSessions.browserHost("projects.qits.wohlben.eu", exact, wildcards),
+        "an app of an env-LESS project, which carries no environment label at all");
     // TWO labels is another site to a browser, and a return target this process must not reflect —
-    // subdomain takeover is what an open list would cost. No project set widens this any more.
-    assertFalse(EdgeSessions.browserHost("evil.co.dev.wohlben.eu", exact, wildcards));
+    // subdomain takeover is what an open list would cost.
+    assertFalse(EdgeSessions.browserHost("evil.co.dev.acme.wohlben.eu", exact, wildcards));
     assertFalse(
-        EdgeSessions.browserHost("editor.acme.dev.wohlben.eu", exact, wildcards),
-        "the retired four-label editor name reads as two labels and nothing else");
-    assertFalse(EdgeSessions.browserHost("a.b.c.dev.wohlben.eu", exact, wildcards), "three");
+        EdgeSessions.browserHost("ci.dev.qits.wohlben.eu", exact, wildcards),
+        "an environment label this list did not open is two labels in front of `qits`");
     assertFalse(
-        EdgeSessions.browserHost("dev.wohlben.eu.evil.example", exact, wildcards),
+        EdgeSessions.browserHost("ci.dev.gizmo.wohlben.eu", exact, wildcards),
+        "a project nobody listed, which is the whole point of an allow-list");
+    assertFalse(EdgeSessions.browserHost("a.b.c.dev.acme.wohlben.eu", exact, wildcards), "three");
+    assertFalse(
+        EdgeSessions.browserHost("dev.acme.wohlben.eu.evil.example", exact, wildcards),
         "the entry is a suffix of this name and matches nothing");
     // The port is part of the authority on both sides, so a name on another port matches nothing.
-    assertFalse(EdgeSessions.browserHost("ci.dev.wohlben.eu:8443", exact, wildcards));
+    assertFalse(EdgeSessions.browserHost("ci.dev.acme.wohlben.eu:8443", exact, wildcards));
     assertFalse(EdgeSessions.browserHost(null, exact, wildcards));
   }
 

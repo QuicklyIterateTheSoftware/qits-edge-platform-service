@@ -59,8 +59,15 @@ class EdgeRoutingTest {
   @DataSource("edge")
   AgroalDataSource edgeDataSource;
 
-  /** The project every name in the project tiers is spelled with here. */
+  /** The project every name in the project tiers is spelled with here. It has environments. */
   private static final String PROJECT = "acme";
+
+  /**
+   * A project that has NO environments, whose applications therefore carry no environment label —
+   * {@code <app>.gizmo.example.com}, served in the default environment. It is the shape the
+   * platform's own project takes once its {@code supportsEnvironments} flag is off.
+   */
+  private static final String FLAT_PROJECT = "gizmo";
 
   private static EdgeClient client;
 
@@ -924,11 +931,15 @@ class EdgeRoutingTest {
     // name that IS it. The trailing dot a resolver writes is the same name, as it is everywhere.
     activateProjects("prod");
     for (String apex : List.of("example.com", "example.com.")) {
+      // And it no longer redirects. qits-projects is at `projects.<project>.<domain>` like every
+      // other application, so composing that name needs a project label — the apex carries none,
+      // and this deployment's canonical origin (`https://example.com`) names none either. It used
+      // to send a visitor to `http://projects.prod.example.com/`, which is not a name any more.
       EdgeClient.Answer landing = client().get(apex, "/");
-      assertEquals(302, landing.status(), apex);
-      // The origin this redirect is written on is composed by EnvironmentAuthority, which still
-      // spells the OLD grammar — that is the next task, and it is why this names no project.
-      assertEquals("http://projects.prod.example.com/", landing.headers().get("location"), apex);
+      assertEquals(404, landing.status(), apex);
+      assertNull(landing.headers().get("location"), apex);
+      assertTrue(landing.body().contains("Every application is inside a project"), landing.body());
+      assertFalse(landing.body().contains("Start at"), landing.body());
     }
     EdgeClient.Answer elsewhere = client().get("example.com", "/anything");
     assertEquals(404, elsewhere.status());
@@ -985,7 +996,10 @@ class EdgeRoutingTest {
       assertEquals(
           "mirror-dev",
           client().get("ci.dev.acme.example.com", "/", token("dev")).line("upstream"));
-      assertEquals(302, client().get("example.com", "/").status());
+      // The apex is answered rather than held — a 404 rather than the 503 the barrier writes,
+      // because no slug this projection has yet to read could turn a name inside no project into
+      // an application address.
+      assertEquals(404, client().get("example.com", "/").status());
       assertEquals(404, client().get("dev.acme.example.com", "/anything").status());
       assertEquals(
           "editor-dev",
@@ -1017,8 +1031,8 @@ class EdgeRoutingTest {
     // FLIPPED. These origins used to be written in the SHORT form — `http://example.com` and
     // `http://ci.example.com` — because the default environment's door was the apex. They are the
     // names the shell links to, so they have to be names that still resolve, and only the labelled
-    // spelling does. The APEX is not asked here: its origins are still composed from the canonical
-    // origin in the old grammar, which is the next task rather than this one.
+    // spelling does. The APEX is not asked here: it is inside no project, so it composes no
+    // application name at all — see `theApexIsReadPositionallyNowAndIsStillADoor`.
     activateCi("prod");
     for (String requested : List.of("prod.acme.example.com", "ci.prod.acme.example.com")) {
       JsonObject document = new JsonObject(client().get(requested, "/main-navigation").body());
@@ -1041,6 +1055,45 @@ class EdgeRoutingTest {
     EdgeClient.Answer answer = client().get("dev.acme.example.com", "/");
     assertEquals(302, answer.status());
     assertEquals("http://projects.dev.acme.example.com/", answer.headers().get("location"));
+  }
+
+  @Test
+  void anEnvLessProjectsDoorAndAppsComposeWithNoEnvironmentLabel() {
+    // The other composition, and it is the same rule rather than a second one: `gizmo` has no
+    // environment tier, so its own name IS the innermost door and its applications are one label in
+    // front of it. Its apps are served in the DEFAULT environment, which is where the projection
+    // for them has to be published.
+    activateProjects("prod");
+    activateCi("prod");
+
+    EdgeClient.Answer landing = client().get(FLAT_PROJECT + ".example.com", "/");
+    assertEquals(302, landing.status());
+    assertEquals("http://projects.gizmo.example.com/", landing.headers().get("location"));
+
+    JsonObject document =
+        new JsonObject(
+            client().get("ci." + FLAT_PROJECT + ".example.com", "/main-navigation").body());
+    assertEquals("prod", document.getString("environment"));
+    assertEquals("http://gizmo.example.com", document.getString("origin"));
+    assertEquals("http://gizmo.example.com", document.getString("projectOrigin"));
+    assertEquals(
+        "http://ci.gizmo.example.com",
+        document
+            .getJsonObject("slots")
+            .getJsonArray("services.details")
+            .getJsonObject(0)
+            .getString("origin"));
+  }
+
+  @Test
+  void anEnvSupportingProjectsDoorComposesItsDefaultEnvironment() {
+    // A project's door states no environment, so the name it sends a visitor to carries the default
+    // one — the same environment the router itself reads that name as, which is what keeps the
+    // redirect on a name this edge serves.
+    activateProjects("prod");
+    EdgeClient.Answer landing = client().get(PROJECT + ".example.com", "/");
+    assertEquals(302, landing.status());
+    assertEquals("http://projects.prod.acme.example.com/", landing.headers().get("location"));
   }
 
   @Test
@@ -1174,6 +1227,16 @@ class EdgeRoutingTest {
     projects.load(null);
     projects.apply(
         PROJECT, "p-routing", true, true, java.util.UUID.randomUUID().toString(), Instant.now());
+    // A project with no tier of environments under it, which is the OTHER composition: its
+    // applications are `<app>.<project>.<domain>`, served in the default environment, and its own
+    // door is the innermost one there is. The platform's own project becomes one of these.
+    projects.apply(
+        FLAT_PROJECT,
+        "p-routing-flat",
+        true,
+        false,
+        java.util.UUID.randomUUID().toString(),
+        Instant.now());
   }
 
   private void clearProjection() throws java.sql.SQLException {

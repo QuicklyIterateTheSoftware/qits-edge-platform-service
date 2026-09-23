@@ -141,10 +141,11 @@ the callers that have not moved can be found. There is no redirect, deliberately
 bookmark, a link or a hard-coded string, and a 302 would keep every one of them working and
 invisible.
 
-**The apex is the exception**, and the only one: `example.com` is still the default environment's
-door, because that is where a browser that types the bare domain lands. Nothing in a name tells
-`example.com` from `nosuchapp.example.com`, so it is recognised by `canonical-origin` — the one name
-a deployment always states.
+**The apex is a door like the others, and the one that can compose nothing.** `example.com` is the
+name that IS the stated domain, so it is recognised positionally like every other. It carries no
+project label, and every application address does — so its `GET /` redirects nowhere and it answers
+the grammar instead, unless `canonical-origin` names a project's door (`https://qits.example.com`),
+in which case that project's tier is what the apex composes on.
 
 **A project's slug is a label the edge learns from the event stream.** `EdgeProjects` projects
 qits-projects' `ProjectCreated`/`ProjectDeleted` into the set that both certificate names and these
@@ -270,14 +271,18 @@ machine token are both answered `404` like any other request.
   served by a real upstream, through a launched edge, with the two that are corrected and the two
   that are not side by side.
 - **Serves `/main-navigation` on every vhost**, from the same snapshots, and writes every origin
-  with its environment label — `https://prod.example.com` and `https://ci.prod.example.com`,
-  whichever spelling the request itself used, and including the default environment, whose short
-  form went with the fall-through that served it. A one-label apex (`dev.localhost:8080`) is the
-  same rule rather than an exception to one. The document is `environment`, `origin`,
-  `projectOrigin`, `slots` and `applications`, and nothing else. `origin` is the door, which
-  names the environment and serves nothing else; `projectOrigin` is the authority a client puts
-  `<app>.<slug>.` in front of to reach that application for one project, and it exists because the
-  client side derived that name itself and shipped two domain-derivation bugs doing it. Then every
+  in the grammar the router reads — `<app>[.<env>].<project>.<domain>`, spelled forwards.
+  `https://dev.acme.example.com` and `https://ci.dev.acme.example.com` for a project with
+  environments, `https://gizmo.example.com` and `https://ci.gizmo.example.com` for one without,
+  whichever of its names the request itself used. A one-label domain (`dev.acme.localhost:8080`) is
+  the same rule rather than an exception to one. The document is `environment`, `origin`,
+  `projectOrigin`, `slots` and `applications`, and nothing else. `origin` is the innermost door —
+  the environment's inside a project that has them, the project's own otherwise;
+  `projectOrigin` is the authority a client puts `<app>.` in front of to reach that application for
+  this project (ONE label: the project is in the authority already), and it exists because the
+  client side derived that name itself and shipped two domain-derivation bugs doing it. On a name
+  inside no project — the apex, an address literal — an entry's origin is null, because there is no
+  application address to compose. Then every
   slot of the closed
   vocabulary (empty ones included, so a shell iterates the document rather than a copy of the
   vocabulary), and one entry per placement with the application, the label, the host, that host's
@@ -331,9 +336,9 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on a service vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
-| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | The **apex**: the one name served with no environment label, what every derived origin is built on when a name says nothing else, and the login origin's fallback |
+| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | A **door**, and the one name a deployment always states: what a name inside no project falls back to (read by the same right-to-left grammar, so naming a project's door is what lets the apex compose application names), the stated domain while ACME is off, and the login origin's fallback |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
-| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080,prod.localhost:8080,*.prod.localhost:8080` | Browser return authorities, defaulting to the three names a clone serves — the apex alone covers no service, since the environment label is not optional. An entry may be `*.<authority>`, which matches ONE extra label and only one — `*.dev.example.com` covers every service's own name, the editor's `editor.dev.example.com` among them. It refuses `evil.co.dev.example.com` |
+| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080` | Browser return authorities, defaulting to the names a clone serves for the platform's own project `qits` — both its shapes, because `supportsEnvironments` is live data. An entry may be `*.<authority>`, which matches ONE extra label and only one — `*.dev.acme.example.com` covers every application of that project in that environment, the editor's `editor.dev.acme.example.com` among them. It refuses `evil.co.dev.acme.example.com`, and a project nobody listed |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
@@ -496,8 +501,8 @@ nothing.
 
 **The login page lives on idp's own name, not on the door.** The origin is read off the deployment
 projection per request: whoever owns `login-path` and publishes a host. `canonical-origin` cannot
-follow it, because it is also the apex every other name is measured against — so it stays the door,
-and is the fallback while no deployment has published a host for the login path. idp is a platform
+follow it, because it is also what a name inside no project falls back to — so it stays a door, and
+is the fallback while no deployment has published a host for the login path. idp is a platform
 service deployed once, so an environment that owns no route for the path asks the default
 environment before falling back.
 

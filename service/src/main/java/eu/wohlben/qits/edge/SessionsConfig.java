@@ -35,13 +35,23 @@ public interface SessionsConfig {
   String cookieName();
 
   /**
-   * The environment door, with no trailing path: {@code https://wohlben.eu}, {@code
-   * http://dev.localhost:8080}.
+   * A door, with no trailing path: {@code https://wohlben.eu}, {@code http://localhost:8080}.
    *
-   * <p><b>It is also the authority the default environment's names are derived from</b> — see
-   * {@link EnvironmentAuthority} — so it names the door and nothing else. For the login page it is
-   * only the FALLBACK, used while no deployment has published a host for {@link #loginPath()}'s
-   * owner.
+   * <p><b>It is also what a name that names no project falls back to</b> — see {@link
+   * EnvironmentAuthority}, which reads this value by the same right-to-left grammar as a request's
+   * own Host. WHICH door it names therefore decides what the apex can compose: {@code
+   * https://qits.wohlben.eu} gives the apex the platform project's own tier to build application
+   * names on, and the bare {@code https://wohlben.eu} leaves it a door that redirects nowhere,
+   * because every application address carries a project label and that value carries none.
+   *
+   * <p><b>The default stays the apex, and must, on a clone.</b> With ACME off this value is also
+   * where the stated domain comes from — {@code EdgeRouter.domain} — so a local {@code
+   * http://qits.localhost:8080} would make {@code qits.localhost} the DOMAIN and the grammar would
+   * read every name one tier out. On the platform the domain is {@code qits.edge.acme.domain} and
+   * the two are independent, which is where naming the project's door is the useful spelling.
+   *
+   * <p>For the login page it is only the FALLBACK, used while no deployment has published a host
+   * for {@link #loginPath()}'s owner.
    */
   @WithDefault("http://localhost:8080")
   String canonicalOrigin();
@@ -64,25 +74,32 @@ public interface SessionsConfig {
    * allow-list, not a parent-domain suffix check.
    *
    * <p><b>An entry may be {@code *.<authority>}</b>, which matches ONE extra label in front of that
-   * authority — {@code *.dev.example.com} covers {@code ci.dev.example.com} and refuses {@code
-   * a.b.dev.example.com}. Every service of an environment is its own browser host now, so listing
-   * them here would be a second copy of the deployment's app list; the wildcard is one line that
-   * follows it. The port is part of the authority on both sides, so a name reached on another port
-   * matches nothing.
+   * authority — {@code *.dev.acme.example.com} covers {@code ci.dev.acme.example.com} and refuses
+   * {@code a.b.dev.acme.example.com}. Every service is its own browser host, so listing them here
+   * would be a second copy of the deployment's app list; the wildcard is one line that follows it.
+   * The port is part of the authority on both sides, so a name reached on another port matches
+   * nothing.
    *
    * <p><b>One label, and only one.</b> The editor is one shared container for the whole platform on
-   * an ordinary app vhost, {@code editor.dev.example.com}, so the same wildcard covers it like any
-   * other service and nothing here reads the project set. {@code evil.co.dev.example.com} is
-   * covered by nothing.
+   * an ordinary app vhost, {@code editor.dev.acme.example.com}, so the same wildcard covers it like
+   * any other service. {@code evil.co.dev.acme.example.com} is covered by nothing.
    *
-   * <p><b>The default is the three names a clone actually serves</b>, which is not what it used to
-   * be: {@code localhost:8080} alone covered the apex and nothing else, and the apex is the one
-   * name no service is on. With the shipped {@code prod} environment the local platform is {@code
-   * prod.localhost:8080} and {@code ci.prod.localhost:8080} — the environment label stopped being
-   * optional when the project tier landed — so a login started anywhere but the door returned to
-   * nothing. The canonical origin is still in the list because startup demands it.
+   * <p><b>The names are read right to left now</b> — {@code <app>[.<env>].<project>.<domain>} — so
+   * an entry carries a project label, and a wildcard sits in front of the innermost door: {@code
+   * *.<project>.<domain>} for an env-less project's applications, {@code
+   * *.<env>.<project>.<domain>} for an env-supporting one's. A project label is live data and this
+   * list is configuration, so a deployment states the projects whose applications a person may
+   * return to; that is the whole point of an allow-list, and widening it to a parent-suffix check
+   * would accept every name any caller could invent under the domain.
+   *
+   * <p><b>The default is the names a clone serves for the platform's own project</b>, which is
+   * called {@code qits} and is a project like any other: its door, its applications either way its
+   * {@code supportsEnvironments} flag stands — {@code *.qits.localhost:8080} while it has no
+   * environments, {@code *.prod.qits.localhost:8080} while it has — and the apex, which is in the
+   * list because startup demands the canonical origin be in it.
    */
-  @WithDefault("localhost:8080,prod.localhost:8080,*.prod.localhost:8080")
+  @WithDefault(
+      "localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080")
   List<String> browserHosts();
 
   /**
@@ -91,9 +108,9 @@ public interface SessionsConfig {
    * the protocol endpoints authenticate their own callers, and {@code /idp/api/*} guards itself. An
    * asset-path list would drift the first time the SPA renames a bundle.
    *
-   * <p>These are paths on the OWNING service's own host — {@code idp.<env>.<domain>}, where the
-   * login page lives. Nowhere else: a prefix served on every name would open one service's routes
-   * on all of them, so every other host still refuses {@code /idp/}.
+   * <p>These are paths on the OWNING service's own host — {@code idp[.<env>].<project>.<domain>},
+   * where the login page lives. Nowhere else: a prefix served on every name would open one
+   * service's routes on all of them, so every other host still refuses {@code /idp/}.
    */
   @WithDefault("/idp/")
   List<String> anonymousPrefixes();

@@ -1,51 +1,54 @@
 package eu.wohlben.qits.edge;
 
-import java.util.Collection;
-import java.util.LinkedHashSet;
 import java.util.Locale;
-import java.util.Set;
+import java.util.Map;
 
 /**
- * The origin an environment's names are built from, read off one request.
+ * The origin one request's own name is composed against, read off that name and the grammar.
  *
- * <p>{@link HostEnvironments} answers "which environment is this name?"; this answers "what do that
- * environment's OTHER names look like?" — everything the navigation document and the environment
- * vhost's redirects need to write {@code https://ci.dev.example.com} without being told the domain.
+ * <p>{@link HostEnvironments} answers "which place is this name?"; this answers "what do that
+ * place's OTHER names look like?" — everything the navigation document and a door's redirect need
+ * to write {@code https://ci.dev.acme.example.com} without being told the domain twice.
  *
- * <p>A request names an environment and an apex, and the answer is built from those two:
+ * <p><b>The grammar is the router's, spelled forwards.</b> A name is read right to left — {@code
+ * <app>[.<env>].<project>.<domain>} — so what is composed is the same shape, built back up from the
+ * labels the reading resolved:
  *
  * <pre>
- *   dev.example.com              environment at position 0   -> environment dev, apex example.com
- *   ci.dev.example.com           environment at position 1   -> environment dev, apex example.com
- *   acme.dev.example.com         a project's door            -> environment dev, apex example.com
- *   editor.acme.dev.example.com  environment at position 2   -> environment dev, apex example.com
- *   example.com, 127.0.0.1       apex, unknown name, address -> the default environment, at the
- *   (no Host at all)                                            canonical origin's apex
+ *   ci.dev.acme.example.com   an app of an env-supporting project -> dev.acme.example.com
+ *   dev.acme.example.com      that project's environment door     -> dev.acme.example.com
+ *   acme.example.com          that project's own door             -> dev.acme.example.com
+ *                                                                    (the DEFAULT environment)
+ *   projects.qits.example.com an app of an env-LESS project       -> qits.example.com
+ *   qits.example.com          that project's door                 -> qits.example.com
+ *   example.com, 127.0.0.1    the apex, an address, no Host       -> the canonical origin, read
+ *   dev.nosuchproject.example.com  a project nobody created           the same way
  * </pre>
  *
- * <p><b>Every environment's authority carries its own label, the default one included.</b> {@code
- * prod.example.com} and {@code ci.prod.example.com}, not {@code example.com} and {@code
- * ci.example.com}. The default environment used to drop its label, because the apex is its door —
- * and that is exactly the rule the project tier retired: with a project label in the middle, {@code
- * editor.acme.example.com} and {@code editor.acme.prod.example.com} would be two spellings of one
- * place whose middle label means different things, so {@code HostEnvironments} stopped serving the
- * short spelling and this stopped writing it. Every origin written here is now a name that
- * resolves, in one spelling, whichever environment it is.
+ * <p><b>The authority is the INNERMOST door, and an app label is one label in front of it.</b> That
+ * is the whole contract, and it is one rule rather than two because the grammar nests: an
+ * env-supporting project's innermost door is its environment's, an env-less project's is its own,
+ * and in both cases an application of it is {@code <app>.} in front. Nothing here prefixes a
+ * project label onto anything — the authority already carries it.
  *
- * <p><b>The one deliberate asymmetry is the apex itself.</b> {@code example.com} is still the
- * default environment's door and is still where a browser that types the bare domain lands — it is
- * the only unlabelled name left, it is the canonical origin, and it is how this class knows what
- * the apex IS. It is simply not a name anything derives: the door redirects to a service's own
- * name, which carries the environment label like every other.
+ * <p><b>{@code supportsEnvironments} decides whether the env label is there at all</b>, and it is
+ * read per request from the live projection rather than baked in. The platform's own project is
+ * exactly why: it supports environments today, so its addresses are {@code
+ * <app>.dev.qits.<domain>}, and they become {@code <app>.qits.<domain>} the moment a {@code
+ * ProjectChanged} frame flips the flag. Both are the ordinary behaviour of one rule.
  *
- * <p><b>An apex of one label keeps its environment label too</b>, which is the whole of the local
- * case and is now the same rule rather than an exception to one. {@code localhost} alone names
- * every environment at once, so a developer's platform stays at {@code dev.localhost:8080} and
- * {@code ci.dev.localhost:8080}.
+ * <p><b>A name that names no project composes no application name</b>, and says so by answering
+ * null from {@link #hostOrigin}. The apex, an address literal, a name outside the domain and a name
+ * whose project label names no project all carry no project, and under this grammar there is no
+ * application address that does not: every app is inside a project. Such a name falls back to the
+ * CANONICAL ORIGIN, read by the same grammar — a deployment that states its origin as its own
+ * project's door therefore keeps a front door on the apex, and one that states the bare apex has
+ * nothing to compose and the door says so instead of redirecting somewhere that 404s.
  *
  * <p><b>The port is part of the answer</b>, which is what makes {@code
- * http://ci.dev.localhost:8080} work: a developer's whole platform is one port, so an origin
- * without it names nothing.
+ * http://ci.dev.acme.localhost:8080} work: a developer's whole platform is one port, so an origin
+ * without it names nothing. It travels with whichever name was read — the request's own, or the
+ * canonical origin's when that is what answered.
  *
  * <p><b>The scheme comes from {@code X-Forwarded-Proto} when there is one</b>, because a TLS
  * terminator in front of the edge is the only hop that knows the answer — the same reason {@code
@@ -55,36 +58,37 @@ import java.util.Set;
  * <p>Framework-free and static on purpose, next to {@link HostEnvironments} and for the same
  * reason: this is one of the two pieces of behaviour worth asserting without booting anything, and
  * {@code EnvironmentAuthorityTest} is where the edge cases live.
+ *
+ * @param scheme {@code http} or {@code https}, whichever faced the client
+ * @param authority the innermost door's authority, port and all — never null, because every answer
+ *     is an address a browser could be sent to
+ * @param project the project that authority is inside, or null when the name named none. It is the
+ *     one thing that decides whether an application name can be composed at all.
  */
-public record EnvironmentAuthority(String scheme, String authority) {
+public record EnvironmentAuthority(String scheme, String authority, String project) {
 
   /**
-   * Where the environment vhost itself is: {@code https://prod.example.com}, {@code
-   * https://dev.example.com}. Every environment, the default one included — see the class javadoc.
+   * Where the innermost door is: {@code https://dev.acme.example.com} for an env-supporting
+   * project, {@code https://qits.example.com} for an env-less one, and the canonical origin for a
+   * name that names no project.
    *
-   * <p>It is also what a client prefixes a label onto, which is the whole of {@code
-   * projectOrigin}'s contract in the navigation document: {@code editor.<slug>.} in front of this
-   * authority is the editor's name.
+   * <p>It is also what an application label is prefixed onto, which is the whole of {@code
+   * projectOrigin}'s contract in the navigation document: {@code editor.} in front of this
+   * authority is the editor's name for this project.
    */
   public String origin() {
     return scheme + "://" + authority;
   }
 
   /**
-   * {@code https://ci.dev.example.com} — where one service's own name is. A project's door is the
-   * same shape and the same call: the slug is a label in front of the environment, exactly as a
-   * service's name is.
+   * {@code https://ci.dev.acme.example.com} — where one application of this project is. One label,
+   * always: the project label and the environment label are already in the authority.
+   *
+   * @return null when this name is inside no project, because there is then no application address
+   *     to compose. A door answers without a redirect rather than with a name that 404s.
    */
   public String hostOrigin(String host) {
-    return scheme + "://" + host + "." + authority;
-  }
-
-  /**
-   * {@code https://editor.acme.dev.example.com} — where one application is for one project. Two
-   * labels in front of the environment, which is the tier the web editor is served on.
-   */
-  public String projectHostOrigin(String host, String project) {
-    return scheme + "://" + host + "." + project + "." + authority;
+    return project == null ? null : scheme + "://" + host + "." + authority;
   }
 
   /**
@@ -92,26 +96,64 @@ public record EnvironmentAuthority(String scheme, String authority) {
    *     that carried neither
    * @param forwardedProto the {@code X-Forwarded-Proto} header, or null
    * @param requestScheme the scheme this process was reached over, when nothing forwarded one
-   * @param environments the routable environment names
-   * @param defaultEnvironment where an unmatched name goes
-   * @param projects the project slugs that exist right now — a per-call parameter for the same
-   *     reason as {@link HostEnvironments#route(String, Set)}'s. Without them a four-label name
-   *     would read as an unknown name and claim the DEFAULT environment's origins, which is a
-   *     navigation document pointing one environment's editor at another's services.
+   * @param hosts the reader that holds the grammar — the stated domain above all. The composition
+   *     is the reading spelled forwards, so the two cannot be given different domains.
+   * @param projects the projects that exist right now, slug to whether that project has
+   *     environments — a per-call parameter for the same reason as {@link
+   *     HostEnvironments#route(String, Map)}'s: it moves with the event stream.
    * @param canonicalAuthority {@code qits.edge.sessions.canonical-origin}'s authority, or null
    */
   public static EnvironmentAuthority of(
       String host,
       String forwardedProto,
       String requestScheme,
-      Collection<String> environments,
-      String defaultEnvironment,
-      Collection<String> projects,
+      HostEnvironments hosts,
+      Map<String, Boolean> projects,
       String canonicalAuthority) {
+    String scheme = scheme(forwardedProto, requestScheme);
+    EnvironmentAuthority named = scoped(scheme, host, hosts, projects);
+    if (named != null) {
+      return named;
+    }
+    // The name named no project, so it can compose nothing of its own. The canonical origin is the
+    // one name a deployment states about itself, and it is read by the same grammar: a deployment
+    // whose origin is its project's door gives the apex a front door, and one whose origin is the
+    // bare apex leaves this without a project — which is the honest answer, not a broken name.
+    EnvironmentAuthority canonical = scoped(scheme, canonicalAuthority, hosts, projects);
+    if (canonical != null) {
+      return canonical;
+    }
+    String fallback = name(canonicalAuthority);
     return new EnvironmentAuthority(
-        scheme(forwardedProto, requestScheme),
-        authority(
-            host, names(environments), defaultEnvironment, names(projects), canonicalAuthority));
+        scheme, fallback.isEmpty() ? hosts.domain() : fallback + port(canonicalAuthority), null);
+  }
+
+  /**
+   * One name composed back up from its own reading, or null when that reading named no project.
+   *
+   * <p>The environment label is present exactly when the project supports environments, which is
+   * the same question {@link HostEnvironments} asked to READ the name — an env-less project's
+   * applications sit directly inside it, in the default environment, and its door is the innermost
+   * one there is.
+   */
+  private static EnvironmentAuthority scoped(
+      String scheme, String host, HostEnvironments hosts, Map<String, Boolean> projects) {
+    String name = name(host);
+    if (name.isEmpty()) {
+      return null;
+    }
+    HostEnvironments.Route route = hosts.route(name, projects);
+    String project = route.project();
+    if (project == null || !projects.containsKey(project)) {
+      // The apex, an address, a name outside the domain, a name with too many labels — and a
+      // project label naming a project this edge does not know, which is a 404 rather than a place.
+      return null;
+    }
+    Boolean supportsEnvironments = projects.get(project);
+    String inside =
+        supportsEnvironments == null || supportsEnvironments ? route.environment() + "." : "";
+    return new EnvironmentAuthority(
+        scheme, inside + project + "." + hosts.domain() + port(host), project);
   }
 
   private static String scheme(String forwardedProto, String requestScheme) {
@@ -125,112 +167,11 @@ public record EnvironmentAuthority(String scheme, String authority) {
     return "https".equals(scheme) ? "https" : "http";
   }
 
-  private static String authority(
-      String host,
-      Set<String> environments,
-      String defaultEnvironment,
-      Set<String> projects,
-      String canonicalAuthority) {
-    String name = name(host);
-    String port = port(host);
-    if (!name.isEmpty() && !isAddressLiteral(name)) {
-      String[] labels = name.split("\\.", -1);
-      // The same readings in the same order as HostEnvironments, because the two must never
-      // disagree about which environment a name is: a document written for one environment's
-      // origins and served by another's routes is worse than either being wrong on its own.
-      if (labels.length > 1 && environments.contains(labels[1])) {
-        String apex = behind(name, labels[0].length() + labels[1].length() + 2);
-        if (apex != null) {
-          return emit(labels[1], apex, port);
-        }
-      }
-      if (labels.length > 2 && projects.contains(labels[1]) && environments.contains(labels[2])) {
-        // $app.$project.$env.$domain: the apex is what is left after THREE labels. Without this
-        // reading `/main-navigation` on the editor's own name would fall through below and claim
-        // the default environment — the editor would render dev's tree against prod's origins.
-        String apex =
-            behind(name, labels[0].length() + labels[1].length() + labels[2].length() + 3);
-        if (apex != null) {
-          return emit(labels[2], apex, port);
-        }
-      }
-      if (environments.contains(labels[0])) {
-        String apex = behind(name, labels[0].length() + 1);
-        if (apex != null) {
-          return emit(labels[0], apex, port);
-        }
-      }
-    }
-    // The apex, an address literal, a name nobody configured, or no Host at all. None of them says
-    // which environment it is, so the answer is the DEFAULT one at the configured origin — the
-    // door, which is the one name a deployment always states.
-    String fallback = canonicalAuthority == null ? "" : canonicalAuthority.strip();
-    if (fallback.isEmpty()) {
-      return defaultEnvironment;
-    }
-    return emit(defaultEnvironment, apex(fallback, defaultEnvironment), port(fallback));
-  }
-
-  /**
-   * What is left of a name after the labels a reading consumed, or null when nothing is.
-   *
-   * <p><b>Every reading above needs an apex behind it, and a Host header is caller input.</b>
-   * {@code prod}, {@code ci.dev}, {@code acme.dev} and {@code editor.acme.dev} each match one of
-   * those readings and then END — there is no domain left to build an authority from. These
-   * derivations used to be bare {@code substring} calls past the end of the string, so each of
-   * those four names was an unauthenticated 500 out of {@code /main-navigation} and out of the
-   * door's own redirect: a name that names no site, answered with a stack trace.
-   *
-   * <p>A reading with nothing behind it falls through, and what it falls through to is the
-   * canonical-origin arm below — the same answer an unusable Host gets today. It is the honest one:
-   * these names carry a label that says which environment they mean and no domain that says where,
-   * and the origins this class writes are absolute URLs a browser has to be able to follow.
-   */
-  private static String behind(String name, int consumed) {
-    return consumed < name.length() ? name.substring(consumed) : null;
-  }
-
-  /**
-   * The apex behind the canonical origin — the bare domain, which is the door and the one name that
-   * carries no environment label.
-   *
-   * <p>The canonical origin is spelled either way by different deployments — {@code
-   * https://wohlben.eu} and {@code https://prod.wohlben.eu} are one deployment's two spellings of
-   * one place — so the default environment's own label comes off when it is there. {@code
-   * dev.localhost} yields {@code localhost} for the same reason, and the authority derived back
-   * from it is {@code dev.localhost} again. A canonical origin that is nothing but that label keeps
-   * it, because there would be no name underneath at all.
-   *
-   * <p>Package-visible because {@code EdgeRouter} asks the same question of the same value: the
-   * apex is the one name it may serve without an environment label, and this is how it recognises
-   * it.
-   */
-  static String apex(String canonicalAuthority, String defaultEnvironment) {
-    String canonicalName = name(canonicalAuthority);
-    String[] labels = canonicalName.split("\\.", -1);
-    return labels.length > 1 && labels[0].equals(defaultEnvironment)
-        ? canonicalName.substring(labels[0].length() + 1)
-        : canonicalName;
-  }
-
-  /**
-   * One environment's authority, built from the environment and the apex behind it.
-   *
-   * <p>Every environment keeps its label, the default one included — see the class javadoc for what
-   * the project tier did to the short spelling. The apex itself is still the default environment's
-   * door; it is simply not derived from anything, it is the origin everything else is derived FROM.
-   */
-  private static String emit(String environment, String apex, String port) {
-    return environment + "." + apex + port;
-  }
-
   /**
    * Lower case, no surrounding space, no trailing root dot, no port, no IPv6 brackets.
    *
-   * <p>Package-visible for the same reason {@link #apex} is: {@code EdgeRouter} compares a
-   * request's own name against the apex, and a comparison against anything less normalised than
-   * this is a name that misses — {@code example.com.} is the apex, spelled the way a resolver
-   * spells it.
+   * <p>Package-visible because {@code EdgeRouter} reads the stated domain off the canonical origin
+   * with it, and one spelling of the normalisation is the point.
    */
   static String name(String host) {
     if (host == null) {
@@ -251,7 +192,7 @@ public record EnvironmentAuthority(String scheme, String authority) {
     return name;
   }
 
-  /** The {@code :8080} of the request's own name, or an empty string when it carried none. */
+  /** The {@code :8080} of a name, or an empty string when it carried none. */
   private static String port(String host) {
     if (host == null) {
       return "";
@@ -269,28 +210,5 @@ public record EnvironmentAuthority(String scheme, String authority) {
       }
     }
     return port.length() > 1 ? port : "";
-  }
-
-  private static boolean isAddressLiteral(String name) {
-    if (name.indexOf(':') >= 0) {
-      return true;
-    }
-    for (int i = 0; i < name.length(); i++) {
-      char c = name.charAt(i);
-      if (c != '.' && (c < '0' || c > '9')) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private static Set<String> names(Collection<String> environments) {
-    Set<String> names = new LinkedHashSet<>();
-    for (String environment : environments) {
-      if (environment != null && !environment.isBlank()) {
-        names.add(environment.strip().toLowerCase(Locale.ROOT));
-      }
-    }
-    return names;
   }
 }

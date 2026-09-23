@@ -410,10 +410,10 @@ public class EdgeSessions {
    * <p>The ORIGIN is the caller's, because the page moves with its deployment. Only the return host
    * is decided here: an authority nobody listed falls back to the door rather than being reflected.
    *
-   * <p>Every name a person can log in from is a service's own name — one label in front of the
-   * environment — so one wildcard entry covers the lot. idp holds an allow-list of its own for the
-   * same value; a return host this edge sends and idp does not accept has the same symptom one hop
-   * further away.
+   * <p>Every name a person can log in from is a service's own name — one label in front of its
+   * project's innermost door — so one wildcard entry covers a project's lot. idp holds an
+   * allow-list of its own for the same value; a return host this edge sends and idp does not accept
+   * has the same symptom one hop further away.
    */
   String loginLocation(String loginOrigin, String requestedAuthority, String uri) {
     String host = authority(requestedAuthority);
@@ -459,12 +459,13 @@ public class EdgeSessions {
   /**
    * The {@code *.<authority>} entries, each reduced to the authority behind the wildcard.
    *
-   * <p>ONE extra label, never a suffix match. {@code *.dev.example.com} is what makes every service
-   * of one environment a browser host without listing them — the names are {@code
-   * <app>.dev.example.com}, the editor's own {@code editor.dev.example.com} among them, and the app
-   * list is the deployment's, not this file's. A suffix check would also accept {@code
-   * evil.co.dev.example.com}, which is a different site to a browser and a return target this
-   * process must not accept.
+   * <p>ONE extra label, never a suffix match. A name is read right to left — {@code
+   * <app>[.<env>].<project>.<domain>} — so an entry names a project's innermost door and the
+   * wildcard covers that project's applications without listing them: {@code
+   * *.dev.acme.example.com} for an env-supporting project, {@code *.qits.example.com} for an
+   * env-less one, the editor's own name among them either way. The app list is the deployment's,
+   * not this file's. A suffix check would also accept {@code evil.co.dev.acme.example.com}, which
+   * is a different site to a browser and a return target this process must not accept.
    */
   static List<String> wildcardBrowserHosts(List<String> configured) {
     List<String> suffixes = new ArrayList<>();
@@ -490,13 +491,13 @@ public class EdgeSessions {
    * authority with EXACTLY ONE label in front of it. The port is part of the authority on both
    * sides, so a name on another port matches nothing.
    *
-   * <p><b>One label in front, and only one.</b> {@code *.dev.example.com} covers {@code
-   * ci.dev.example.com} and every other service's own name in that environment, the editor included
-   * — it is an ordinary app vhost at {@code editor.dev.example.com}, one shared container for the
-   * whole platform rather than a name per project. The check is a match rather than a suffix test,
-   * so {@code evil.co.dev.example.com} is a different site to a browser and matches nothing. The
-   * apex comes from this list, so no {@code Host} header a caller invents can name a return target
-   * under a domain the deployment did not configure.
+   * <p><b>One label in front, and only one.</b> {@code *.dev.acme.example.com} covers {@code
+   * ci.dev.acme.example.com} and every other application of that project in that environment, the
+   * editor included — it is an ordinary app vhost at {@code editor.dev.acme.example.com}. The check
+   * is a match rather than a suffix test, so {@code evil.co.dev.acme.example.com} is a different
+   * site to a browser and matches nothing, and a project nobody listed is not opened by a listed
+   * one. The apex comes from this list, so no {@code Host} header a caller invents can name a
+   * return target under a domain the deployment did not configure.
    *
    * <p>Package-private and static so the matrix can be asserted without booting anything.
    */
