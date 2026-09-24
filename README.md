@@ -340,7 +340,7 @@ a file.
 | --- | --- | --- | --- |
 | `qits.edge.environments` | `QITS_EDGE_ENVIRONMENTS` | `prod` | The routable environment names, comma separated |
 | `qits.edge.default-environment` | `QITS_EDGE_DEFAULT_ENVIRONMENT` | `prod` | Where the apex and every unmatched host go. **Must be in the list** |
-| `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — | **Required per app.** `{env}` is the only placeholder; a platform service names none |
+| `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — (`mirror`: `{env}-qits-platform-mirror`) | **Required per app.** `{env}` is the only placeholder, and every application names it. The one shipped entry is `mirror`, whose value is the platform's own pull-through cache rather than a decision |
 | `qits.edge.apps.<app>.port` | `QITS_EDGE_APPS_<APP>_PORT` | `8080` | The port that application listens on |
 | `qits.edge.apps.<app>.hosts.<env>` | `QITS_EDGE_APPS_<APP>_HOSTS_<ENV>` | — | Per-environment override, `host` or `host:port` |
 | `qits.edge.apps.<app>.audience-pattern` | `QITS_EDGE_APPS_<APP>_AUDIENCE_PATTERN` | `qits-platform` | The audience this app's own vhost accepts, next to the platform audience. An app such as githost or the editor names its own resource pattern (`{env}-qits-githost`); an app with none opens with roles alone |
@@ -376,18 +376,33 @@ environment's name (the tie-break would make that environment unreachable), and 
 turned on with no client id and secret to introspect with. All would otherwise be a 502, a 404, a
 connection error or a 401 on every request, with nothing to read.
 
-The applications map is shipped **empty**, and an application entry is the on-switch: a name only
-reaches a service when a deployment names it. A deployment declares the whole set without a file:
+The applications map is shipped with **one** entry, `mirror`, and every other application entry is
+the on-switch it always was: a name only reaches an environment's service when a deployment names
+it. A deployment declares those without a file:
 
 ```
 QITS_EDGE_APPS_REGISTRY_HOST_PATTERN={env}-qits-artifacts
 QITS_EDGE_APPS_GITHOST_HOST_PATTERN={env}-qits-githost
-QITS_EDGE_APPS_MIRROR_HOST_PATTERN=qits-platform-mirror
 ```
 
-`{env}` is what keeps a tier's services separate, and its absence is what marks a **platform**
-service — there is one qits-platform-mirror for the whole host, so its entry carries no placeholder
-while an environment's registry carries one and serves every tier from a single line.
+`{env}` is what keeps a tier's services separate, and **every** application entry names it now.
+There used to be a second kind that did not: a platform service was one process for the whole
+estate, addressed bare, so its entry carried no placeholder. That plane is deleted — the mirror is
+an ordinary application in the one tier — and the placeholder is no longer something an entry can
+be an exception to.
+
+`mirror` is nonetheless the entry this file ships, and the reason is revocability rather than
+spelling. A map entry cannot be unset by a later config source, only overridden, so shipping one
+costs the ability to revoke it — and there is nothing to revoke: the pull-through cache is the
+platform's own, one per tier, and a tier running a different one would not be this platform. The
+environment variable that used to carry it only respelled that in a second place. An environment's
+own application stays out, because which tiers publish a machine vhost is a deployment's decision
+and has to remain revocable.
+
+`{env}` is the **edge's own** placeholder throughout this family, substituted per request in
+`EdgeRouter.appUpstream` from the environment the Host name named. It is not Quarkus property
+expansion: a `${QITS_ENVIRONMENT:dev}` here would be resolved once at startup and would name the
+container's own tier rather than the requested one.
 
 `qits.edge.apps.<app>.hosts.<env>` exists for the two topologies a pattern cannot describe — a
 developer running one service on `localhost:8000`, and this repository's own tests, where the
