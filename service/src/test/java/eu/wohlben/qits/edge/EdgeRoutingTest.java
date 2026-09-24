@@ -947,14 +947,35 @@ class EdgeRoutingTest {
   }
 
   @Test
-  void aNameOutsideTheDomainServesNothingEither() {
-    // The labels are somebody else's grammar, so there is no position to read — and the answer is a
-    // door's: nothing is routed, nothing is proxied, and no upstream is reached.
+  void aMachineNameOutsideTheDomainReachesItsConfiguredApplication() {
+    // The platform's own machine vhosts are docker aliases of this container and are deliberately
+    // not under the public domain: `registry.dev.localhost:8080` is in every image reference this
+    // estate pulls. Answering it as a door — which is what a name outside the domain used to get —
+    // stopped docker, maven and container git at once. It is read as
+    // `<app>[.<env>].<machine-suffix>`, so the env label picks the tier here exactly as it does
+    // under the domain.
+    assertEquals(
+        "registry-dev",
+        client().get("registry.dev.localhost", "/v2/", token("dev")).line("upstream"));
+    assertEquals(
+        "registry-prod",
+        client().get("registry.prod.localhost", "/v2/", token("prod")).line("upstream"));
+    // And it is gated like any other application vhost: the name being a machine alias buys
+    // nothing.
+    assertEquals(401, client().get("registry.dev.localhost", "/v2/").status());
+  }
+
+  @Test
+  void aMachineNameNoApplicationConfiguresServesNothing() {
+    // `ci` is a PUBLISHED host and not a configured application, and that is the point: a machine
+    // name is one of this container's own aliases, so the configured set is the whole of what it
+    // may
+    // reach and the deployment projection is not asked. Nothing is routed and no upstream sees it.
     activateCi();
     EdgeClient.Answer answer = client().get("ci.dev.somewhere-else.test", "/", token("dev"));
     assertEquals(404, answer.status());
     assertNull(answer.line("upstream"));
-    assertTrue(answer.body().contains("serves nothing"), answer.body());
+    assertTrue(answer.body().contains("is not an application on this platform"), answer.body());
   }
 
   // --- the project projection's own barrier -----------------------------------------------------

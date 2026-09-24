@@ -45,10 +45,31 @@ import java.util.Set;
  * <p><b>Positional reading needs the domain STATED.</b> It cannot be derived — {@code
  * example.co.uk} is two labels of domain and {@code localhost} is one — so it is a value, and
  * {@code EdgeRouter} takes it from {@code qits.edge.acme.domain} or, failing that, from the
- * canonical origin. A name that does not end with it carries no position that can be read, so it is
- * answered as the apex is: a door, which serves nothing. An address literal and a missing Host
- * header are the same case, and the same answer — that is how the platform is reached before DNS
- * exists.
+ * canonical origin. An address literal, a missing Host header and the domain itself carry no
+ * position at all, and all three are answered as the apex is: a door, which serves nothing — that
+ * is how the platform is reached before DNS exists.
+ *
+ * <p><b>A name OUTSIDE the stated domain is a MACHINE NAME, and it is read too.</b> The platform's
+ * own machine vhosts are docker network aliases of this container and are deliberately not under
+ * the public domain — {@code registry.dev.localhost:8080} is in every image reference, {@code
+ * mirror.dev.localhost:8080} in every maven build, {@code githost.dev.localhost:8080} and {@code
+ * githost.dev.internal:8080} in every clone from a container — so refusing them takes docker pulls,
+ * dependency resolution and container git down together, which is what happened when this class
+ * first read the domain. Such a name is therefore read as {@code <app>[.<env>].<machine-suffix>}:
+ * the leftmost label is joined against the configured application set exactly as an app label under
+ * the domain is, an environment label may follow it, and everything after that is a suffix nobody
+ * here enumerates — {@code localhost}, {@code internal}, and whatever else somebody aliases this
+ * container as.
+ *
+ * <p>Two things that reading is NOT. It is not a revival of the tie-breaks the positional grammar
+ * retired: under the stated domain the project label stays mandatory and every label keeps being
+ * read by position alone, so {@code registry.dev.<domain>} is the 404 it became and no machine
+ * reading rescues it. And it carries no project — there is no project tier in a name outside the
+ * domain and there never can be — so {@link Route#project()} is null, {@code EnvironmentAuthority}
+ * composes nothing from it, and a leading {@link #LANDING} label, which means a project's root, is
+ * {@link Reading#UNKNOWN_MACHINE_NAME} rather than an address. A machine name whose leftmost label
+ * no application claims is that same 404, and a machine name of a single label — {@code localhost},
+ * this container's own service alias — has no app label in it at all and stays a door.
  *
  * <p><b>{@code landing} is a reserved label: it means THIS PROJECT'S ROOT.</b> A deployable writes
  * {@code host: landing} in its {@code .config/qits/deployments.yml} and the deployment it publishes
@@ -110,9 +131,9 @@ public final class HostEnvironments {
   public enum Reading {
 
     /**
-     * The domain itself, an address literal, a missing Host header, or a name outside the domain
-     * altogether. None of them carries a readable position, and all of them are the default
-     * environment's door — which serves nothing.
+     * The domain itself, an address literal, a missing Host header, or a single-label machine name
+     * such as this container's own service alias. None of them carries a readable position, and all
+     * of them are the default environment's door — which serves nothing.
      */
     APEX,
 
@@ -159,7 +180,16 @@ public final class HostEnvironments {
      * A name the grammar does not describe at all: too many labels, or an environment label a
      * project that has environments does not have. An ordinary 404 that no projection can rescue.
      */
-    UNREADABLE
+    UNREADABLE,
+
+    /**
+     * A machine name — a name outside the stated domain — whose leftmost label is no configured
+     * application. A 404, and a flat one: the machine names are this container's own aliases, so
+     * the configured application set is the whole of what they may reach and the deployment
+     * projection is not asked. A leading {@link #LANDING} label lands here too, because it means a
+     * project's root and a name outside the domain is inside no project.
+     */
+    UNKNOWN_MACHINE_NAME
   }
 
   /**
@@ -170,9 +200,11 @@ public final class HostEnvironments {
    *     name states one, and the default when the grammar gives it none to state
    * @param app the configured application the name reached, or null for a door and for a label this
    *     configuration does not know
-   * @param unknownApp the label at an app position that this configuration does not route, which
-   *     the deployment projection may still claim. Carried rather than discarded so the 404 can
-   *     name it.
+   * @param unknownApp the label at an app position that this configuration does not route, carried
+   *     rather than discarded so the answer can name it. Whether the deployment projection may
+   *     still claim it is the {@code reading}'s to say and never this field's: {@link
+   *     Reading#UNKNOWN_APP} is the join, and {@link Reading#UNKNOWN_MACHINE_NAME} is a 404 that is
+   *     answered before the join is made.
    * @param project the project slug the name named, or null where it named none. Set on the unknown
    *     project reading too, so its 404 can name the label it could not resolve.
    * @param reading which position the name landed on — see {@link Reading}
@@ -231,6 +263,14 @@ public final class HostEnvironments {
 
     static Route unreadable(String environment, String project) {
       return new Route(environment, null, null, project, Reading.UNREADABLE);
+    }
+
+    /**
+     * A machine name nothing configured claims. It carries the label it read, so the 404 can name
+     * what it looked for — and no project, because a name outside the domain is inside none.
+     */
+    static Route unknownMachineName(String environment, String label) {
+      return new Route(environment, null, label, null, Reading.UNKNOWN_MACHINE_NAME);
     }
 
     /**
@@ -426,10 +466,9 @@ public final class HostEnvironments {
       return Route.apex(defaultEnvironment);
     }
     if (!name.endsWith("." + domain)) {
-      // A name that is not inside the stated domain has no position to be read at: the labels are
-      // somebody else's grammar. It is the apex reading, which is a door — so it routes nothing,
-      // gates nothing and proxies nothing, exactly as an address literal does.
-      return Route.apex(defaultEnvironment);
+      // Outside the stated domain, so there is no project tier to read — but the platform's own
+      // machine vhosts live exactly here, and they are how docker, maven and git reach it.
+      return machineName(name);
     }
     String[] labels = name.substring(0, name.length() - domain.length() - 1).split("\\.", -1);
     if (labels.length > 3) {
@@ -476,6 +515,42 @@ public final class HostEnvironments {
       return Route.unreadable(defaultEnvironment, project);
     }
     return appRoute(labels[1], labels[0], project);
+  }
+
+  /**
+   * A name outside the stated domain, read as {@code <app>[.<env>].<machine-suffix>}.
+   *
+   * <p>This is the one reading that joins a label against a configured set rather than deciding it
+   * by position, and it has to be: the suffix is a docker network alias — {@code localhost}, {@code
+   * internal}, whatever else this container is aliased as — so there is nothing to count labels
+   * from the right of, and the application set is all that is left to recognise a name by. It is
+   * also what keeps the reading closed: only a name this deployment already configured an
+   * application for reaches anything, and the rest is a 404 rather than a fall-through.
+   *
+   * <p>The environment label is optional and is read only when a suffix follows it, so {@code
+   * registry.dev.localhost} is dev's registry while {@code mirror.localhost} is the mirror in the
+   * default environment — which is right for a platform service deployed once, and is the same
+   * default an env-less project's applications get under the domain.
+   *
+   * <p>No project, ever. There is no project tier in a name outside the domain, so the reserved
+   * {@link #LANDING} label — which means a project's root — is a 404 here and not a door.
+   */
+  private Route machineName(String name) {
+    String[] labels = name.split("\\.", -1);
+    if (labels.length < 2) {
+      // One label and no suffix: this container's own service alias, or a name a client shortened.
+      // There is no app label in it, so it is a door exactly as the apex and an address are.
+      return Route.apex(defaultEnvironment);
+    }
+    String app = labels[0];
+    // Only when something follows it. In `mirror.localhost` the second label IS the suffix, and a
+    // suffix that happens to be spelled like an environment is still the suffix.
+    String environment =
+        labels.length > 2 && environments.contains(labels[1]) ? labels[1] : defaultEnvironment;
+    if (LANDING.equals(app) || !apps.contains(app)) {
+      return Route.unknownMachineName(environment, leading(app));
+    }
+    return Route.app(environment, app, null);
   }
 
   /**

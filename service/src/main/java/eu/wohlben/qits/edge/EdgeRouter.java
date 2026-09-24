@@ -315,7 +315,12 @@ public class EdgeRouter {
       return;
     }
     if (named.reading() == HostEnvironments.Reading.UNREADABLE
-        || named.reading() == HostEnvironments.Reading.RESERVED_LABEL) {
+        || named.reading() == HostEnvironments.Reading.RESERVED_LABEL
+        || named.reading() == HostEnvironments.Reading.UNKNOWN_MACHINE_NAME) {
+      // The machine-name miss belongs here and not in the projection join below: a name outside the
+      // stated domain is one of this container's own aliases, so the configured application set is
+      // the whole of what it may reach and a published browser host is a public name rather than an
+      // alias. It carries its label only so the answer can name it.
       unreadable(request, named);
       return;
     }
@@ -573,6 +578,17 @@ public class EdgeRouter {
 
   /** Why a name with a readable project label is still not a name. */
   static String unreadableBody(HostEnvironments.Route named, String domain) {
+    if (named.reading() == HostEnvironments.Reading.UNKNOWN_MACHINE_NAME) {
+      // Outside the domain there is no project tier to be missing, so the sentence about one would
+      // be a lie. What this name got wrong is its leftmost label: it is an application this
+      // deployment does not configure. The label is laundered before it is echoed, exactly as
+      // unknownProjectBody's and unknownAppBody's are, because it came off the wire.
+      return (named.unknownApp() == null ? "That label" : "`" + named.unknownApp() + "`")
+          + " is not an application on this platform. This name is outside `"
+          + domain
+          + "`, so it is read as `<app>[.<env>].<machine-suffix>` — the leftmost label is an"
+          + " application of this deployment, and this one is not one.\n";
+    }
     if (named.reading() == HostEnvironments.Reading.RESERVED_LABEL) {
       // `landing` means the project's root, which is `<project>.<domain>` — so the label is never a
       // name of its own, whether or not a deployment published it. One thing, one address.
