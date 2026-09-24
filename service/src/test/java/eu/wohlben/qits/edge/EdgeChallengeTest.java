@@ -465,6 +465,46 @@ class EdgeChallengeTest {
                 "QITS_IDP_URL", "http://old-idp:8080/idp")));
   }
 
+  /**
+   * THE SHIPPED DIAL ADDRESS RESOLVES, AND IT IS NOT THE ISSUER.
+   *
+   * <p>{@code qits.idp.dial-url}'s default is a nested expression — an env name whose fallback is
+   * itself an expression — so a malformed one would not be a wrong value but a config expansion
+   * that throws at startup, which on this service is the platform's only published listener failing
+   * to boot and the deploy rolling back. {@code IdpTest} cannot catch that: it constructs {@link
+   * Idp} with values it supplies. This reads the shipped file with expansion on, which is the only
+   * place the default's own text is exercised.
+   *
+   * <p>The second assertion is the point of the split. Under the same empty environment the issuer
+   * stays bare and the dial address carries the tier, so a change that collapsed the two keys back
+   * into one would fail here as well as in {@code IdpTest}.
+   */
+  @Test
+  void theShippedDialAddressDerivesTheTierAndDiffersFromTheIssuer() throws Exception {
+    assertEquals("http://dev-qits-platform-idp:8080/idp", dialUrl(Map.of()));
+    assertNotEquals(
+        idpUrl(Map.of()),
+        dialUrl(Map.of()),
+        "the issuer is the iss claim and the dial-url is an address; shipping them equal is the"
+            + " re-merge this split exists to prevent");
+
+    assertEquals(
+        "http://prod-qits-platform-idp:8080/idp",
+        dialUrl(Map.of("QITS_ENVIRONMENT", "prod")),
+        "the tier is derived from what qits-deployments injects, not written down");
+    assertEquals(
+        "http://stated:8080/idp",
+        dialUrl(Map.of("QITS_IDP_DIAL_URL", "http://stated:8080/idp")),
+        "and a deployment can still state it outright");
+  }
+
+  private static String dialUrl(Map<String, String> env) throws Exception {
+    return applicationProperties(env)
+        .build()
+        .getOptionalValue("qits.idp.dial-url", String.class)
+        .orElseThrow();
+  }
+
   private static Optional<String> sessionClientId(Map<String, String> env) throws Exception {
     return applicationProperties(env)
         .withMapping(SessionsConfig.class)
