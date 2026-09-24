@@ -271,7 +271,11 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // reading rather than the projected one. See HostEnvironments.LANDING.
     config.put("qits.edge.auth.anonymous-read-apps", "mirror,brochure");
     idpPort = bind("idp", idpServer(), 0);
+    // Both keys, to the same stub: the issuer is what tokens are compared against and the dial-url
+    // is what the edge connects to. A stub idp issues at the address it answers on, so they agree
+    // here; on the platform the issuer stays bare while the address carries the tier.
     config.put("qits.idp.url", "http://127.0.0.1:" + idpPort + "/idp");
+    config.put("qits.idp.dial-url", "http://127.0.0.1:" + idpPort + "/idp");
     // The three time bounds, shrunk to a suite's patience. Their SHIPPED values are pinned in
     // EdgeChallengeTest instead: a default is a deployment fact and must not be readable from here.
     config.put("qits.edge.auth.basic-cache-ttl-ms", "2000");

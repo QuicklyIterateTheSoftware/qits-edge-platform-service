@@ -54,14 +54,21 @@ public interface EdgeConfig {
    * The applications an {@code $app.$env.$domain} host name may reach directly, keyed by the {@code
    * $app} label. A label with no entry is refused.
    *
-   * <p>Empty by default, which is the pre-ingress edge exactly: no app label routes anywhere of its
-   * own, and only {@code $env.$domain} works.
+   * <p>One entry ships in {@code application.properties}: {@code mirror}, whose host pattern is
+   * {@code {env}-qits-platform-mirror}. A map entry cannot be unset by a later config source, only
+   * overridden, so shipping one costs the ability to revoke it — which is free here and nowhere
+   * else, because the pull-through cache is the platform's own and its address was never a decision
+   * a deployment made. It carries the {@code {env}} placeholder like every other entry: the mirror
+   * was a platform service addressed bare until that plane was deleted, and it is an ordinary
+   * application in the one tier now.
    *
-   * <p>A deployment names the map without a file, one prefix per application:
+   * <p>An ENVIRONMENT's application is not shipped, and that stays the pre-ingress edge exactly:
+   * its app label routes nowhere of its own until a deployment names it, one prefix per
+   * application:
    *
    * <pre>
    * QITS_EDGE_APPS_REGISTRY_HOST_PATTERN={env}-qits-artifacts
-   * QITS_EDGE_APPS_MIRROR_HOST_PATTERN=qits-platform-mirror
+   * QITS_EDGE_APPS_GITHOST_HOST_PATTERN={env}-qits-githost
    * </pre>
    */
   Map<String, App> apps();
