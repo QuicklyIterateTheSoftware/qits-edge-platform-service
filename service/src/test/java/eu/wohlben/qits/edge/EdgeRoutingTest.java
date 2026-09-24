@@ -1294,6 +1294,48 @@ class EdgeRoutingTest {
     assertEquals("http://projects.dev.acme.example.com/", door.headers().get("location"));
   }
 
+  /**
+   * The assertion that keeps the platform's own front page behind the login wall.
+   *
+   * <p>The owner's ruling is that the landing page is not public: a visitor with no credential is
+   * sent to sign in, on the project's root name exactly as on every other vhost. The whole of that
+   * ruling hangs on one fact — {@code landing} is absent from {@code
+   * qits.edge.auth.anonymous-read-apps} — and nothing else stands between the front page and an
+   * anonymous read. {@code EdgeRouter.target()} rebuilds the landing Route with the projection's
+   * label as the app, so by the time {@code EdgeAuth.anonymousRead} runs the page IS an app route
+   * with {@code app() == "landing"}, one list entry away from being open.
+   *
+   * <p>It is the counterpart of the {@code brochure} tests below, which prove the same mechanism
+   * the other way round: a projected label that IS named is read anonymously. Those say nothing
+   * about this page, deliberately — the fixture is not called {@code landing} — so this is the test
+   * that fails if anyone ever names it.
+   *
+   * <p>The bearer half of each pair is not decoration: a name that 404s or redirects would refuse
+   * an anonymous read too, and would refuse it for the wrong reason. The 200 is what proves the
+   * root name really is served by the landing deployment, so the 401 beside it is a gate rather
+   * than an absence.
+   */
+  @Test
+  void theLandingPageRefusesAnAnonymousReadOnEitherProjectShape() {
+    activateProjects("prod");
+    activateLanding("acme-landing-service", "prod", "/landing", "mirror");
+    activateLanding("gizmo-landing-app", "prod", "/landing", "mirror");
+
+    for (String host : List.of("prod." + PROJECT + ".example.com", FLAT_PROJECT + ".example.com")) {
+      EdgeClient.Answer served = client().get(host, "/", token("prod"));
+      assertEquals(200, served.status(), host + ": " + served.body());
+      assertEquals("mirror-prod", served.line("upstream"), host + " must be the landing page");
+
+      EdgeClient.Answer anonymous = client().get(host, "/");
+      assertEquals(401, anonymous.status(), host + " must not serve an anonymous GET");
+      assertNull(anonymous.line("upstream"), host + " must not have reached the landing page");
+
+      EdgeClient.Answer head = client().send(HttpMethod.HEAD, host, "/", null, Map.of());
+      assertEquals(401, head.status(), host + " must not serve an anonymous HEAD");
+      assertNull(head.line("upstream"), host + " must not have reached the landing page");
+    }
+  }
+
   @Test
   void anEnvSupportingProjectsBareNameRedirectsToTheDefaultEnvironmentsLanding() {
     // It cannot serve one itself — there are as many landings as environments and this name states
