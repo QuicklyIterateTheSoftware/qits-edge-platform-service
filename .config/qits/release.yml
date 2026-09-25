@@ -1,4 +1,10 @@
 archetype: java-service
 artifacts:
   - { type: docker, name: qits/qits-platform-edge, sbom: .sbom/sbom.json }
-userflows: true
+# THE SITE IS SPELLED, AND IT NAMES THE COMPONENT. `true` derives it from the REPOSITORY name,
+# which would put the retired tier modifier in a storage id and then MOVE that id the day the
+# repository is renamed — a bundle's history stranded under a name nothing publishes to any
+# more. Every other service on the estate already spells the component (@userflows/qits-ci,
+# @userflows/qits-projects, @userflows/qits-observability); `true` survived only here, where the
+# derived value happened to be tolerable. Spelled, the rename costs the bundle nothing.
+userflows: qits-edge
