@@ -63,7 +63,7 @@ import java.util.Map;
  *       code's own escape hatch for a deliberately offline setup and the same line the suite's
  *       properties file carries — with it on, every request answers 503 while a bus that is not
  *       there is waited for. And OTel is dark, like {@code %dev}/{@code %test}: the shipped
- *       exporter points at {@code http://qits-observability:8080}, another qits-net-only name.
+ *       exporter points at {@code http://dev-qits-observability:8080}, another qits-net-only name.
  * </ul>
  *
  * <h2>The deployment projection is deliberately absent</h2>
