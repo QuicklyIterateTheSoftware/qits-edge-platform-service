@@ -18,28 +18,38 @@ application: qits-edge
 # credential with it, so the predecessor keeps serving on its open pools while the successor comes up.
 renamed_from: qits-platform-edge
 
-# THE EDGE IS THE ONE RENAME THAT IS NOT A BLUE/GREEN, and the reason is host ports.
+# THE EDGE IS THE ONE RENAME WITH A HOST-PORT HANDOVER, and the order matters more than it looks.
 #
-# The other five renames deploy a successor beside the predecessor and scale the predecessor to zero.
-# This one publishes 8080 and 443 in ingress mode, and two swarm services cannot hold one ingress
-# port — so a successor carrying `publishes[]` sits Pending forever while the predecessor holds them.
-# `update_order: stop-first` solves that for an UPDATE of one service and does nothing for two.
+# This service publishes 8080 and 443 in ingress mode, and two swarm services cannot hold one ingress
+# port. So the successor's task cannot be SCHEDULED while the predecessor runs — but its service can
+# be CREATED, and that distinction is the whole plan.
 #
-# AND THE PREDECESSOR CANNOT SIMPLY GO FIRST. It fronts `registry.dev.localhost`, which is what the
-# docker daemon pulls every image through, and the deployer runs an explicit `docker pull` before it
-# deploys anything. Stop the edge and the next pull fails — including the successor's own. The window
-# that would let the new edge deploy is the window in which nothing can deploy.
+# WHY THE PORTS MUST BE ON THE FIRST DEPLOY. A swarm service keeps its published ports across an
+# update: `buildUpdateArgv` changes the image, the labels, the environment and the update policy and
+# nothing else, so "another port" is a change of SHAPE, and a change of shape is a `service rm` and a
+# create rather than a deployment. A successor created without its ports could therefore never gain
+# them through the ordinary flow — only by removing the service by hand. The create path DOES apply
+# them, and extras are read at deploy time, so they have to be in the store before this deploys.
 #
-# So the successor lands PORTLESS first, while the predecessor still serves the registry: that puts
-# the image on the host and the service on qits-net, leaving only a port swap. The ports and ACME are
-# then moved onto the running successor in one host-level step, with the predecessor scaled to zero
-# immediately before it and scaled back if anything goes wrong.
+# WHAT THEREFORE HAPPENS, deliberately: this deploy creates dev-qits-edge with both ports, swarm
+# accepts the spec, and the task sits Pending because the predecessor holds them. The deployment row
+# goes FAILED on convergence — which is the expected reading, not a fault. The SERVICE survives, with
+# the right shape. Scaling the predecessor to zero then lets swarm place the task it is already
+# trying to place, and the door comes back on the new service within seconds. A rerun of the deploy
+# phase afterwards records the ACTIVE row.
 #
-# ACME IS OFF ON THE SUCCESSOR until that step. Both services mount the one
-# qits-edge-letsencrypt volume, and ACME here is `production` against a real domain with a DNS token
-# — two reconcilers would talk to Let's Encrypt at once, risking the weekly duplicate-certificate
-# limit and a corrupted account directory. Off, the successor still SERVES TLS: it reads the
-# certificate the predecessor renews.
+# AND THE PREDECESSOR CANNOT GO FIRST. It fronts `registry.dev.localhost`, which is what the docker
+# daemon pulls every image through, and the deployer runs an explicit `docker pull` whose failure is
+# a FAILED deployment with no local-image fallback. Stop the edge before the image is on the host and
+# the successor's own pull fails. Creating the service first is what puts the image there.
+#
+# ACME IS OFF ON THE SUCCESSOR for this deploy, and it can be turned on by an ordinary redeploy
+# afterwards because environment IS something an update carries. Both services mount the one
+# qits-edge-letsencrypt volume and ACME here is mode=production against a real domain with a DNS
+# token: two reconcilers would order against Let's Encrypt production at once, where the weekly
+# duplicate-certificate limit is five and a shared account directory written by two processes is not
+# something a redeploy repairs. Off, the successor still serves TLS — it reads the certificate the
+# predecessor renews.
 
 # The edge is now a durable projection consumer. `edge` holds its active endpoint snapshots;
 # `eventstream` is qits-eventstream's claim ledger and catch-up watermark. They cannot share a
