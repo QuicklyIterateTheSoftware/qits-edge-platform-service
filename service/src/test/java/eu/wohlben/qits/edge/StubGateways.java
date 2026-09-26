@@ -102,11 +102,12 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
   static final String SINKHOLE_SECRET = "sinkhole";
 
   /**
-   * The apex both suites type, and so the one name the edge may serve with no environment label —
-   * see {@code EdgeRouter.isApex}. Every origin derived from a name that says nothing else is built
-   * on it.
+   * The domain both suites type. It is STATED — a deployment's {@code QITS_DOMAIN} — and everything
+   * composed is built from it: the apex both suites type, the grammar every Host is read against,
+   * and the canonical origin, which is derived as the platform project's own door rather than
+   * configured.
    */
-  static final String CANONICAL_ORIGIN = "https://example.com";
+  static final String DOMAIN = "example.com";
 
   /** The edge's OWN idp client, the one it introspects browser sessions with. */
   static final String EDGE_ID = "an-edge";
@@ -279,11 +280,11 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // resource serve both a suite with the gate off and one with it on.
     config.put("qits.edge.sessions.client-id", EDGE_ID);
     config.put("qits.edge.sessions.client-secret", EDGE_SECRET);
-    // The names, which are facts about this fixture rather than about the gate: the apex the suite
-    // types is `example.com`, and the edge has to be told so — it is what the door is recognised
-    // by and what every derived origin is built from when a name says nothing else. Here rather
-    // than in the profile that turns the gate ON, so both suites read the same domain.
-    config.put("qits.edge.sessions.canonical-origin", CANONICAL_ORIGIN);
+    // The one stated name, which is a fact about this fixture rather than about the gate: the
+    // domain the suite types is `example.com`, and the edge has to be told so — it cannot be
+    // derived from a host. Everything else composed is built from it. Here rather than in the
+    // profile that turns the gate ON, so both suites read the same domain.
+    config.put("qits.edge.domain", DOMAIN);
     config.put("qits.edge.sessions.cache-ttl-ms", "1000");
     config.put("qits.edge.sessions.stale-grace-ms", "8000");
     // The environment vhost's own gate falls back to this GLOBAL pattern for a name none of the

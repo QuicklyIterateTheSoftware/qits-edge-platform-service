@@ -98,12 +98,6 @@ public class EdgeRouter {
    */
   @Inject EdgeProjects projects;
 
-  /**
-   * Where the stated domain comes from — see {@link #domain}. The certificate's domain is the same
-   * value read for the same reason: it is the one name the whole estate is inside.
-   */
-  @Inject AcmeConfig acme;
-
   @Inject DeploymentProjectionBootstrap projectionBootstrap;
 
   /**
@@ -207,7 +201,7 @@ public class EdgeRouter {
             config.environments(),
             config.defaultEnvironment(),
             config.apps().keySet(),
-            domain(acme.domain(), sessions.canonicalAuthority()));
+            domain(config.domain()));
     client = vertx.createHttpClient(proxyClientOptions(5_000));
     webSocketUpgrade = new EdgeWebSocketUpgrade(client);
 
@@ -398,20 +392,24 @@ public class EdgeRouter {
   }
 
   /**
-   * The stated domain every served name is read from the right of.
+   * The stated domain every served name is read from the right of, normalised.
    *
    * <p>It cannot be derived from a host name — {@code example.co.uk} is two labels of domain and
-   * {@code localhost} is one — so it is a value this deployment already carries twice. The
-   * certificate's own domain is the first source and the honest one: the edge orders the names
-   * inside {@code qits.edge.acme.domain}, so that is by construction the domain the estate lives
-   * in. A local clone runs with ACME off and no domain at all, and there the canonical origin's
-   * authority is the same value — {@code localhost}.
+   * {@code localhost} is one — so it is STATED, once, as {@link EdgeConfig#domain()} ({@code
+   * QITS_DOMAIN}). It used to be read off the certificate's own domain and, with ACME off, off the
+   * canonical origin's authority; both of those were the same fact under another name, and the
+   * second made the arrow point backwards — the origin was derived from the domain and the domain
+   * from the origin. The dependency runs one way now: the stated domain is the primitive, the
+   * canonical origin is derived from it, and nothing derives it back.
+   *
+   * <p>Normalised through {@link EnvironmentAuthority#name}, which is the same reading a request's
+   * own Host gets: lower case, no surrounding space, no trailing root dot, no port. One spelling of
+   * the normalisation is the point.
    *
    * <p>Static so it can be asserted without a boot; see {@code EdgeRouterNamesTest}.
    */
-  static String domain(java.util.Optional<String> acmeDomain, String canonicalAuthority) {
-    String configured = acmeDomain.orElse("").strip();
-    return configured.isEmpty() ? EnvironmentAuthority.name(canonicalAuthority) : configured;
+  static String domain(String stated) {
+    return EnvironmentAuthority.name(stated);
   }
 
   /**

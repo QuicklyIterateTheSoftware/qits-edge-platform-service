@@ -110,11 +110,16 @@ public final class StoryTarget {
   public static final String UNCLAIMED_HOST = "nosuchservice." + DOOR_HOST;
 
   /**
-   * The environment door of the DEFAULT environment, which is the apex — and the origin every
-   * default-environment name is derived from. It is the login page's fallback while no deployment
-   * has published a host for whoever owns {@code /idp/login}, which is the case throughout.
+   * The canonical origin, which is DERIVED from the stated domain and configured nowhere: the
+   * PLATFORM project's own door, {@code https://qits.<domain>}. It is what a name inside no project
+   * falls back to, and the login page's fallback while no deployment has published a host for
+   * whoever owns {@code /idp/login}, which is the case throughout.
+   *
+   * <p>It is deliberately not the apex, which is what it used to be: the apex carries no project
+   * label, so a browser sent there meets the door's own 404 instead of a login page.
    */
-  public static final String CANONICAL_ORIGIN = "https://" + DOMAIN;
+  public static final String CANONICAL_ORIGIN =
+      "https://" + EdgeSessions.PLATFORM_PROJECT + "." + DOMAIN;
 
   // --- the edge's own surface --------------------------------------------------------------------
 

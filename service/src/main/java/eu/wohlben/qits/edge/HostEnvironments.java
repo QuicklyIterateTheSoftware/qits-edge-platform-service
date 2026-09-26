@@ -43,11 +43,11 @@ import java.util.Set;
  * one of them is a 404, and an env-less project's apps are served in the default environment.
  *
  * <p><b>Positional reading needs the domain STATED.</b> It cannot be derived — {@code
- * example.co.uk} is two labels of domain and {@code localhost} is one — so it is a value, and
- * {@code EdgeRouter} takes it from {@code qits.edge.acme.domain} or, failing that, from the
- * canonical origin. An address literal, a missing Host header and the domain itself carry no
- * position at all, and all three are answered as the apex is: a door, which serves nothing — that
- * is how the platform is reached before DNS exists.
+ * example.co.uk} is two labels of domain and {@code localhost} is one — so it is a value, and it is
+ * stated once as {@code qits.edge.domain} ({@code QITS_DOMAIN}), which {@code EdgeRouter} reads
+ * directly. An address literal, a missing Host header and the domain itself carry no position at
+ * all, and all three are answered as the apex is: a door, which serves nothing — that is how the
+ * platform is reached before DNS exists.
  *
  * <p><b>A name OUTSIDE the stated domain is a MACHINE NAME, and it is read too.</b> The platform's
  * own machine vhosts are docker network aliases of this container and are deliberately not under

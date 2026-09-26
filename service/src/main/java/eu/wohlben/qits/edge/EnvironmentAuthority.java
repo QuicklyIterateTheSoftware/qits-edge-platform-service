@@ -41,9 +41,10 @@ import java.util.Map;
  * null from {@link #hostOrigin}. The apex, an address literal, a name outside the domain and a name
  * whose project label names no project all carry no project, and under this grammar there is no
  * application address that does not: every app is inside a project. Such a name falls back to the
- * CANONICAL ORIGIN, read by the same grammar — a deployment that states its origin as its own
- * project's door therefore keeps a front door on the apex, and one that states the bare apex has
- * nothing to compose and the door says so instead of redirecting somewhere that 404s.
+ * CANONICAL ORIGIN, read by the same grammar — and that origin is the PLATFORM PROJECT's own door,
+ * derived from the stated domain rather than configured, so the apex has a project's tier to
+ * compose application names on whenever this edge knows that project. Where it does not, the door
+ * says so instead of redirecting somewhere that 404s.
  *
  * <p><b>The port is part of the answer</b>, which is what makes {@code
  * http://ci.dev.acme.localhost:8080} work: a developer's whole platform is one port, so an origin
@@ -101,7 +102,8 @@ public record EnvironmentAuthority(String scheme, String authority, String proje
    * @param projects the projects that exist right now, slug to whether that project has
    *     environments — a per-call parameter for the same reason as {@link
    *     HostEnvironments#route(String, Map)}'s: it moves with the event stream.
-   * @param canonicalAuthority {@code qits.edge.sessions.canonical-origin}'s authority, or null
+   * @param canonicalAuthority the canonical origin's authority — the platform project's own door,
+   *     derived from the stated domain by {@code EdgeSessions.canonicalOrigin} — or null
    */
   public static EnvironmentAuthority of(
       String host,

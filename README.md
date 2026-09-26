@@ -125,8 +125,10 @@ A `Host` name selects an environment, and optionally a project and an applicatio
 | `mirror.dev.example.com`, `mirror` unconfigured and unpublished | **404** — see below |
 | `registry.example.com`, `acme.example.com`, `editor.acme.example.com`, `staging.example.com` | **404** naming the explicit spelling — see below |
 
-Only the **first three labels** are read, which is why the domain itself is never configured: it may
-be one label, two or three, and the edge does not have to know. An environment name at position 1
+Only the **first three labels** are read; everything to the right of them is the **stated domain**,
+`qits.edge.domain` (`QITS_DOMAIN`). It is stated rather than derived because it cannot be derived —
+`example.co.uk` is two labels of domain and `localhost` is one — and it is stated **once**: the
+certificate, the return authorities and the canonical origin are all this value. An environment name at position 1
 wins over everything, so `staging.prod.example.com` is *application `staging` in environment
 `prod`* — an application may be called anything, whereas a domain whose first label happens to be an
 environment name is a coincidence nobody arranges. At position 0 a configured **service** beats a
@@ -146,9 +148,10 @@ invisible.
 
 **The apex is a door like the others, and the one that can compose nothing.** `example.com` is the
 name that IS the stated domain, so it is recognised positionally like every other. It carries no
-project label, and every application address does — so its `GET /` redirects nowhere and it answers
-the grammar instead, unless `canonical-origin` names a project's door (`https://qits.example.com`),
-in which case that project's tier is what the apex composes on.
+project label, and every application address does — so it composes nothing of its own and falls back
+to the **canonical origin**, which is the platform project's own door (`https://qits.example.com`),
+derived from the stated domain. Where this edge knows that project, that tier is what the apex
+composes on; where it does not, `GET /` redirects nowhere and it answers the grammar instead.
 
 **A name outside the stated domain is a MACHINE NAME, and it is read rather than refused.** The
 platform's own machine vhosts are docker network aliases of this container — qits-bootstrap-cli's
@@ -338,6 +341,7 @@ a file.
 
 | Key | Env | Default | What it is |
 | --- | --- | --- | --- |
+| `qits.edge.domain` | `QITS_DOMAIN` | `localhost` | **The one domain this platform states about itself**, and the primitive every composed name is built from: the grammar every Host is read against, the certificate's SANs, the browser return authorities, and the canonical origin. It is the estate's fact rather than this service's, so it is read under the platform's own spelling — qits-deployments writes `QITS_DOMAIN` into every container beside `QITS_ENVIRONMENT`. `QITS_EDGE_ACME_DOMAIN` and `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` were the same fact under two more names and are **retired** |
 | `qits.edge.environments` | `QITS_EDGE_ENVIRONMENTS` | `prod` | The routable environment names, comma separated |
 | `qits.edge.default-environment` | `QITS_EDGE_DEFAULT_ENVIRONMENT` | `prod` | Where the apex and every unmatched host go. **Must be in the list** |
 | `qits.edge.apps.<app>.host-pattern` | `QITS_EDGE_APPS_<APP>_HOST_PATTERN` | — (`mirror`: `{env}-qits-platform-mirror`) | **Required per app.** `{env}` is the only placeholder, and every application names it. The one shipped entry is `mirror`, whose value is the platform's own pull-through cache rather than a decision |
@@ -359,7 +363,6 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on a service vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
-| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | A **door**, and the one name a deployment always states: what a name inside no project falls back to (read by the same right-to-left grammar, so naming a project's door is what lets the apex compose application names), the stated domain while ACME is off, the login origin's fallback, and — with `qits.edge.acme.domain` — what the browser return authorities are **derived** from, since there is no list to configure any more |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
@@ -537,9 +540,15 @@ IdP's browser SSO settings. The environment vhost is the door and serves nothing
 nothing.
 
 **The login page lives on idp's own name, not on the door.** The origin is read off the deployment
-projection per request: whoever owns `login-path` and publishes a host. `canonical-origin` cannot
-follow it, because it is also what a name inside no project falls back to — so it stays a door, and
-is the fallback while no deployment has published a host for the login path. idp is a platform
+projection per request: whoever owns `login-path` and publishes a host. The **canonical origin**
+cannot follow it, because it is also what a name inside no project falls back to — so it stays a
+door, and is the fallback while no deployment has published a host for the login path.
+
+That origin is **derived, not configured**: `https://qits.<domain>`, the platform project's own
+door, or `http://qits.<domain>:8080` where the domain is not a real one. It is deliberately not the
+apex, which is what `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` held (`https://wohlben.eu`) before it was
+retired: the apex carries no project label, so the edge serves it as a door and a browser sent there
+to log in meets a 404. idp is a platform
 service deployed once, so an environment that owns no route for the path asks the default
 environment before falling back.
 
@@ -639,8 +648,9 @@ failures. Telemetry is real in a deployment.
 
 ### TLS: wildcard certificates through DNS-01
 
-The `acme/` module is the edge's ACME client. For a configured apex it orders one SAN certificate
-whose names are **derived**, in four tiers, because a wildcard covers exactly one label:
+The `acme/` module is the edge's ACME client. For the **stated domain** — `qits.edge.domain`, the
+same value the router reads every name against, never a key of ACME's own — it orders one SAN
+certificate whose names are **derived**, in four tiers, because a wildcard covers exactly one label:
 
 | tier | shape | reaches |
 | --- | --- | --- |
@@ -702,7 +712,9 @@ it created. ACME account state and certificates persist on the TLS volume. Succe
 are installed in immutable version directories and an atomic `current` symlink switch lets Quarkus'
 TLS registry reload them without restarting the edge.
 
-Set `QITS_EDGE_ACME_MODE=staging` until the whole DNS path works, then switch to `production`. A
+`QITS_EDGE_ACME_ENABLED` and `QITS_EDGE_ACME_MODE` are the two keys that decide whether there is a
+certificate to own; the domain is not one of them any more. Set `QITS_EDGE_ACME_MODE=staging` until
+the whole DNS path works, then switch to `production`. A
 non-expiring production certificate is never replaced by staging. `QITS_DNS_HETZNER_TOKEN` is a
 secret and must be supplied by deployment configuration, never committed or logged. Replicas use a
 database lease so only one of them can place an order or renew at a time.

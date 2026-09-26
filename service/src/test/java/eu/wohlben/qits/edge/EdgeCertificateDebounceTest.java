@@ -84,6 +84,10 @@ class EdgeCertificateDebounceTest {
   /**
    * An edge that has ACME to do, which is what makes {@code reconcileSafely} reach the guard: with
    * the mode off it returns before taking it, and every test here would pass without one.
+   *
+   * <p>No domain: it is not this group's key any more — the certificate is ordered for the stated
+   * {@code qits.edge.domain} — and the guard does not read it, which is why {@code edge} can stay
+   * null in the double above.
    */
   private static AcmeConfig acme() {
     return acme(DEBOUNCE);
@@ -99,8 +103,7 @@ class EdgeCertificateDebounceTest {
                     Map.of(
                         "QITS_EDGE_ACME_RECONCILE_DEBOUNCE", debounce.toString(),
                         "QITS_EDGE_ACME_ENABLED", "true",
-                        "QITS_EDGE_ACME_MODE", "staging",
-                        "QITS_EDGE_ACME_DOMAIN", "wohlben.eu"),
+                        "QITS_EDGE_ACME_MODE", "staging"),
                     300))
             // The "30d" defaults are Quarkus' Duration spelling, not the ISO one a bare SmallRye
             // knows; the runtime converter is what reads them in a deployment too.

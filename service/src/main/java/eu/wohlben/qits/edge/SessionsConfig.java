@@ -35,35 +35,16 @@ public interface SessionsConfig {
   String cookieName();
 
   /**
-   * A door, with no trailing path: {@code https://wohlben.eu}, {@code http://localhost:8080}.
-   *
-   * <p><b>It is also what a name that names no project falls back to</b> — see {@link
-   * EnvironmentAuthority}, which reads this value by the same right-to-left grammar as a request's
-   * own Host. WHICH door it names therefore decides what the apex can compose: {@code
-   * https://qits.wohlben.eu} gives the apex the platform project's own tier to build application
-   * names on, and the bare {@code https://wohlben.eu} leaves it a door that redirects nowhere,
-   * because every application address carries a project label and that value carries none.
-   *
-   * <p><b>The default stays the apex, and must, on a clone.</b> With ACME off this value is also
-   * where the stated domain comes from — {@code EdgeRouter.domain} — so a local {@code
-   * http://qits.localhost:8080} would make {@code qits.localhost} the DOMAIN and the grammar would
-   * read every name one tier out. On the platform the domain is {@code qits.edge.acme.domain} and
-   * the two are independent, which is where naming the project's door is the useful spelling.
-   *
-   * <p>For the login page it is only the FALLBACK, used while no deployment has published a host
-   * for {@link #loginPath()}'s owner.
-   */
-  @WithDefault("http://localhost:8080")
-  String canonicalOrigin();
-
-  /**
    * The path that serves login, and the one whose owner decides where the page is: it lives on the
    * host of whichever deployment owns this route — {@code https://idp.wohlben.eu/idp/login} once
    * qits-platform-idp publishes {@code idp}.
    *
    * <p>The origin is still never inferred from a request Host: a passkey is bound to one WebAuthn
-   * origin, and a host header is caller input. It comes from the deployment projection or from
-   * {@link #canonicalOrigin()}.
+   * origin, and a host header is caller input. It comes from the deployment projection or from the
+   * canonical origin the edge derives from the stated domain — {@code
+   * EdgeSessions.canonicalOrigin}, the platform project's own door. There is no key for that
+   * origin: it was {@code qits.edge.sessions.canonical-origin}, and a second spelling of the domain
+   * is how it came to name the apex, which the edge serves as a door and answers 404.
    */
   @WithDefault("/idp/login")
   String loginPath();

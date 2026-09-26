@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -91,10 +92,20 @@ public class EdgeSessions {
 
   /**
    * The stated domain, and nothing more. Plain configuration, so injecting it here creates no cycle
-   * — where {@code HostEnvironments} or {@code EdgeRouter} would, because their own domain is built
-   * from {@link #canonicalAuthority()}.
+   * — where {@code HostEnvironments} or {@code EdgeRouter} would, because those are built FROM this
+   * same value and the arrow runs one way.
    */
-  @Inject AcmeConfig acme;
+  @Inject EdgeConfig edge;
+
+  /**
+   * The edge's own listener, and the only port a local clone serves on. It is part of the canonical
+   * origin where there is no real domain — {@code http://qits.localhost:8080} — because a
+   * developer's whole platform is one port and an origin without it names nothing. A deployment
+   * under a real domain is reached on 443 through nothing of this process' choosing, so the port is
+   * left off there.
+   */
+  @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
+  int httpPort;
 
   @Inject Idp idp;
 
@@ -109,8 +120,9 @@ public class EdgeSessions {
   private List<String> anonymousPrefixes;
 
   /**
-   * The environment door. It is what every default-environment name is derived from, and the login
-   * origin's fallback while no deployment has published a host for the login path's owner.
+   * The platform project's own door, derived from the stated domain — see {@link
+   * #canonicalOrigin(String, int)}. It is what a name inside no project falls back to, and the
+   * login origin's fallback while no deployment has published a host for the login path's owner.
    */
   private URI canonicalOrigin;
 
@@ -154,25 +166,27 @@ public class EdgeSessions {
                             .getBytes(StandardCharsets.UTF_8))
             : null;
     anonymousPrefixes = prefixes(config.anonymousPrefixes());
-    canonicalOrigin = parseOrigin(config.canonicalOrigin());
+    String domain = EdgeRouter.domain(edge.domain());
+    if (domain.isEmpty()) {
+      throw new IllegalStateException(
+          "this deployment states no domain. Every name the edge serves, reads or returns to is"
+              + " built from it, so there is nothing to compose: set QITS_DOMAIN.");
+    }
+    // DERIVED, not configured. Both of these are a function of the stated domain and nothing else.
+    canonicalOrigin = parseOrigin(canonicalOrigin(domain, httpPort));
     String canonicalAuthority = authority(canonicalOrigin.getAuthority());
-    // DERIVED, not configured. The allow-list is a function of the domain this deployment states
-    // and nothing else: the domain itself, plus one wildcard in front of it. Computed once here
-    // because neither input moves after boot. See browserHost for why one wildcard is the whole
-    // grammar.
-    String apex =
-        canonicalAuthority == null
-            ? null
-            : EdgeRouter.domain(acme.domain(), canonicalAuthority)
-                + EnvironmentAuthority.port(canonicalAuthority);
-    browserHosts = apex == null ? Set.of() : Set.of(apex);
-    wildcardBrowserHosts = apex == null ? List.of() : List.of(apex);
+    // The allow-list: the domain itself, plus one wildcard in front of it. Computed once here
+    // because the domain does not move after boot. See browserHost for why one wildcard is the
+    // whole grammar.
+    String apex = domain + EnvironmentAuthority.port(canonicalAuthority);
+    browserHosts = Set.of(apex);
+    wildcardBrowserHosts = List.of(apex);
     if (canonicalAuthority == null
         || !browserHost(canonicalAuthority, browserHosts, wildcardBrowserHosts)) {
       throw new IllegalStateException(
-          "the browser return authorities derived from the stated domain ("
-              + "qits.edge.acme.domain, or qits.edge.sessions.canonical-origin's own host while"
-              + " ACME is off) must cover qits.edge.sessions.canonical-origin");
+          "the browser return authorities derived from the stated domain (QITS_DOMAIN) must cover"
+              + " the canonical origin derived from that same domain — which can only fail if one"
+              + " of the two derivations is wrong");
     }
     int capacity = config.cacheSize();
     sessions =
@@ -219,9 +233,9 @@ public class EdgeSessions {
   }
 
   /**
-   * The configured canonical browser authority — {@code wohlben.eu}, {@code localhost:8080}. It is
-   * what an environment's names are built from when a request's own Host says which environment it
-   * is not; see {@link EnvironmentAuthority}.
+   * The derived canonical browser authority — {@code qits.wohlben.eu}, {@code qits.localhost:8080}.
+   * It is what a name that names no project falls back to, read by the same grammar as a request's
+   * own Host; see {@link EnvironmentAuthority}.
    */
   public String canonicalAuthority() {
     return authority(canonicalOrigin.getAuthority());
@@ -448,15 +462,50 @@ public class EdgeSessions {
         + URLEncoder.encode(redirectTarget(uri), StandardCharsets.UTF_8);
   }
 
-  private static URI parseOrigin(String configured) {
-    URI origin = URI.create(configured.strip());
+  /**
+   * The platform's own project, which is a constant of this platform and not a name anybody
+   * configures — the bootstrap spells it {@code PlatformModel.PROJECT}. Every application the
+   * platform itself runs is inside it, so its door is the one name a deployment of the edge can
+   * compose about itself without being told anything but the domain.
+   */
+  static final String PLATFORM_PROJECT = "qits";
+
+  /**
+   * The canonical origin, DERIVED from the stated domain: the platform project's own door.
+   *
+   * <p><b>It is not the apex</b>, and that is the bug this derivation fixes. The apex carries no
+   * project label, so under the grammar it can compose no application name at all — a refused login
+   * used to be sent to {@code https://wohlben.eu}, which the edge serves as a door and answers 404.
+   * {@code https://qits.<domain>} is the platform project's door, which is served, and which every
+   * platform application name is one label in front of.
+   *
+   * <p><b>Where there is no real domain the port is part of it.</b> A local clone's whole platform
+   * is one listener, so {@code http://qits.localhost:8080} is the door there and an origin without
+   * the port names nothing. A domain with a dot in it is a real one, reached over TLS on the
+   * default port through whatever terminates it.
+   *
+   * <p>Static so it can be asserted without a boot — see {@code EdgeChallengeTest}.
+   *
+   * @param domain the stated domain, already normalised by {@link EdgeRouter#domain}
+   * @param localPort this process' own listener, used only where the domain is not a real one
+   */
+  static String canonicalOrigin(String domain, int localPort) {
+    return domain.contains(".")
+        ? "https://" + PLATFORM_PROJECT + "." + domain
+        : "http://" + PLATFORM_PROJECT + "." + domain + ":" + localPort;
+  }
+
+  private static URI parseOrigin(String derived) {
+    URI origin = URI.create(derived.strip());
     if (!("http".equals(origin.getScheme()) || "https".equals(origin.getScheme()))
         || origin.getHost() == null
         || origin.getRawQuery() != null
         || origin.getRawFragment() != null
         || !"".equals(origin.getPath())) {
       throw new IllegalStateException(
-          "qits.edge.sessions.canonical-origin must be an http(s) origin with no path, query, or fragment");
+          "the canonical origin derived from the stated domain (QITS_DOMAIN) is not an http(s)"
+              + " origin with no path, query, or fragment: "
+              + derived);
     }
     return origin;
   }

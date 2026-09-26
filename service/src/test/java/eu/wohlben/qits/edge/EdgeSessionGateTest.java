@@ -57,6 +57,18 @@ class EdgeSessionGateTest {
   private static final String PROJECT = "acme";
 
   /**
+   * The canonical origin this boot DERIVES from the stated domain: the platform project's own door,
+   * {@code https://qits.example.com}. Nothing configures it.
+   *
+   * <p>It is what the login page's origin falls back to throughout this suite — no deployment here
+   * publishes a host for {@code /idp/login} — and what a return host the derivation refuses falls
+   * back to. It used to be the bare apex, which is a door that serves nothing: a browser sent there
+   * to log in met a 404, which is the bug this derivation fixes.
+   */
+  private static final String CANONICAL_ORIGIN =
+      "https://" + EdgeSessions.PLATFORM_PROJECT + "." + StubGateways.DOMAIN;
+
+  /**
    * The flag, and nothing else. The credential and the time bounds are {@code StubGateways}', which
    * is where the facts about this stub idp belong — so the difference between the two suites is
    * exactly the one line under test.
@@ -64,10 +76,9 @@ class EdgeSessionGateTest {
   public static class SessionsOn implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      // Literally the one line now. The canonical origin moved to StubGateways with the rest of
-      // the fixture's facts — it is the domain this suite types, which both suites have to agree
-      // about — and the browser return authorities are no longer configured at all: they are
-      // derived from that same stated domain.
+      // Literally the one line now. The stated domain is in StubGateways with the rest of the
+      // fixture's facts, because both suites have to agree about it — and the canonical origin and
+      // the browser return authorities are not configured at all: both are derived from it.
       return Map.of("qits.edge.sessions.enabled", "true");
     }
   }
@@ -260,7 +271,8 @@ class EdgeSessionGateTest {
     // was trying to go. Asserted character by character: a login that returns somewhere else is a
     // bug nobody files, they just re-navigate.
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2Fruns%2F7%3Ftab%3Dlog",
+        CANONICAL_ORIGIN
+            + "/idp/login?return_host=ci.dev.acme.example.com&return_path=%2Fruns%2F7%3Ftab%3Dlog",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached the service");
   }
@@ -277,7 +289,7 @@ class EdgeSessionGateTest {
                 Map.of("Accept", "text/html,application/xhtml+xml,*/*;q=0.8"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
+        CANONICAL_ORIGIN + "/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
         answer.headers().get("location"));
   }
 
@@ -322,7 +334,7 @@ class EdgeSessionGateTest {
                 Map.of("Sec-Fetch-Mode", "navigate"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
+        CANONICAL_ORIGIN + "/idp/login?return_host=ci.dev.acme.example.com&return_path=%2F",
         answer.headers().get("location"));
   }
 
@@ -345,7 +357,8 @@ class EdgeSessionGateTest {
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=editor.dev.acme.example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
+        CANONICAL_ORIGIN
+            + "/idp/login?return_host=editor.dev.acme.example.com&return_path=%2Feditor%2Fsrc%2Fmain.ts",
         answer.headers().get("location"));
     assertNull(answer.line("upstream"), "it must not have reached the editor");
   }
@@ -385,8 +398,8 @@ class EdgeSessionGateTest {
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login"
-            + "?return_host=registry.prod.acme.example.com&return_path=%2Fv2%2F",
+        CANONICAL_ORIGIN
+            + "/idp/login?return_host=registry.prod.acme.example.com&return_path=%2Fv2%2F",
         answer.headers().get("location"));
   }
 
@@ -396,21 +409,26 @@ class EdgeSessionGateTest {
     // through a socket because a name the grammar could not have produced never reaches the gate:
     // routing refuses it a step earlier, as theRetiredFourLabelEditorNameIsNotEvenAName shows. So
     // what is left is a Host a caller invents, and the property is that none of them is reflected.
+    //
+    // What such a name falls back to is the CANONICAL ORIGIN's own authority, which is derived and
+    // is the platform project's door — `qits.example.com`, a name this edge serves — rather than
+    // the bare apex, which serves nothing and answered a returning browser 404.
     String login = "https://example.com/idp/login";
+    String door = EdgeSessions.PLATFORM_PROJECT + "." + StubGateways.DOMAIN;
     assertEquals(
         login + "?return_host=registry.prod.acme.example.com&return_path=%2Fv2%2F",
         sessions.loginLocation("https://example.com", "registry.prod.acme.example.com", "/v2/"),
         "a name under the stated domain");
     assertEquals(
-        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        login + "?return_host=" + door + "&return_path=%2Fv2%2F",
         sessions.loginLocation("https://example.com", "registry.prod.acme.evil.example", "/v2/"),
         "a FOREIGN domain, which is the whole reason the check exists");
     assertEquals(
-        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        login + "?return_host=" + door + "&return_path=%2Fv2%2F",
         sessions.loginLocation("https://example.com", "a.b.c.d.example.com", "/v2/"),
         "four labels is deeper than the grammar goes");
     assertEquals(
-        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        login + "?return_host=" + door + "&return_path=%2Fv2%2F",
         sessions.loginLocation("https://example.com", "ci.dev.acme.example.com:8443", "/v2/"),
         "the right name on a port this edge does not serve is another authority");
   }

@@ -7,7 +7,16 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 
-/** Runtime ownership of the edge certificate; absent domain means no public TLS automation. */
+/**
+ * Runtime ownership of the edge certificate; {@link #enabled()} off, or {@link Mode#OFF}, means no
+ * public TLS automation.
+ *
+ * <p><b>The domain is not here.</b> It used to be, as {@code qits.edge.acme.domain}, and it was the
+ * platform's one stated domain under a second name — the same value the grammar reads every Host
+ * against. It is {@link EdgeConfig#domain()} now, injected as {@code QITS_DOMAIN}, and the
+ * certificate is ordered for whatever this deployment says its domain is rather than for a value
+ * that could disagree with the router's.
+ */
 @ConfigMapping(prefix = "qits.edge.acme")
 public interface AcmeConfig {
 
@@ -22,8 +31,6 @@ public interface AcmeConfig {
 
   @WithDefault("off")
   Mode mode();
-
-  Optional<String> domain();
 
   Optional<String> email();
 

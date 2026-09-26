@@ -24,12 +24,34 @@ import java.util.Map;
  * file:
  *
  * <pre>
+ * QITS_DOMAIN=wohlben.eu
  * QITS_EDGE_ENVIRONMENTS=prod,dev
  * QITS_EDGE_DEFAULT_ENVIRONMENT=prod
  * </pre>
  */
 @ConfigMapping(prefix = "qits.edge")
 public interface EdgeConfig {
+
+  /**
+   * <b>The one domain this platform states about itself</b>, and the primitive every composed name
+   * here is built from: {@code wohlben.eu}, {@code localhost}.
+   *
+   * <p>It is a DEPLOYMENT fact of the estate rather than of this service, so it is injected under
+   * the platform's own spelling — {@code QITS_DOMAIN}, beside {@code QITS_ENVIRONMENT}, written by
+   * qits-deployments into every container — and {@code application.properties} maps that name onto
+   * this key. One fact, stated once: the certificate's domain, the grammar every Host is read
+   * against, the browser return authorities and the canonical origin are all THIS value, and none
+   * of them is configured beside it. {@code QITS_EDGE_ACME_DOMAIN} and {@code
+   * QITS_EDGE_SESSIONS_CANONICAL_ORIGIN} were the same fact under two more names and are gone.
+   *
+   * <p>It cannot be derived from a host name — {@code example.co.uk} is two labels of domain and
+   * {@code localhost} is one — which is why it is stated at all.
+   *
+   * <p>The default is the local one, so a clone with no environment at all serves {@code
+   * *.localhost:8080} exactly as it did.
+   */
+  @WithDefault("localhost")
+  String domain();
 
   /**
    * The environments this edge can reach, by name. A Host name resolves to one of these or to

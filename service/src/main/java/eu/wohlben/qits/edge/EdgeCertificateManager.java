@@ -162,7 +162,10 @@ public class EdgeCertificateManager {
    *     must not treat as done.
    */
   boolean reconcileSafely() {
-    if (!acme.enabled() || acme.mode() == AcmeConfig.Mode.OFF || acme.domain().isEmpty()) {
+    // Two keys decide whether there is anything to do, and the domain is no longer one of them: it
+    // is the platform's one stated domain (QITS_DOMAIN) and every deployment has one, so an edge
+    // with ACME enabled and a mode has a certificate to own. Reading it is reconcile()'s job.
+    if (!acme.enabled() || acme.mode() == AcmeConfig.Mode.OFF) {
       return true;
     }
     if (!running.compareAndSet(false, true)) {
@@ -180,9 +183,25 @@ public class EdgeCertificateManager {
     return true;
   }
 
+  /**
+   * The domain this certificate is ordered for, which is the platform's one stated domain — the
+   * same value, normalised the same way, that the router reads every served name against. It was
+   * {@code qits.edge.acme.domain}: a second spelling of one fact, and one a deployment could set to
+   * something the router disagreed with.
+   *
+   * <p>Package-visible so the SAN set can be derived without a boot; see {@code AcmeConfigTest}.
+   */
+  String domain() {
+    return EdgeRouter.domain(edge.domain());
+  }
+
   /** Package-visible so {@code EdgeCertificateDebounceTest} can hold the real guard down. */
   void reconcile() throws Exception {
-    String domain = acme.domain().orElseThrow().strip().toLowerCase(Locale.ROOT);
+    String domain = domain();
+    if (domain.isEmpty()) {
+      throw new IllegalStateException(
+          "ACME is on but this deployment states no domain: set QITS_DOMAIN.");
+    }
     String token = hetznerToken();
     CertificateNames.Names derived =
         CertificateNames.capped(

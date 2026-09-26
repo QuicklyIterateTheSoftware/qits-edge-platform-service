@@ -13,6 +13,7 @@ import io.smallrye.config.SmallRyeConfigBuilder;
 import io.smallrye.config.WithDefault;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.JsonArray;
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -394,19 +395,23 @@ class EdgeChallengeTest {
     // The cookie and the path are a contract with qits-platform-idp and its SPA, so they are pinned
     // here rather than left to a deployment to keep in step.
     assertEquals("qits-session", sessionDefault("cookieName"));
-    assertEquals("http://localhost:8080", sessionDefault("canonicalOrigin"));
-    // The names a login may return to are not configuration at all any more: they are derived from
-    // the stated domain, which with ACME off is the canonical origin's own host. A clone therefore
-    // admits `localhost:8080` and everything the grammar can build under it, with no key to keep in
-    // step with the project set.
+    // Neither the return hosts nor the canonical origin is configuration any more: both are derived
+    // from the one stated domain. A clone therefore admits `localhost:8080` and everything the
+    // grammar can build under it, with no key to keep in step with the project set.
     assertThrows(
         NoSuchMethodException.class,
         () -> SessionsConfig.class.getMethod("browserHosts"),
         "browser-hosts is derived now and must not come back as a key");
-    // The derivation a clone gets, from the shipped canonical origin and no ACME domain.
+    assertThrows(
+        NoSuchMethodException.class,
+        () -> SessionsConfig.class.getMethod("canonicalOrigin"),
+        "the canonical origin is derived from the stated domain and must not come back as a key");
+    // The derivation a clone gets, from the shipped default domain alone.
+    String canonical = EdgeSessions.canonicalOrigin(EdgeRouter.domain("localhost"), 8080);
+    assertEquals("http://qits.localhost:8080", canonical);
     String apex =
-        EdgeRouter.domain(Optional.empty(), "localhost:8080")
-            + EnvironmentAuthority.port("localhost:8080");
+        EdgeRouter.domain("localhost")
+            + EnvironmentAuthority.port(URI.create(canonical).getAuthority());
     assertEquals("localhost:8080", apex);
     assertTrue(
         EdgeSessions.browserHost("projects.qits.localhost:8080", Set.of(apex), List.of(apex)),
@@ -603,7 +608,7 @@ class EdgeChallengeTest {
     // the stated domain, and one wildcard anchored there covers every project and every
     // environment with no knowledge of either. What keeps a foreign origin out is the anchor, not
     // the label count; the bound is the grammar's own depth.
-    String apex = EdgeRouter.domain(Optional.of("wohlben.eu"), "qits.wohlben.eu");
+    String apex = EdgeRouter.domain("wohlben.eu");
     assertEquals("wohlben.eu", apex);
     Set<String> exact = Set.of(apex);
     List<String> wildcards = List.of(apex);
@@ -642,12 +647,40 @@ class EdgeChallengeTest {
   }
 
   @Test
+  void theCanonicalOriginIsThePlatformProjectsDoorAndNotTheApex() {
+    // The whole of the derivation, and the bug it fixes. The apex composes no application name —
+    // every address carries a project label and the apex carries none — so a refused login used to
+    // be sent to `https://wohlben.eu`, which this edge serves as a door and answers 404. The
+    // platform's own project is a constant of the platform, not a configured name.
+    assertEquals("qits", EdgeSessions.PLATFORM_PROJECT);
+    assertEquals(
+        "https://qits.wohlben.eu",
+        EdgeSessions.canonicalOrigin(EdgeRouter.domain("wohlben.eu"), 8080));
+    assertEquals(
+        "https://qits.example.co.uk",
+        EdgeSessions.canonicalOrigin(EdgeRouter.domain("example.co.uk"), 8080),
+        "a two-label domain is still one stated value and gets one label in front of it");
+
+    // And the local shape, where there is no real domain: one listener is the whole platform, so
+    // the port is part of the origin and an origin without it names nothing.
+    assertEquals(
+        "http://qits.localhost:8080",
+        EdgeSessions.canonicalOrigin(EdgeRouter.domain("localhost"), 8080));
+    assertEquals(
+        "http://qits.localhost:9000",
+        EdgeSessions.canonicalOrigin(EdgeRouter.domain("  LOCALHOST  "), 9000),
+        "whatever port this process actually listens on");
+  }
+
+  @Test
   void theDerivationCarriesTheCanonicalOriginsPort() {
     // A local clone serves on :8080, and the port is part of the authority on both sides — a
     // derivation that dropped it would match nothing at all, silently.
-    String canonical = "localhost:8080";
-    String apex =
-        EdgeRouter.domain(Optional.empty(), canonical) + EnvironmentAuthority.port(canonical);
+    String canonical =
+        URI.create(EdgeSessions.canonicalOrigin(EdgeRouter.domain("localhost"), 8080))
+            .getAuthority();
+    assertEquals("qits.localhost:8080", canonical);
+    String apex = EdgeRouter.domain("localhost") + EnvironmentAuthority.port(canonical);
     assertEquals("localhost:8080", apex);
     assertTrue(EdgeSessions.browserHost(canonical, Set.of(apex), List.of(apex)), "the door itself");
     assertTrue(

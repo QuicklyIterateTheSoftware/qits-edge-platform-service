@@ -140,9 +140,8 @@ public class StoryProfile implements QuarkusTestProfile {
     config.put("qits.edge.auth.anonymous-read-apps", StoryTarget.MIRROR_APP);
 
     config.put("qits.edge.sessions.enabled", "true");
-    config.put("qits.edge.sessions.canonical-origin", StoryTarget.CANONICAL_ORIGIN);
-    // No browser-host list: the return authorities are derived from the stated domain, which with
-    // ACME off is this canonical origin's own host.
+    config.put("qits.edge.domain", StoryTarget.DOMAIN);
+    // No browser-host list and no canonical origin: both are derived from that one stated domain.
     config.put("qits.edge.sessions.client-id", StoryTarget.EDGE_CLIENT_ID);
     config.put("qits.edge.sessions.client-secret", StoryTarget.EDGE_CLIENT_SECRET);
 

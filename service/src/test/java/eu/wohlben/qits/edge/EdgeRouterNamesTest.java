@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.edge.HostEnvironments.Reading;
 import eu.wohlben.qits.edge.HostEnvironments.Route;
-import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -22,22 +21,21 @@ import org.junit.jupiter.api.Test;
 class EdgeRouterNamesTest {
 
   @Test
-  void theStatedDomainIsTheCertificatesWhenThereIsOne() {
-    // The edge orders the names inside qits.edge.acme.domain, so that value IS the domain the
-    // estate lives in — and it wins over a canonical origin that carries a label in front of it.
-    assertEquals(
-        "wohlben.eu", EdgeRouter.domain(Optional.of("wohlben.eu"), "https://prod.wohlben.eu"));
-    assertEquals("wohlben.eu", EdgeRouter.domain(Optional.of("  wohlben.eu  "), "wohlben.eu"));
+  void theStatedDomainIsTheOneStatedValue() {
+    // QITS_DOMAIN, and nothing else: no certificate domain and no canonical origin to read it back
+    // off. It is normalised the way a request's own Host is — one spelling of that reading.
+    assertEquals("wohlben.eu", EdgeRouter.domain("wohlben.eu"));
+    assertEquals("wohlben.eu", EdgeRouter.domain("  WOHLBEN.eu  "));
+    assertEquals("wohlben.eu", EdgeRouter.domain("wohlben.eu."), "a resolver's trailing root dot");
+    assertEquals("localhost", EdgeRouter.domain("localhost"), "the local default");
   }
 
   @Test
-  void aCloneWithAcmeOffFallsBackToTheCanonicalAuthority() {
-    // The local case, which is where the domain is `localhost`: no certificate, so no acme domain,
-    // and the canonical origin's authority is the same value with a port on it.
-    assertEquals("localhost", EdgeRouter.domain(Optional.empty(), "localhost:8080"));
-    assertEquals("example.com", EdgeRouter.domain(Optional.of("  "), "example.com"));
-    assertEquals(
-        "", EdgeRouter.domain(Optional.empty(), null), "and nothing configured is nothing");
+  void nothingStatedIsNothingComposed() {
+    // Not reachable through configuration — the key has a default — but the normalisation is the
+    // same function a Host goes through, and an empty domain is what EdgeSessions refuses at boot.
+    assertEquals("", EdgeRouter.domain("  "));
+    assertEquals("", EdgeRouter.domain(null));
   }
 
   @Test
