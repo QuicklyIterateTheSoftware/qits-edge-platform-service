@@ -12,7 +12,34 @@
 # Every derivation the deployer makes hangs off this name — the wire alias peers dial, the container
 # it manages, the extras family, the database — so letting it follow the repository would
 # decommission the running service and start a stranger beside it.
-application: qits-platform-edge
+application: qits-edge
+
+# WHAT THIS APPLICATION USED TO BE CALLED. See qits-376: this transfers the database claim and the
+# credential with it, so the predecessor keeps serving on its open pools while the successor comes up.
+renamed_from: qits-platform-edge
+
+# THE EDGE IS THE ONE RENAME THAT IS NOT A BLUE/GREEN, and the reason is host ports.
+#
+# The other five renames deploy a successor beside the predecessor and scale the predecessor to zero.
+# This one publishes 8080 and 443 in ingress mode, and two swarm services cannot hold one ingress
+# port — so a successor carrying `publishes[]` sits Pending forever while the predecessor holds them.
+# `update_order: stop-first` solves that for an UPDATE of one service and does nothing for two.
+#
+# AND THE PREDECESSOR CANNOT SIMPLY GO FIRST. It fronts `registry.dev.localhost`, which is what the
+# docker daemon pulls every image through, and the deployer runs an explicit `docker pull` before it
+# deploys anything. Stop the edge and the next pull fails — including the successor's own. The window
+# that would let the new edge deploy is the window in which nothing can deploy.
+#
+# So the successor lands PORTLESS first, while the predecessor still serves the registry: that puts
+# the image on the host and the service on qits-net, leaving only a port swap. The ports and ACME are
+# then moved onto the running successor in one host-level step, with the predecessor scaled to zero
+# immediately before it and scaled back if anything goes wrong.
+#
+# ACME IS OFF ON THE SUCCESSOR until that step. Both services mount the one
+# qits-edge-letsencrypt volume, and ACME here is `production` against a real domain with a DNS token
+# — two reconcilers would talk to Let's Encrypt at once, risking the weekly duplicate-certificate
+# limit and a corrupted account directory. Off, the successor still SERVES TLS: it reads the
+# certificate the predecessor renews.
 
 # The edge is now a durable projection consumer. `edge` holds its active endpoint snapshots;
 # `eventstream` is qits-eventstream's claim ledger and catch-up watermark. They cannot share a
