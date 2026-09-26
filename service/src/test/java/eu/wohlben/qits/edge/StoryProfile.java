@@ -141,11 +141,8 @@ public class StoryProfile implements QuarkusTestProfile {
 
     config.put("qits.edge.sessions.enabled", "true");
     config.put("qits.edge.sessions.canonical-origin", StoryTarget.CANONICAL_ORIGIN);
-    // The apex is the canonical origin and must be covered or startup fails; the wildcard is one
-    // line that follows the deployment's application list instead of copying it.
-    config.put(
-        "qits.edge.sessions.browser-hosts",
-        StoryTarget.DOMAIN + "," + StoryTarget.DOOR_HOST + ",*." + StoryTarget.DOOR_HOST);
+    // No browser-host list: the return authorities are derived from the stated domain, which with
+    // ACME off is this canonical origin's own host.
     config.put("qits.edge.sessions.client-id", StoryTarget.EDGE_CLIENT_ID);
     config.put("qits.edge.sessions.client-secret", StoryTarget.EDGE_CLIENT_SECRET);
 

@@ -46,6 +46,9 @@ class EdgeSessionGateTest {
 
   @Inject EdgeProjects projects;
 
+  /** The gate itself, for the return-host fallback no routed request can reach any more. */
+  @Inject EdgeSessions sessions;
+
   @Inject
   @io.quarkus.agroal.DataSource("edge")
   io.agroal.api.AgroalDataSource edgeDataSource;
@@ -61,9 +64,10 @@ class EdgeSessionGateTest {
   public static class SessionsOn implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      // Literally the one line now. The canonical origin and the browser hosts moved to
-      // StubGateways with the rest of the fixture's facts: they are the domain this suite types,
-      // which both suites have to agree about, rather than anything the gate decides.
+      // Literally the one line now. The canonical origin moved to StubGateways with the rest of
+      // the fixture's facts — it is the domain this suite types, which both suites have to agree
+      // about — and the browser return authorities are no longer configured at all: they are
+      // derived from that same stated domain.
       return Map.of("qits.edge.sessions.enabled", "true");
     }
   }
@@ -81,7 +85,8 @@ class EdgeSessionGateTest {
   @BeforeEach
   void publishProject() throws java.sql.SQLException {
     // The slug is a ROUTING input — the four-label tier reads it — and nothing else: the return
-    // host no longer consults the project set at all. Cleared first so the row this suite routes
+    // host is derived from the stated domain and never consults the project set. Cleared first so
+    // the row this suite routes
     // with is this suite's own, whatever any other class in the JVM dated its frames.
     try (java.sql.Connection connection = edgeDataSource.getConnection();
         java.sql.PreparedStatement delete =
@@ -112,8 +117,8 @@ class EdgeSessionGateTest {
                 new EdgeEndpoint(
                     "dev", "session-test-environment", "/", Upstream.parse(address, 8080)))));
     // A flipped service, on a stub that names itself differently: `ci.dev.acme.example.com` is a
-    // browser
-    // host through the wildcard above, and nothing about it is configured in qits.edge.apps.
+    // browser host through the derived wildcard — three labels in front of `example.com` — and
+    // nothing about it is configured in qits.edge.apps.
     String ci =
         ConfigProvider.getConfig().getValue("qits.edge.apps.mirror.hosts.dev", String.class);
     routes.replace(
@@ -365,11 +370,11 @@ class EdgeSessionGateTest {
   }
 
   @Test
-  void aNameNobodyListedStillFallsBackToTheDoor() {
-    // The fallback for a name no entry covers: this suite lists
-    // `*.dev.acme.example.com` and no wildcard for prod, so a prod service's own name is a return
-    // target
-    // this process refuses to reflect. The whole matrix of the matcher is EdgeChallengeTest's.
+  void everyNameTheGrammarMakesUnderTheStatedDomainIsItsOwnReturnHost() {
+    // The derivation, through the whole stack. This used to fall back to the door because the
+    // fixture listed a wildcard for `dev` and none for `prod`; there is no list to be behind now,
+    // so a name in ANY environment of ANY project under `example.com` comes back to itself. That
+    // staleness is exactly what broke sign-in on the live platform.
     EdgeClient.Answer answer =
         client()
             .send(
@@ -380,8 +385,34 @@ class EdgeSessionGateTest {
                 Map.of("Sec-Fetch-Mode", "navigate", "Accept", "text/html"));
     assertEquals(302, answer.status());
     assertEquals(
-        "https://example.com/idp/login?return_host=example.com&return_path=%2Fv2%2F",
+        "https://example.com/idp/login"
+            + "?return_host=registry.prod.acme.example.com&return_path=%2Fv2%2F",
         answer.headers().get("location"));
+  }
+
+  @Test
+  void aNameOutsideTheGrammarStillFallsBackToTheDoor() {
+    // The fallback, against the list this boot actually derived. It is asserted here rather than
+    // through a socket because a name the grammar could not have produced never reaches the gate:
+    // routing refuses it a step earlier, as theRetiredFourLabelEditorNameIsNotEvenAName shows. So
+    // what is left is a Host a caller invents, and the property is that none of them is reflected.
+    String login = "https://example.com/idp/login";
+    assertEquals(
+        login + "?return_host=registry.prod.acme.example.com&return_path=%2Fv2%2F",
+        sessions.loginLocation("https://example.com", "registry.prod.acme.example.com", "/v2/"),
+        "a name under the stated domain");
+    assertEquals(
+        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        sessions.loginLocation("https://example.com", "registry.prod.acme.evil.example", "/v2/"),
+        "a FOREIGN domain, which is the whole reason the check exists");
+    assertEquals(
+        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        sessions.loginLocation("https://example.com", "a.b.c.d.example.com", "/v2/"),
+        "four labels is deeper than the grammar goes");
+    assertEquals(
+        login + "?return_host=example.com&return_path=%2Fv2%2F",
+        sessions.loginLocation("https://example.com", "ci.dev.acme.example.com:8443", "/v2/"),
+        "the right name on a port this edge does not serve is another authority");
   }
 
   @Test

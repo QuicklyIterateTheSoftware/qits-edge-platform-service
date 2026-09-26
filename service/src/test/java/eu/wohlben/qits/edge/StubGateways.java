@@ -108,14 +108,6 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
    */
   static final String CANONICAL_ORIGIN = "https://example.com";
 
-  /**
-   * The return authorities, with the wildcard that makes every service of an environment one. The
-   * apex must be covered or the process refuses to start; the editor's own four-label name is
-   * covered by the same wildcard, because its middle label is a project.
-   */
-  static final String BROWSER_HOSTS =
-      "example.com,dev.acme.example.com,prod.acme.example.com,*.dev.acme.example.com";
-
   /** The edge's OWN idp client, the one it introspects browser sessions with. */
   static final String EDGE_ID = "an-edge";
 
@@ -292,7 +284,6 @@ public class StubGateways implements QuarkusTestResourceLifecycleManager {
     // by and what every derived origin is built from when a name says nothing else. Here rather
     // than in the profile that turns the gate ON, so both suites read the same domain.
     config.put("qits.edge.sessions.canonical-origin", CANONICAL_ORIGIN);
-    config.put("qits.edge.sessions.browser-hosts", BROWSER_HOSTS);
     config.put("qits.edge.sessions.cache-ttl-ms", "1000");
     config.put("qits.edge.sessions.stale-grace-ms", "8000");
     // The environment vhost's own gate falls back to this GLOBAL pattern for a name none of the

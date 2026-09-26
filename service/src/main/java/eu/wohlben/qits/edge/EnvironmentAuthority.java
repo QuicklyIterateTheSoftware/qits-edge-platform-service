@@ -192,8 +192,15 @@ public record EnvironmentAuthority(String scheme, String authority, String proje
     return name;
   }
 
-  /** The {@code :8080} of a name, or an empty string when it carried none. */
-  private static String port(String host) {
+  /**
+   * The {@code :8080} of a name, or an empty string when it carried none.
+   *
+   * <p>Package-visible for the same reason as {@link #name(String)}: {@code EdgeSessions} derives
+   * the browser return authorities from the stated domain plus the canonical origin's port, and one
+   * spelling of the split is the point. A derivation that dropped the port would match nothing at
+   * all on a local clone, silently.
+   */
+  static String port(String host) {
     if (host == null) {
       return "";
     }

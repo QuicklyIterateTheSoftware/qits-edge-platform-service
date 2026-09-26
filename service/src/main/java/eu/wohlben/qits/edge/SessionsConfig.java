@@ -69,40 +69,6 @@ public interface SessionsConfig {
   String loginPath();
 
   /**
-   * Browser-facing authorities that may receive a person after login. The bootstrap supplies the
-   * apex plus its environment host in domain mode, and localhost:port locally. This is an
-   * allow-list, not a parent-domain suffix check.
-   *
-   * <p><b>An entry may be {@code *.<authority>}</b>, which matches ONE extra label in front of that
-   * authority — {@code *.dev.acme.example.com} covers {@code ci.dev.acme.example.com} and refuses
-   * {@code a.b.dev.acme.example.com}. Every service is its own browser host, so listing them here
-   * would be a second copy of the deployment's app list; the wildcard is one line that follows it.
-   * The port is part of the authority on both sides, so a name reached on another port matches
-   * nothing.
-   *
-   * <p><b>One label, and only one.</b> The editor is one shared container for the whole platform on
-   * an ordinary app vhost, {@code editor.dev.acme.example.com}, so the same wildcard covers it like
-   * any other service. {@code evil.co.dev.acme.example.com} is covered by nothing.
-   *
-   * <p><b>The names are read right to left now</b> — {@code <app>[.<env>].<project>.<domain>} — so
-   * an entry carries a project label, and a wildcard sits in front of the innermost door: {@code
-   * *.<project>.<domain>} for an env-less project's applications, {@code
-   * *.<env>.<project>.<domain>} for an env-supporting one's. A project label is live data and this
-   * list is configuration, so a deployment states the projects whose applications a person may
-   * return to; that is the whole point of an allow-list, and widening it to a parent-suffix check
-   * would accept every name any caller could invent under the domain.
-   *
-   * <p><b>The default is the names a clone serves for the platform's own project</b>, which is
-   * called {@code qits} and is a project like any other: its door, its applications either way its
-   * {@code supportsEnvironments} flag stands — {@code *.qits.localhost:8080} while it has no
-   * environments, {@code *.prod.qits.localhost:8080} while it has — and the apex, which is in the
-   * list because startup demands the canonical origin be in it.
-   */
-  @WithDefault(
-      "localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080")
-  List<String> browserHosts();
-
-  /**
    * The path prefixes served without any credential at all. {@code /idp/} wholesale, and one prefix
    * rather than a list of assets is the point: the login and register pages need their SPA files,
    * the protocol endpoints authenticate their own callers, and {@code /idp/api/*} guards itself. An

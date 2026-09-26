@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.smallrye.config.PropertiesConfigSource;
@@ -394,14 +395,22 @@ class EdgeChallengeTest {
     // here rather than left to a deployment to keep in step.
     assertEquals("qits-session", sessionDefault("cookieName"));
     assertEquals("http://localhost:8080", sessionDefault("canonicalOrigin"));
-    // The names a clone serves, which are read right to left now: every one of them is inside the
-    // platform's own project, `qits`. Both of its shapes are listed, because which one it serves is
-    // its `supportsEnvironments` flag and that is live data rather than configuration — `*.qits`
-    // while it has no environments, `*.prod.qits` while it has. The canonical origin stays in the
-    // list because startup refuses a list without it.
-    assertEquals(
-        "localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080",
-        sessionDefault("browserHosts"));
+    // The names a login may return to are not configuration at all any more: they are derived from
+    // the stated domain, which with ACME off is the canonical origin's own host. A clone therefore
+    // admits `localhost:8080` and everything the grammar can build under it, with no key to keep in
+    // step with the project set.
+    assertThrows(
+        NoSuchMethodException.class,
+        () -> SessionsConfig.class.getMethod("browserHosts"),
+        "browser-hosts is derived now and must not come back as a key");
+    // The derivation a clone gets, from the shipped canonical origin and no ACME domain.
+    String apex =
+        EdgeRouter.domain(Optional.empty(), "localhost:8080")
+            + EnvironmentAuthority.port("localhost:8080");
+    assertEquals("localhost:8080", apex);
+    assertTrue(
+        EdgeSessions.browserHost("projects.qits.localhost:8080", Set.of(apex), List.of(apex)),
+        "and it admits an application of the platform's own project without naming the project");
     assertEquals("/idp/login", sessionDefault("loginPath"));
     assertEquals("/idp/", sessionDefault("anonymousPrefixes"));
     assertEquals("30000", sessionDefault("cacheTtlMs"));
@@ -575,10 +584,12 @@ class EdgeChallengeTest {
   }
 
   @Test
-  void browserReturnHostsAreAnExplicitAuthorityAllowList() {
+  void browserReturnHostsAreAuthoritiesAndNothingElse() {
+    // Whatever a caller's Host header carries, it is read as an authority or as nothing: the
+    // matcher never sees a URL, a path, user-info or a query.
+    assertEquals("wohlben.eu", EdgeSessions.authority("WOHLBEN.eu"));
     assertEquals(
-        Set.of("wohlben.eu", "prod.wohlben.eu"),
-        EdgeSessions.browserHosts(List.of("wohlben.eu", "PROD.wohlben.eu")));
+        "ci.dev.acme.wohlben.eu:8443", EdgeSessions.authority("ci.dev.acme.wohlben.eu:8443"));
     assertNull(EdgeSessions.authority("https://evil.example"));
     assertNull(EdgeSessions.authority("evil.example/path"));
     assertNull(EdgeSessions.authority("user@evil.example"));
@@ -586,44 +597,65 @@ class EdgeChallengeTest {
   }
 
   @Test
-  void aWildcardEntryCoversExactlyOneLabel() {
-    // The whole matcher, and the reason it is not a suffix test. The names are read right to left —
-    // `<app>[.<env>].<project>.<domain>` — so a wildcard sits in front of a project's innermost
-    // door and covers that project's applications without listing them: `*.dev.acme.wohlben.eu` for
-    // an env-supporting project, `*.qits.wohlben.eu` for an env-less one.
-    Set<String> exact =
-        EdgeSessions.browserHosts(List.of("wohlben.eu", "dev.acme.wohlben.eu", "qits.wohlben.eu"));
-    List<String> wildcards =
-        EdgeSessions.wildcardBrowserHosts(
-            List.of("wohlben.eu", "*.dev.acme.wohlben.eu", "*.qits.wohlben.eu"));
+  void oneWildcardOnTheStatedDomainCoversTheWholeGrammar() {
+    // The whole matcher, and the two derived entries it is given. The names are read right to left
+    // — `<app>[.<env>].<project>.<domain>` — so the deepest legal name is THREE labels in front of
+    // the stated domain, and one wildcard anchored there covers every project and every
+    // environment with no knowledge of either. What keeps a foreign origin out is the anchor, not
+    // the label count; the bound is the grammar's own depth.
+    String apex = EdgeRouter.domain(Optional.of("wohlben.eu"), "qits.wohlben.eu");
+    assertEquals("wohlben.eu", apex);
+    Set<String> exact = Set.of(apex);
+    List<String> wildcards = List.of(apex);
 
-    assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards), "an entry");
-    assertTrue(EdgeSessions.browserHost("dev.acme.wohlben.eu", exact, wildcards), "and another");
+    assertTrue(EdgeSessions.browserHost("wohlben.eu", exact, wildcards), "the domain itself");
     assertTrue(
-        EdgeSessions.browserHost("ci.dev.acme.wohlben.eu", exact, wildcards),
-        "an app of an env-supporting project");
-    assertTrue(
-        EdgeSessions.browserHost("editor.dev.acme.wohlben.eu", exact, wildcards),
-        "the editor, an app vhost like any other");
+        EdgeSessions.browserHost("qits.wohlben.eu", exact, wildcards),
+        "ONE label: a project's own door");
     assertTrue(
         EdgeSessions.browserHost("projects.qits.wohlben.eu", exact, wildcards),
-        "an app of an env-LESS project, which carries no environment label at all");
-    // TWO labels is another site to a browser, and a return target this process must not reflect —
-    // subdomain takeover is what an open list would cost.
-    assertFalse(EdgeSessions.browserHost("evil.co.dev.acme.wohlben.eu", exact, wildcards));
+        "TWO: an env-less project's application — the live sign-in this derivation fixes");
+    assertTrue(
+        EdgeSessions.browserHost("dev.qits.wohlben.eu", exact, wildcards),
+        "TWO the other way: an environment's own door");
+    assertTrue(
+        EdgeSessions.browserHost("projects.dev.qits.wohlben.eu", exact, wildcards),
+        "THREE: an env-ful project's application, the deepest name the grammar makes");
+    assertTrue(
+        EdgeSessions.browserHost("editor.dev.gizmo.wohlben.eu", exact, wildcards),
+        "any project, without this process being told the project set");
+    // FOUR labels is a name the grammar could not have produced, so it is refused even though it
+    // is under the domain — the bound is the grammar's depth.
     assertFalse(
-        EdgeSessions.browserHost("ci.dev.qits.wohlben.eu", exact, wildcards),
-        "an environment label this list did not open is two labels in front of `qits`");
+        EdgeSessions.browserHost("a.b.c.d.wohlben.eu", exact, wildcards),
+        "four labels, not a name");
+    // A different domain is the case the anchor exists for.
     assertFalse(
-        EdgeSessions.browserHost("ci.dev.gizmo.wohlben.eu", exact, wildcards),
-        "a project nobody listed, which is the whole point of an allow-list");
-    assertFalse(EdgeSessions.browserHost("a.b.c.dev.acme.wohlben.eu", exact, wildcards), "three");
+        EdgeSessions.browserHost("projects.qits.evil.example", exact, wildcards),
+        "a foreign origin, which is the whole reason this check exists");
     assertFalse(
-        EdgeSessions.browserHost("dev.acme.wohlben.eu.evil.example", exact, wildcards),
-        "the entry is a suffix of this name and matches nothing");
+        EdgeSessions.browserHost("wohlben.eu.evil.example", exact, wildcards),
+        "the domain is a suffix of this name and it is still a different site to a browser");
     // The port is part of the authority on both sides, so a name on another port matches nothing.
-    assertFalse(EdgeSessions.browserHost("ci.dev.acme.wohlben.eu:8443", exact, wildcards));
+    assertFalse(EdgeSessions.browserHost("qits.wohlben.eu:8443", exact, wildcards));
     assertFalse(EdgeSessions.browserHost(null, exact, wildcards));
+  }
+
+  @Test
+  void theDerivationCarriesTheCanonicalOriginsPort() {
+    // A local clone serves on :8080, and the port is part of the authority on both sides — a
+    // derivation that dropped it would match nothing at all, silently.
+    String canonical = "localhost:8080";
+    String apex =
+        EdgeRouter.domain(Optional.empty(), canonical) + EnvironmentAuthority.port(canonical);
+    assertEquals("localhost:8080", apex);
+    assertTrue(EdgeSessions.browserHost(canonical, Set.of(apex), List.of(apex)), "the door itself");
+    assertTrue(
+        EdgeSessions.browserHost("projects.dev.qits.localhost:8080", Set.of(apex), List.of(apex)),
+        "and the deepest name a clone can serve");
+    assertFalse(
+        EdgeSessions.browserHost("projects.qits.localhost", Set.of(apex), List.of(apex)),
+        "portless is another authority");
   }
 
   @Test

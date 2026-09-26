@@ -89,6 +89,13 @@ public class EdgeSessions {
 
   @Inject AuthConfig authConfig;
 
+  /**
+   * The stated domain, and nothing more. Plain configuration, so injecting it here creates no cycle
+   * — where {@code HostEnvironments} or {@code EdgeRouter} would, because their own domain is built
+   * from {@link #canonicalAuthority()}.
+   */
+  @Inject AcmeConfig acme;
+
   @Inject Idp idp;
 
   @Inject Vertx vertx;
@@ -107,9 +114,10 @@ public class EdgeSessions {
    */
   private URI canonicalOrigin;
 
+  /** The one exact return authority: the stated domain on the canonical origin's port. */
   private Set<String> browserHosts;
 
-  /** The {@code *.<authority>} entries, each stored as the authority behind the wildcard. */
+  /** The one wildcard, stored as the authority behind it — the same stated domain and port. */
   private List<String> wildcardBrowserHosts;
 
   /** Cookie fingerprint to what idp said about it. Bounded and least-recently-used. */
@@ -147,14 +155,24 @@ public class EdgeSessions {
             : null;
     anonymousPrefixes = prefixes(config.anonymousPrefixes());
     canonicalOrigin = parseOrigin(config.canonicalOrigin());
-    browserHosts = browserHosts(config.browserHosts());
-    wildcardBrowserHosts = wildcardBrowserHosts(config.browserHosts());
     String canonicalAuthority = authority(canonicalOrigin.getAuthority());
-    if ((browserHosts.isEmpty() && wildcardBrowserHosts.isEmpty())
-        || canonicalAuthority == null
+    // DERIVED, not configured. The allow-list is a function of the domain this deployment states
+    // and nothing else: the domain itself, plus one wildcard in front of it. Computed once here
+    // because neither input moves after boot. See browserHost for why one wildcard is the whole
+    // grammar.
+    String apex =
+        canonicalAuthority == null
+            ? null
+            : EdgeRouter.domain(acme.domain(), canonicalAuthority)
+                + EnvironmentAuthority.port(canonicalAuthority);
+    browserHosts = apex == null ? Set.of() : Set.of(apex);
+    wildcardBrowserHosts = apex == null ? List.of() : List.of(apex);
+    if (canonicalAuthority == null
         || !browserHost(canonicalAuthority, browserHosts, wildcardBrowserHosts)) {
       throw new IllegalStateException(
-          "qits.edge.sessions.browser-hosts must include qits.edge.sessions.canonical-origin");
+          "the browser return authorities derived from the stated domain ("
+              + "qits.edge.acme.domain, or qits.edge.sessions.canonical-origin's own host while"
+              + " ACME is off) must cover qits.edge.sessions.canonical-origin");
     }
     int capacity = config.cacheSize();
     sessions =
@@ -184,7 +202,8 @@ public class EdgeSessions {
     if (config.enabled()) {
       LOG.infof(
           "browser sessions are gated here: cookie %s, login %s on the host that owns it (%s while"
-              + " none does), browser hosts %s %s, anonymous %s",
+              + " none does), browser hosts derived from the stated domain as %s and %s, anonymous"
+              + " %s",
           config.cookieName(),
           config.loginPath(),
           canonicalOrigin,
@@ -408,10 +427,11 @@ public class EdgeSessions {
    * The login page with a configured return host and the request path to come back to.
    *
    * <p>The ORIGIN is the caller's, because the page moves with its deployment. Only the return host
-   * is decided here: an authority nobody listed falls back to the door rather than being reflected.
+   * is decided here: an authority outside the stated domain falls back to the door rather than
+   * being reflected.
    *
-   * <p>Every name a person can log in from is a service's own name — one label in front of its
-   * project's innermost door — so one wildcard entry covers a project's lot. idp holds an
+   * <p>Every name a person can log in from is a name the grammar produced under this deployment's
+   * own domain, so the derived wildcard covers every project and every environment. idp holds an
    * allow-list of its own for the same value; a return host this edge sends and idp does not accept
    * has the same symptom one hop further away.
    */
@@ -441,63 +461,33 @@ public class EdgeSessions {
     return origin;
   }
 
-  /** The exact authorities, which is what most entries are. */
-  static Set<String> browserHosts(List<String> configured) {
-    java.util.LinkedHashSet<String> hosts = new java.util.LinkedHashSet<>();
-    for (String value : configured) {
-      if (wildcard(value) != null) {
-        continue;
-      }
-      String authority = authority(value);
-      if (authority != null) {
-        hosts.add(authority);
-      }
-    }
-    return Set.copyOf(hosts);
-  }
-
   /**
-   * The {@code *.<authority>} entries, each reduced to the authority behind the wildcard.
-   *
-   * <p>ONE extra label, never a suffix match. A name is read right to left — {@code
-   * <app>[.<env>].<project>.<domain>} — so an entry names a project's innermost door and the
-   * wildcard covers that project's applications without listing them: {@code
-   * *.dev.acme.example.com} for an env-supporting project, {@code *.qits.example.com} for an
-   * env-less one, the editor's own name among them either way. The app list is the deployment's,
-   * not this file's. A suffix check would also accept {@code evil.co.dev.acme.example.com}, which
-   * is a different site to a browser and a return target this process must not accept.
+   * The deepest a served name can be: {@code <app>[.<env>].<project>.<domain>} is three labels in
+   * front of the stated domain, and the grammar has nothing below an app.
    */
-  static List<String> wildcardBrowserHosts(List<String> configured) {
-    List<String> suffixes = new ArrayList<>();
-    for (String value : configured) {
-      String authority = wildcard(value);
-      if (authority != null) {
-        suffixes.add(authority);
-      }
-    }
-    return List.copyOf(suffixes);
-  }
-
-  /** The authority behind a {@code *.} entry, or null when this entry is not one. */
-  private static String wildcard(String configured) {
-    if (configured == null || !configured.strip().startsWith("*.")) {
-      return null;
-    }
-    return authority(configured.strip().substring(2));
-  }
+  static final int WILDCARD_LABELS = 3;
 
   /**
    * Whether this authority may receive a person after login: an exact entry, or a wildcard entry's
-   * authority with EXACTLY ONE label in front of it. The port is part of the authority on both
-   * sides, so a name on another port matches nothing.
+   * authority with one, two or three labels in front of it. The port is part of the authority on
+   * both sides, so a name on another port matches nothing.
    *
-   * <p><b>One label in front, and only one.</b> {@code *.dev.acme.example.com} covers {@code
-   * ci.dev.acme.example.com} and every other application of that project in that environment, the
-   * editor included — it is an ordinary app vhost at {@code editor.dev.acme.example.com}. The check
-   * is a match rather than a suffix test, so {@code evil.co.dev.acme.example.com} is a different
-   * site to a browser and matches nothing, and a project nobody listed is not opened by a listed
-   * one. The apex comes from this list, so no {@code Host} header a caller invents can name a
-   * return target under a domain the deployment did not configure.
+   * <p><b>The security property is the domain anchor, not the label count.</b> This check exists to
+   * stop a login returning to a FOREIGN origin, and the wildcard's authority is the domain this
+   * deployment states — its own. Every name admitted is therefore under that domain, whoever the
+   * project is and whatever the environment: {@code qits.wohlben.eu} (a project's door, one label),
+   * {@code projects.qits.wohlben.eu} (an env-less project's application, two), {@code
+   * dev.qits.wohlben.eu} (an environment's door, two) and {@code projects.dev.qits.wohlben.eu} (an
+   * env-ful project's application, three). One wildcard covers the whole grammar with no knowledge
+   * of the live project set, which is why there is nothing here to keep in step and nothing to
+   * configure.
+   *
+   * <p><b>The depth is bounded at three anyway</b>, at the grammar's own depth, rather than being
+   * relaxed to a suffix test. It buys no anchoring the domain does not already give, but it keeps a
+   * return host a name the grammar could have produced, and a suffix test would additionally accept
+   * {@code wohlben.eu.evil.example}, which is a different site to a browser. qits-idp's {@code
+   * BrowserSso} does exactly this with {@code WILDCARD_LABELS = 2} and states the same reason; this
+   * goes one label deeper because the edge serves the app tier idp does not.
    *
    * <p>Package-private and static so the matrix can be asserted without booting anything.
    */
@@ -516,7 +506,13 @@ public class EdgeSessions {
       if (leading.isEmpty()) {
         continue;
       }
-      if (leading.indexOf('.') < 0) {
+      int labels = 1;
+      for (int i = 0; i < leading.length(); i++) {
+        if (leading.charAt(i) == '.') {
+          labels++;
+        }
+      }
+      if (labels <= WILDCARD_LABELS) {
         return true;
       }
     }

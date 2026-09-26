@@ -359,9 +359,8 @@ a file.
 | `qits.edge.auth.idp-call-timeout-ms` | `QITS_EDGE_AUTH_IDP_CALL_TIMEOUT_MS` | `5000` | How long ONE call to idp may take, connection included — **what makes an answer certain** |
 | `qits.edge.sessions.enabled` | `QITS_EDGE_SESSIONS_ENABLED` | `false` | Whether a browser needs a session on a service vhost — **the rollout flag** |
 | `qits.edge.sessions.cookie-name` | `QITS_EDGE_SESSIONS_COOKIE_NAME` | `qits-session` | The cookie idp sets and this process reads |
-| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | A **door**, and the one name a deployment always states: what a name inside no project falls back to (read by the same right-to-left grammar, so naming a project's door is what lets the apex compose application names), the stated domain while ACME is off, and the login origin's fallback |
+| `qits.edge.sessions.canonical-origin` | `QITS_EDGE_SESSIONS_CANONICAL_ORIGIN` | `http://localhost:8080` | A **door**, and the one name a deployment always states: what a name inside no project falls back to (read by the same right-to-left grammar, so naming a project's door is what lets the apex compose application names), the stated domain while ACME is off, the login origin's fallback, and — with `qits.edge.acme.domain` — what the browser return authorities are **derived** from, since there is no list to configure any more |
 | `qits.edge.sessions.login-path` | `QITS_EDGE_SESSIONS_LOGIN_PATH` | `/idp/login` | Where a navigation with no session is sent — on the host of whichever deployment owns this route |
-| `qits.edge.sessions.browser-hosts` | `QITS_EDGE_SESSIONS_BROWSER_HOSTS` | `localhost:8080,qits.localhost:8080,*.qits.localhost:8080,*.prod.qits.localhost:8080` | Browser return authorities, defaulting to the names a clone serves for the platform's own project `qits` — both its shapes, because `supportsEnvironments` is live data. An entry may be `*.<authority>`, which matches ONE extra label and only one — `*.dev.acme.example.com` covers every application of that project in that environment, the editor's `editor.dev.acme.example.com` among them. It refuses `evil.co.dev.acme.example.com`, and a project nobody listed |
 | `qits.edge.sessions.anonymous-prefixes` | `QITS_EDGE_SESSIONS_ANONYMOUS_PREFIXES` | `/idp/` | Path prefixes served with no credential at all — on the owning service's own host, nowhere else |
 | `qits.edge.sessions.cache-ttl-ms` | `QITS_EDGE_SESSIONS_CACHE_TTL_MS` | `30000` | How long an introspected session is believed — and how long a logout lingers |
 | `qits.edge.sessions.cache-size` | `QITS_EDGE_SESSIONS_CACHE_SIZE` | `1024` | The most sessions held at once, least-recently-used |
@@ -544,14 +543,18 @@ is the fallback while no deployment has published a host for the login path. idp
 service deployed once, so an environment that owns no route for the path asks the default
 environment before falling back.
 
-**The return host is the name the person was on**, when the allow-list covers it. That list is what
-stops the platform's own login becoming a redirector for somebody else's site, so it is a match and
-never a suffix test — and the project tier needed it widened by exactly one label: `*.<env>.<domain>`
-now also covers `<app>.<project>.<env>.<domain>` while that project exists, and covers nothing else
-of that depth. A name it does not cover falls back to the door, which is a person landing somewhere
-they did not ask for; that is the symptom to look for if the **idp's** own
-`QITS_IDP_BROWSER_SSO_BROWSER_HOSTS` has not learnt the same shape, because it validates the same
-value one hop later.
+**The return host is the name the person was on**, when it is a name under the stated domain. That
+check is what stops the platform's own login becoming a redirector for somebody else's site, and it
+is **derived rather than configured**: the domain itself, plus one wildcard in front of it admitting
+up to three labels — `<app>[.<env>].<project>.<domain>` is the deepest the grammar goes. One
+wildcard therefore covers every project and every environment, and there is no key to fall behind
+the project set. The security property is the **domain anchor**, not the label count: every name it
+admits is under the domain this deployment states, which is its own. The depth is bounded at the
+grammar's own depth anyway, so a return host is still a name the grammar could have produced and a
+suffix test's `<domain>.evil.example` is refused. A name outside all of that falls back to the door,
+which is a person landing somewhere they did not ask for; that is the symptom to look for if the
+**idp's** own `QITS_IDP_BROWSER_SSO_BROWSER_HOSTS` has not learnt the same shape, because it
+validates the same value one hop later.
 
 ### A service's own name, gated per request
 
